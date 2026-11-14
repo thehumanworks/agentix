@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }:
+{ config, lib, pkgs, op, ... }:
 
 {
   programs.claude-code = {
@@ -82,7 +82,7 @@
       name = "claude";
       text = builtins.replaceStrings
         [ "@op@" "@claude@" ]
-        [ "${pkgs._1password-cli}/bin/op" "${pkgs.claude-code}/bin/claude" ]
+        [ "${op}/bin/op" "${pkgs.claude-code}/bin/claude" ]
         (builtins.readFile ./scripts/claude.sh);
     }).overrideAttrs {
       version = pkgs.claude-code.version;

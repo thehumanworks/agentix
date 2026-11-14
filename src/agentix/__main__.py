@@ -8,9 +8,17 @@ def _build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
     return {"image_id": image.object_id}
 
 def _create_sandbox(
-    image_name: str = IMAGE_NAME, secret_name: str = "1password", timeout: int = 3600
+    image_name: str = IMAGE_NAME,
+    secret_name: str = "1password",
+    timeout: int = 3600,
+    workdir: str = "",
 ):
-    sb = create_sandbox(image_name=image_name, secret_name=secret_name, timeout=timeout)
+    sb = create_sandbox(
+        image_name=image_name,
+        secret_name=secret_name,
+        timeout=timeout,
+        workdir=workdir,
+    )
     return {"sandbox_id": sb.object_id}
 
 

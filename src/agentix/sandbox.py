@@ -5,10 +5,30 @@ import modal
 from .image import IMAGE_NAME
 from .shared import get_app
 
+# Modal gives the token only to the processes it starts. SSH sessions do not
+# have it, so the image's `op` wrapper reads it from this root-only file.
+# Keep the path in step with nix/home-manager/modules/scripts/op.sh.
+OP_TOKEN_FILE = "/run/agentix/op-token"
+_STORE_OP_TOKEN = f"""set -eu
+umask 077
+mkdir -p "$(dirname {OP_TOKEN_FILE})"
+printf %s "$OP_SERVICE_ACCOUNT_TOKEN" > {OP_TOKEN_FILE}
+"""
+
+WORKDIR_FILE = "/run/agentix/workdir"
+_STORE_WORKDIR = f"""set -eu
+mkdir -p "$(dirname {WORKDIR_FILE})"
+printf '%s\\n' "$1" > {WORKDIR_FILE}
+"""
+
 
 def create_sandbox(
-    image_name: str = IMAGE_NAME, secret_name: str = "1password", timeout: int = 3600
+    image_name: str = IMAGE_NAME,
+    secret_name: str = "1password",
+    timeout: int = 3600,
+    workdir: str = "",
 ):
+    """Start a sandbox in the image's working directory, or in `workdir` if given."""
     sb = modal.Sandbox.create(
         app=get_app(),
         image=modal.Image.from_name(image_name),
@@ -21,9 +41,24 @@ def create_sandbox(
         if secret_name
         else [],
         timeout=timeout,
+        workdir=workdir or None,
         runtime="vm",
         unencrypted_ports=[22],
     )
+    if secret_name:
+        p = sb.exec("sh", "-c", _STORE_OP_TOKEN)
+        if p.wait() != 0:
+            error = p.stderr.read()
+            sb.terminate()
+            raise RuntimeError(f"Failed to store the 1Password token: {error}")
+    if workdir:
+        # SSH logins read this to start in the override instead of /workdir.
+        # Keep the path in step with scripts/workdir-profile.sh.
+        p = sb.exec("sh", "-c", _STORE_WORKDIR, "sh", workdir)
+        if p.wait() != 0:
+            error = p.stderr.read()
+            sb.terminate()
+            raise RuntimeError(f"Failed to record the working directory: {error}")
     return sb
 
 def list_sandboxes() -> list[str]:

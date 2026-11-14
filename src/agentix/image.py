@@ -7,6 +7,9 @@ from .shared import get_app
 IMAGE_NAME = "determinate-nix:latest"
 NIX_DIR = Path(__file__).resolve().parents[2] / "nix"
 HOME_CONFIG = "/root/.config/home-manager"
+# Default working directory of sandboxes. The Home Manager profile marks this
+# path as trusted for Claude; keep nix/home-manager/modules/claude-code.nix in sync.
+WORKDIR = "/workdir"
 
 
 def _ensure_lockfile(image: modal.Image):
@@ -71,7 +74,16 @@ def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
             'ENV PATH="/root/.nix-profile/bin:${PATH}"',
             'ENV EDITOR="nvim" VISUAL="nvim"',
         )
+        image = image.run_commands(f"mkdir -p {WORKDIR}")
+        image = image.workdir(WORKDIR)
+        # SSH login shells start in $HOME; this moves them to the working directory.
+        image = image.add_local_file(
+            Path(__file__).with_name("scripts") / "workdir-profile.sh",
+            "/etc/profile.d/agentix-workdir.sh",
+            copy=True,
+        )
         image = image.run_commands(
+            f'test "$PWD" = {WORKDIR}',
             "home-manager --version",
             "nvim --headless '+lua assert(vim.lsp.config.ty)' +qa",
             "op --version && git --version && uv --version && bun --version",

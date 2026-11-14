@@ -1,4 +1,4 @@
-{ lib, pkgs, ... }:
+{ lib, pkgs, op, ... }:
 
 {
   # Sandbox service only. Keep the Mac's native Tailscale app in charge there.
@@ -9,7 +9,7 @@
       name = "ts";
       runtimeInputs = [
         pkgs.tailscale
-        pkgs._1password-cli
+        op
         pkgs.coreutils
         pkgs.util-linux
         pkgs.jq

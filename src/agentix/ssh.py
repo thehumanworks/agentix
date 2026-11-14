@@ -75,9 +75,7 @@ def _manage(
         result = _run(sb, engine, action, hostname)
         host = result.get("magicdns") or result.get("ipv4")
         if host:
-            result["ssh_command"] = shlex.join(
-                ["ssh", "-o", "SendEnv=OP_SERVICE_ACCOUNT_TOKEN", f"root@{host}"]
-            )
+            result["ssh_command"] = shlex.join(["ssh", f"root@{host}"])
     else:
         tunnel = sb.tunnels().get(22)
         if tunnel is None and action == "start":
@@ -93,16 +91,7 @@ def _manage(
                 host=host,
                 port=port,
                 user="root",
-                ssh_command=shlex.join(
-                    [
-                        "ssh",
-                        "-o",
-                        "SendEnv=OP_SERVICE_ACCOUNT_TOKEN",
-                        "-p",
-                        str(port),
-                        f"root@{host}",
-                    ]
-                ),
+                ssh_command=shlex.join(["ssh", "-p", str(port), f"root@{host}"]),
             )
     return {"sandbox_id": sandbox_id, "engine": engine, **result}
 

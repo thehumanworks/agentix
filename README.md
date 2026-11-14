@@ -20,6 +20,11 @@ New sandboxes receive the Modal secret `1password`, which must contain
 `--secret-name=NAME` to select another secret, or `--secret-name=''` to omit it.
 Sandboxes default to a one-hour lifetime; change it with `--timeout=SECONDS`.
 
+The image creates `/workdir` and sets it as its working directory, so commands
+run with `sandbox exec` and SSH logins start there. Claude already trusts `/workdir` and
+`/root`. Use `--workdir=PATH` to start a sandbox in another absolute path; Claude
+asks before trusting a directory outside those two.
+
 Use the returned sandbox ID:
 
 ```sh
@@ -68,24 +73,26 @@ already connected OpenSSH sessions can finish. Each engine is managed separately
 so stopping one does not stop the other. OpenSSH state and logs are stored in
 `/root/.local/state/agentix/openssh` inside the sandbox.
 
-Both engines return an `ssh_command` with `SendEnv=OP_SERVICE_ACCOUNT_TOKEN`.
-If this variable is exported in your local shell, SSH sends it over the encrypted
-connection. OpenSSH accepts this variable explicitly. Restart an existing
-OpenSSH listener with `ssh stop` followed by `ssh start` to apply the setting.
-No image rebuild is required.
+1Password works in every session of a sandbox without extra flags. Modal gives
+`OP_SERVICE_ACCOUNT_TOKEN` only to the processes it starts, such as
+`sandbox exec` and `modal shell sb-REPLACE`. SSH sessions do not inherit it, so
+`sandbox up` also stores the token in `/run/agentix/op-token`, which only root
+can read and which is held in memory, not on disk. The `op` command in the image
+loads that file when the variable is not set, and `claude`, `gh`, `gh-lf`, and
+`ts` call the same `op`. Run the returned `ssh_command` as it is.
 
-Tailscale SSH uses the tailnet policy instead of `sshd_config`. Add this field
-to the applicable existing SSH rule before using token forwarding with Tailscale:
+Anyone who can open a root session in the sandbox can use the token. Sandboxes
+created before this change, and sandboxes started with `--secret-name=''`, have
+no token file. A container started directly from the image, for example with
+`modal shell --image`, has none either; pass `--secret 1password` there.
 
-```json
-"acceptEnv": ["OP_SERVICE_ACCOUNT_TOKEN"]
-```
-
-This is client-to-server forwarding. It does not make the token injected by
-Modal available automatically in SSH sessions. Token values are not written
-to the server configuration or included in the printed command.
-See the [OpenSSH client documentation](https://man.openbsd.org/ssh_config#SendEnv)
-and [Tailscale SSH policy documentation](https://tailscale.com/kb/1193/tailscale-ssh#acceptenv).
+An exported `OP_SERVICE_ACCOUNT_TOKEN` takes precedence over the file. To use a
+different token for one OpenSSH session, export it locally and add
+`-o SendEnv=OP_SERVICE_ACCOUNT_TOKEN`; the listener accepts that variable.
+Tailscale SSH needs `"acceptEnv": ["OP_SERVICE_ACCOUNT_TOKEN"]` in the tailnet
+SSH rule for the same override. See the
+[OpenSSH client documentation](https://man.openbsd.org/ssh_config#SendEnv) and
+[Tailscale SSH policy documentation](https://tailscale.com/kb/1193/tailscale-ssh#acceptenv).
 
 Rebuild after editing the Nix configuration. Use `image build --force-build`
 only when an uncached build is needed. Modal's image-layer cache is used now;

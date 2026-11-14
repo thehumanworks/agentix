@@ -55,7 +55,8 @@ Subsystem sftp internal-sftp
 EOF
       sshd=$(command -v sshd)
       "$sshd" -t -f "$config"
-      # Do not expose injected credentials or shell hooks to SSH sessions.
+      # Keep this shell's environment and hooks out of SSH sessions. They get
+      # the 1Password token from the op wrapper's token file instead.
       env -i PATH="$PATH" HOME=/root USER=root LOGNAME=root \
         "$sshd" -f "$config" -E "$runtime/sshd.log" 9>&-
       for ((attempt=0; attempt<50; attempt++)); do

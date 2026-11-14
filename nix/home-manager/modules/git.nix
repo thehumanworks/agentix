@@ -1,4 +1,4 @@
-{ pkgs, ... }:
+{ pkgs, op, ... }:
 
 let
   # Each command resolves its host and token. op must already be authenticated.
@@ -9,7 +9,7 @@ let
         export GH_HOST="${host}"
         export GH_TOKEN="${token}"
         export GH_NO_UPDATE_NOTIFIER=1
-        exec ${pkgs._1password-cli}/bin/op run -- ${pkgs.gh}/bin/gh "$@"
+        exec ${op}/bin/op run -- ${pkgs.gh}/bin/gh "$@"
       '';
     };
 

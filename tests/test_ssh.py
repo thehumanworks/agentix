@@ -91,7 +91,7 @@ class SSHTests(unittest.TestCase):
         self.assertEqual(self.lookup.return_value.exec.call_args.args[-2], "status")
         self.assertEqual(
             result["ssh_command"],
-            "ssh -o SendEnv=OP_SERVICE_ACCOUNT_TOKEN -p 12345 root@example.modal.host",
+            "ssh -p 12345 root@example.modal.host",
         )
 
     def test_openssh_starts_with_public_key_after_status_check(self):
