@@ -118,7 +118,8 @@ flakes only include files known to Git. Intel Macs are not supported.
 
 Run `nix flake update` in this directory, in a sandbox, to refresh the pinned
 dependencies. Copy the new `flake.lock` back to the checkout, commit it, and
-rebuild the image. Keep `home.stateVersion` unchanged unless deliberately
+rebuild the image. To move only the Claude plugin marketplace to its newest
+commit, run `nix flake update claude-mods` instead. Keep `home.stateVersion` unchanged unless deliberately
 migrating its compatibility settings. The Nix version itself is pinned by
 `NIX_INSTALLER` in `src/agentix/image.py`.
 

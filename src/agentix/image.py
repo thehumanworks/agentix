@@ -128,6 +128,11 @@ def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
             "test -s /root/.claude/skills/claude-code-home-manager/.lsp.json",
             "jq -e '.permissions.deny | index(\"Read(//run/agentix/op-token)\")' "
             "/root/.claude/settings.json > /dev/null",
+            # The pinned plugin marketplace must survive the store collection.
+            'test -s "$(jq -r \'.extraKnownMarketplaces["claude-mods"].source.path\' '
+            '/root/.claude/settings.json)/.claude-plugin/marketplace.json"',
+            "jq -e '.[\"claude-mods\"].lastUpdated' "
+            "/root/.claude/plugins/known_marketplaces.json > /dev/null",
             "nix registry list | grep -q '^user  *flake:nixpkgs '",
         )
         image = image.build(app=get_app())

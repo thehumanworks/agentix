@@ -1,5 +1,6 @@
 {
   config,
+  inputs,
   lib,
   pkgs,
   ...
@@ -31,7 +32,15 @@ in
     enable = true;
     # Let Claude save interactive preferences; declared values win on activation.
     mutableSettings = true;
+    # The flake input pins the commit, so the image holds the plugins and
+    # Claude loads them from the store without an install step. The name must
+    # match the one in the repository's marketplace.json.
+    marketplaces.claude-mods = inputs.claude-mods.outPath;
     settings = {
+      enabledPlugins = {
+        "async-compaction@claude-mods" = true;
+        "turn-stats@claude-mods" = true;
+      };
       advisorModel = "fable";
       attribution = false;
       autoCompactEnabled = true;

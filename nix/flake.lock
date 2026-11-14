@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "claude-mods": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1794683525,
+        "narHash": "sha256-6cc5xM1bclRNPpcFYbyqTrdT2uisbz7EA1GbIbqB5bw=",
+        "owner": "thehumanworks",
+        "repo": "claude-mods",
+        "rev": "ab1e2969332895a46c27185d236376e29f907a10",
+        "type": "github"
+      },
+      "original": {
+        "owner": "thehumanworks",
+        "repo": "claude-mods",
+        "type": "github"
+      }
+    },
     "flake-parts": {
       "inputs": {
         "nixpkgs-lib": [
@@ -82,6 +98,7 @@
     },
     "root": {
       "inputs": {
+        "claude-mods": "claude-mods",
         "home-manager": "home-manager",
         "nixpkgs": "nixpkgs",
         "nixvim": "nixvim"

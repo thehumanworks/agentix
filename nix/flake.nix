@@ -14,6 +14,12 @@
       url = "github:nix-community/nixvim";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Claude Code plugin marketplace. Not a flake, only a source tree. Move to
+    # its newest commit with `nix flake update claude-mods`.
+    claude-mods = {
+      url = "github:thehumanworks/claude-mods";
+      flake = false;
+    };
   };
 
   outputs =
