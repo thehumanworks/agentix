@@ -12,6 +12,7 @@
     ./identity.nix
     ../modules/sandbox/claude.nix
     ../modules/sandbox/op-token.nix
+    ../modules/sandbox/rex.nix
     ../modules/sandbox/tailscale.nix
   ];
 

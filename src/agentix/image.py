@@ -16,7 +16,7 @@ NIX_INSTALLER = "https://install.determinate.systems/nix/tag/v3.24.2"
 WORKDIR = "/workdir"
 # Commands the image must provide. The build fails if one is missing.
 REQUIRED_COMMANDS = (
-    "claude gh gh-lf op ts herdr nvim home-manager direnv "
+    "claude gh gh-lf op ts herdr rex nvim home-manager direnv "
     "git rg fd fzf jq yq ast-grep sqlite3 curl rsync dig zip unzip zstd make just "
     "python3 uv bun node ruff ty shellcheck shfmt nixfmt statix deadnix "
     "typescript-language-server bash-language-server nixd ps strace"
@@ -119,6 +119,15 @@ def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
             "jq -e '.[\"claude-mods\"].lastUpdated' "
             "/root/.claude/plugins/known_marketplaces.json > /dev/null",
             "nix registry list | grep -q '^user  *flake:nixpkgs '",
+            # The patched rex binary starts, its terminfo entry resolves, and
+            # the ssh guard is in ~/.ssh/config. None of these starts a server.
+            "rex version > /dev/null",
+            "infocmp xterm-rex > /dev/null",
+            "env TERM=xterm-rex ssh -G example.invalid "
+            "| grep -qx 'setenv TERM=xterm-256color'",
+            # Each sandbox's rex server makes its own state, including its host
+            # ID; none may be baked into the image.
+            "test ! -e /root/.local/state/rex",
         )
         image = image.build(app=get_app())
         image.publish(name=image_name)

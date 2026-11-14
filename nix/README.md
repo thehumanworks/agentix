@@ -17,7 +17,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | `home-manager/home.nix` | Modules every profile shares |
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, and what only that machine needs. `identity.nix` holds the Git name and emails |
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor |
-| `home-manager/modules/sandbox/` | Modules only the sandbox profile imports: Tailscale, the 1Password token file, Claude's sandbox brief |
+| `home-manager/modules/sandbox/` | Modules only the sandbox profile imports: Tailscale, Rex, the 1Password token file, Claude's sandbox brief |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
 
 To add a tool everywhere, add it to `modules/tools.nix`. To add it to
@@ -51,6 +51,8 @@ nixpkgs revision, including the editor, so a package appears in the image once.
   commands it runs do not inherit it and get secrets through `op`. A rule also
   stops Claude reading the token file. The commands still run as root, so this
   prevents accidental exposure and is not a security boundary.
+- Rex, the terminal multiplexer, with its terminfo entry and ssh guard. See
+  [Rex in sandboxes](#rex-in-sandboxes).
 
 ## Checks and formatting
 
@@ -182,6 +184,46 @@ connection.
 This repository does not yet mount a persistent Modal volume or invoke this
 command at sandbox boot; those are required for automatic recovery across
 sandbox replacement.
+
+## Rex in sandboxes
+
+`modules/sandbox/rex.nix` sets up Rex with the Home Manager module from Rex's
+own flake, as on the nixos box: the `rex` command, the `xterm-rex` terminfo
+entry in `~/.terminfo`, and Rex's ssh guard in `~/.ssh/config`, which Home
+Manager now writes for root. The flake input follows the snapshot channel and
+this flake's nixpkgs. The flake and the release binary download without
+credentials, so the image build needs no secret. Move to the newest snapshot
+with `uv run agentix flake update rex`, then rebuild. The Mac profile does not
+import the module; the Rex app installs `rex` and runs the server there.
+
+The nixos box runs its server as a systemd user service with its own Tailscale
+node. A sandbox has no systemd, so nothing starts at boot. The first `rex`
+command starts a server in the background instead. It keeps its sessions
+across `sandbox exec` calls and SSH logins, which all reach the same socket in
+`~/.local/state/rex/run`, and it exits when its last session closes. For a
+server that stays until the sandbox ends, run:
+
+```sh
+rex server start
+```
+
+The server does not inherit the 1Password token, so programs in its terminals
+get secrets through `op`, as Claude's commands do. Terminals use
+`TERM=xterm-rex`; ssh from one sends `xterm-256color` to any host not listed in
+`~/.config/rex/terminfo-hosts`.
+
+From another machine, reach the server over SSH once the sandbox has an SSH
+listener (see the [project README](../README.md)):
+
+```sh
+rex -S ssh://root@HOSTNAME ls
+```
+
+Rex's own Tailscale node is not enabled: it would enroll a second tailnet
+device per sandbox, and the sandbox already has one for SSH. To add it, start
+the server with `rex server start --tailscale --tailscale-hostname NAME` and
+pass an auth key with `--tailscale-auth-key-file`, from the sandbox startup
+process.
 
 ## Editor: Bun, Python scripts, and Bash
 

@@ -7,6 +7,10 @@
 
 let
   # Each command resolves its host and token. op must already be authenticated.
+  #
+  # op run replaces a secret in the child's output with a placeholder. Git
+  # reads the token from the output of `gh auth git-credential`, so that one
+  # command runs unmasked; in any other output the token stays concealed.
   mkGh =
     name: host: token:
     pkgs.writeShellApplication {
@@ -15,7 +19,11 @@ let
         export GH_HOST="${host}"
         export GH_TOKEN="${token}"
         export GH_NO_UPDATE_NOTIFIER=1
-        exec ${lib.getExe config.agentix.op.package} run -- ${lib.getExe pkgs.gh} "$@"
+        op_run=(${lib.getExe config.agentix.op.package} run)
+        if [[ ''${1:-} == auth && ''${2:-} == git-credential ]]; then
+          op_run+=(--no-masking)
+        fi
+        exec "''${op_run[@]}" -- ${lib.getExe pkgs.gh} "$@"
       '';
     };
 

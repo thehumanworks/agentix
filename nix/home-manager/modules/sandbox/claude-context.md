@@ -18,6 +18,8 @@ sandbox ends, so push or hand back anything that must survive.
 - Installed for checks: `ruff`, `ty`, `shellcheck`, `shfmt`, `nixfmt`, `statix`,
   `deadnix`, `ast-grep`. Language servers for Python, TypeScript, Bash, and Nix
   back the LSP tool.
+- `rex` is the terminal multiplexer. `rex skill show` explains how to drive it;
+  the first command starts its server.
 - A project with an `.envrc` or `flake.nix`: run `direnv allow` once, then
   `direnv exec . COMMAND`. Your shell is not interactive, so the direnv hook
   does not load the environment for you.
