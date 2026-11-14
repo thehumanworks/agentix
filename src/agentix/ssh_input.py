@@ -20,6 +20,17 @@ def check_arguments(engine: str, hostname: str = "", public_key: str = "") -> No
         raise InvalidRequest("--hostname is only used by the tailscale engine.")
 
 
+def check_tailscale_start(tailscale: bool, hostname: str, secret_name: str) -> None:
+    """Checks on `--tailscale` for a new sandbox, made before it is created."""
+    if hostname and not tailscale:
+        raise InvalidRequest("--hostname is only used with --tailscale.")
+    if tailscale and not secret_name:
+        raise InvalidRequest(
+            "--tailscale needs the 1Password secret: a new sandbox enrolls with "
+            "a key from 1Password. Drop --secret-name='' to use the default."
+        )
+
+
 def check_public_key(key: str, source: str = "the given key") -> str:
     """Return `key` if it is one SSH public key. `source` names it in errors."""
     key = key.strip()

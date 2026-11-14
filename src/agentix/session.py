@@ -1,9 +1,9 @@
 """Modal state that is slow to build and safe to reuse.
 
 Most of the time of a short operation goes to setup: the connection to Modal,
-the app lookup, and, for each sandbox, a lookup plus a separate connection to
-its command router. A `Session` builds each of these once and shares it between
-all later operations.
+the app lookup, the lookup of the name store, and, for each sandbox, a lookup
+plus a separate connection to its command router. A `Session` builds each of
+these once and shares it between all later operations.
 """
 
 import asyncio
@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Hashable
 
 import modal
 
-from .defaults import APP_NAME
+from .defaults import APP_NAME, STORE_NAME
 from .errors import AgentixError, InvalidRequest, NotFound, OperationFailed
 
 
@@ -21,6 +21,7 @@ class Session:
     def __init__(self, max_sandboxes: int = 128):
         """Keep at most `max_sandboxes` sandbox handles open."""
         self._app: dict[str, asyncio.Future[modal.App]] = {}
+        self._store: dict[str, asyncio.Future[modal.Dict]] = {}
         self._sandboxes: OrderedDict[str, asyncio.Future[modal.Sandbox]] = OrderedDict()
         self._max_sandboxes = max_sandboxes
         self._background: set[asyncio.Task] = set()
@@ -31,6 +32,10 @@ class Session:
             APP_NAME,
             lambda: modal.App.lookup.aio(name=APP_NAME, create_if_missing=True),
         )
+
+    async def store(self) -> modal.Dict:
+        """The Dict that records named sandboxes. See `store.py`."""
+        return await _shared(self._store, STORE_NAME, _open_store)
 
     @contextlib.asynccontextmanager
     async def sandbox(self, sandbox_id: str) -> AsyncIterator[modal.Sandbox]:
@@ -103,6 +108,12 @@ async def _shared[K: Hashable, V](
         if failed and cache.get(key) is pending:
             del cache[key]
         raise
+
+
+async def _open_store() -> modal.Dict:
+    handle = modal.Dict.from_name(STORE_NAME, create_if_missing=True)
+    await handle.hydrate.aio()
+    return handle
 
 
 async def _release(pending: asyncio.Future[modal.Sandbox]) -> None:
