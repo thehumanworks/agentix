@@ -82,7 +82,7 @@ in
         CLAUDE_CODE_PROMPT_SUGGESTION_ENABLED = "true";
         CLAUDE_CODE_ENABLE_TASKS = "1";
         CLAUDE_CODE_ENABLE_TODO_TOOLS = "1";
-        CLAUDE_CODE_EXPERIMENTAL_CODE_MODE = "1";
+        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
         CLAUDE_CODE_FORWARD_SUBAGENT_TEXT = "1";
 
         # concurrency & subagent limits

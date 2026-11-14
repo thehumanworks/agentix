@@ -49,9 +49,19 @@ uv run agentix sandbox down sb-REPLACE
 ```
 
 `sandbox ssh start` defaults to `--engine=tailscale` and prints `magicdns` and
-`ipv4`. You can also pass the sandbox ID as `--sandbox-id=sb-REPLACE` and choose
-an initial name with `--hostname=agentix-dev`. If SSH is already running, start
-returns the existing address without changing the name or restarting it.
+`ipv4`. The default Tailscale hostname is the full sandbox ID in lowercase,
+so concurrent and replacement sandboxes have distinct SSH hostnames. You can
+also pass the sandbox ID as `--sandbox-id=sb-REPLACE` and override the name with
+`--hostname=agentix-dev`. Each start applies the requested name (or the sandbox
+ID when omitted), including when Tailscale is already running. Use distinct
+custom names for distinct sandboxes.
+
+For an existing sandbox named `modal`, rerun `sandbox ssh start SANDBOX_ID`
+and use the new returned `ssh_command`. This renames its existing Tailscale
+node without replacing its identity or host keys. The old `modal` entry in
+your SSH known-hosts file can remain; the new name avoids that collision and
+keeps SSH host-key checking enabled.
+
 `sandbox ssh stop` disables SSH but keeps Tailscale connected and retains its
 identity. Starting again re-enables SSH. These commands run from your computer;
 no image rebuild is needed for an image that already includes the `ts` wrapper.

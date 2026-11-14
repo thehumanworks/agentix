@@ -54,6 +54,9 @@ async def manage(
 ) -> dict[str, Any]:
     """Run `action` (start, stop or status) for one SSH engine of a sandbox.
 
+    Tailscale names default to the lowercase sandbox ID on start. Explicit
+    hostnames also apply when Tailscale is already running.
+
     `public_key` is the text of the key, not a path. The openssh engine uses it
     only when it starts a listener; a listener that already runs keeps its key.
     """
@@ -63,6 +66,9 @@ async def manage(
         public_key = await asyncio.to_thread(check_public_key, public_key)
     async with session.sandbox(sandbox_id) as handle:
         if engine == "tailscale":
+            # Container hostnames are shared; use a distinct name per sandbox.
+            if action == "start":
+                hostname = hostname or handle.object_id.lower()
             result = await _run(handle, engine, action, hostname)
             host = result.get("magicdns") or result.get("ipv4")
             if host:

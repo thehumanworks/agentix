@@ -15,6 +15,7 @@ TUNNEL = {22: Mock(tcp_socket=("example.modal.host", 12345))}
 class SSHTests(ModalTestCase):
     def setUp(self):
         super().setUp()
+        self.sandbox.object_id = "sb-01M7DN105MG5PTYJHDWFFWCH54"
         self.process = self.sandbox.process
         self.process.stdout.read.aio.return_value = json.dumps(
             {
@@ -36,7 +37,18 @@ class SSHTests(ModalTestCase):
         self.lookup.aio.assert_called_once_with(sandbox_id="sb-test")
         self.assertIn("sandbox.test.ts.net", output)
         self.assertIn("100.64.0.1", output)
-        self.assertEqual(self.sandbox.exec.aio.call_args.args[-2:], ("start", ""))
+        self.assertEqual(
+            self.sandbox.exec.aio.call_args.args[-2:],
+            ("start", "sb-01m7dn105mg5ptyjhdwffwch54"),
+        )
+
+    def test_distinct_sandboxes_get_distinct_stable_names(self):
+        for sandbox_id in ("sb-FIRST", "sb-SECOND", "sb-FIRST"):
+            self.sandbox.object_id = sandbox_id
+            self.run_core(ssh.manage, "start", sandbox_id)
+            self.assertEqual(
+                self.sandbox.exec.aio.call_args.args[-1], sandbox_id.lower()
+            )
 
     def test_hostname_is_a_separate_argument(self):
         hostname = "literal; $(echo unsafe)"
@@ -67,7 +79,9 @@ class SSHTests(ModalTestCase):
             with self.subTest(action=action):
                 result = self.manage(action)
                 self.assertEqual(result["status"], "stopped")
-                self.assertEqual(self.sandbox.exec.aio.call_args.args[-2], action)
+                self.assertEqual(
+                    self.sandbox.exec.aio.call_args.args[-2:], (action, "")
+                )
 
     def test_openssh_start_is_one_command_that_carries_the_key(self):
         self.sandbox.tunnels.aio.return_value = TUNNEL

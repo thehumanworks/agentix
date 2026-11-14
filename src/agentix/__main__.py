@@ -59,7 +59,10 @@ def _list_sandboxes():
 def _ssh_start(
     sandbox_id: str, engine: str = "tailscale", hostname: str = "", public_key: str = ""
 ):
-    """Start SSH, or return the existing connection details if already running."""
+    """Start SSH. Tailscale names default to the lowercase sandbox ID.
+
+    An explicit hostname also applies when Tailscale is already running.
+    """
     from . import ssh_input
 
     ssh_input.check_arguments(engine, hostname, public_key)

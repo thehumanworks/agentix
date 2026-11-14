@@ -36,16 +36,33 @@ args = sys.argv[1:]
 if Path(sys.argv[0]).name == 'ts':
     state['BackendState'] = 'Running'
     state['enabled'] = True
+    if len(args) > 1:
+        state['hostname'] = args[1]
+        state['Self']['HostName'] = args[1]
+        state['Self']['DNSName'] = args[1] + '.test.ts.net.'
     with (root / 'mutations').open('a') as f: f.write('up\\n')
 elif args[1:] == ['status', '--json']:
+    if state.get('pending_hostname'):
+        state['pending_reads'] -= 1
+        if state['pending_reads'] == 0:
+            name = state.pop('pending_hostname')
+            state['Self'] = {'HostName': name, 'DNSName': name + '.test.ts.net.'}
     print(json.dumps(state))
 elif args[1:] == ['debug', 'prefs']:
-    print(json.dumps({'RunSSH': state['enabled']}))
+    print(json.dumps({'RunSSH': state['enabled'], 'Hostname': state['hostname']}))
 elif args[1:] == ['set', '--ssh=false']:
     state['enabled'] = False
     with (root / 'mutations').open('a') as f: f.write('disable\\n')
-elif args[1:] == ['set', '--ssh=true']:
+elif args[1:3] == ['set', '--ssh=true']:
     state['enabled'] = True
+    if len(args) > 3:
+        assert len(args) == 4 and args[3].startswith('--hostname=')
+        state['hostname'] = args[3].split('=', 1)[1]
+        if state.get('pending_reads'):
+            state['pending_hostname'] = state['hostname']
+        else:
+            state['Self']['HostName'] = state['hostname']
+            state['Self']['DNSName'] = state['hostname'] + '.test.ts.net.'
     with (root / 'mutations').open('a') as f: f.write('enable\\n')
 else:
     raise SystemExit('unexpected arguments')
@@ -58,14 +75,15 @@ else:
         self.state = {
             "BackendState": "Running",
             "enabled": True,
-            "Self": {"DNSName": "existing.test.ts.net."},
+            "hostname": "existing",
+            "Self": {"HostName": "existing", "DNSName": "existing.test.ts.net."},
             "TailscaleIPs": ["fd7a::1", "100.64.0.2"],
         }
         (self.root / "state").write_text(json.dumps(self.state))
 
-    def run_action(self, action):
+    def run_action(self, action, hostname="existing"):
         proc = subprocess.run(
-            ["bash", str(self.script), action, "ignored-on-repeat"],
+            ["bash", str(self.script), action, hostname],
             env={
                 **os.environ,
                 "TEST_ROOT": str(self.root),
@@ -88,6 +106,36 @@ else:
             },
         )
         self.assertFalse((self.root / "mutations").exists())
+
+    def test_running_start_renames_existing_node_without_enrollment(self):
+        result = self.run_action("start", "sb-unique")
+        self.assertEqual(result["magicdns"], "sb-unique.test.ts.net")
+        self.assertEqual(result["ipv4"], "100.64.0.2")
+        self.assertEqual(self.run_action("start", "sb-unique"), result)
+        self.assertEqual((self.root / "mutations").read_text(), "enable\n")
+
+    def test_first_start_passes_hostname_to_helper(self):
+        self.state["BackendState"] = "NeedsLogin"
+        (self.root / "state").write_text(json.dumps(self.state))
+        result = self.run_action("start", "sb-new")
+        self.assertEqual(result["magicdns"], "sb-new.test.ts.net")
+        self.assertEqual((self.root / "mutations").read_text(), "up\n")
+
+    def test_rename_waits_for_control_plane_before_returning_address(self):
+        self.state["pending_reads"] = 3
+        (self.root / "state").write_text(json.dumps(self.state))
+        result = self.run_action("start", "sb-renamed")
+        self.assertEqual(result["magicdns"], "sb-renamed.test.ts.net")
+        self.assertEqual((self.root / "mutations").read_text(), "enable\n")
+
+    def test_unconfirmed_rename_fails_instead_of_returning_stale_address(self):
+        self.state["pending_reads"] = 100
+        (self.root / "state").write_text(json.dumps(self.state))
+        self.script.write_text(self.script.read_text().replace("sleep 0.2", ":"))
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.run_action("start", "sb-renamed")
+        self.assertEqual(error.exception.stdout, "")
+        self.assertIn("has not confirmed hostname", error.exception.stderr)
 
     def test_stop_is_idempotent_and_restart_preserves_network_identity(self):
         self.assertEqual(self.run_action("stop")["status"], "stopped")

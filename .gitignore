@@ -28,3 +28,7 @@ coverage.xml
 
 # macOS metadata
 .DS_Store
+
+# worktrees
+.claude/worktrees
+.pi/worktrees

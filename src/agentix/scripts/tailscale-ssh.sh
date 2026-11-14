@@ -12,15 +12,20 @@ read_status() {
     return
   fi
   data=$(tailscale --socket="$socket" status --json)
-  enabled=$(tailscale --socket="$socket" debug prefs | jq -er '.RunSSH | tostring')
+  prefs=$(tailscale --socket="$socket" debug prefs)
+  enabled=$(jq -er '.RunSSH | tostring' <<<"$prefs")
 }
 
 read_status
 case "$action" in
   start)
     if [[ $(jq -r '.BackendState' <<<"$data") == Running ]]; then
-      if [[ $enabled != true ]]; then
-        tailscale --socket="$socket" set --ssh=true
+      args=(--ssh=true)
+      if [[ -n $hostname && $(jq -r '.Hostname // ""' <<<"$prefs") != "$hostname" ]]; then
+        args+=(--hostname="$hostname")
+      fi
+      if [[ $enabled != true || ${#args[@]} -gt 1 ]]; then
+        tailscale --socket="$socket" set "${args[@]}"
         read_status
       fi
     else
@@ -28,6 +33,21 @@ case "$action" in
       if [[ -n $hostname ]]; then args+=("$hostname"); fi
       ts up "${args[@]}" >/dev/null
       read_status
+    fi
+    # The control plane updates Self asynchronously after `set`. Do not return
+    # the old DNS name while the requested rename is still propagating.
+    if [[ -n $hostname ]]; then
+      for (( attempt=0; attempt<50; attempt++ )); do
+        if [[ $(jq -r '.Self.HostName // ""' <<<"$data") == "$hostname" ]]; then
+          break
+        fi
+        sleep 0.2
+        read_status
+      done
+      if [[ $(jq -r '.Self.HostName // ""' <<<"$data") != "$hostname" ]]; then
+        echo "Tailscale has not confirmed hostname $hostname yet. Retry SSH start." >&2
+        exit 1
+      fi
     fi
     ;;
   stop)
