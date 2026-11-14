@@ -1,91 +1,87 @@
-"""Control SSH inside an existing sandbox from the local CLI."""
+"""Control SSH inside an existing sandbox."""
 
+import asyncio
+import functools
 import json
 import shlex
-import subprocess
 from pathlib import Path
+from typing import Any
 
 import modal
 
+from .errors import InvalidRequest, OperationFailed, PublicKeyRequired
+from .session import Session
+from .ssh_input import NEED_PUBLIC_KEY, check_arguments, check_public_key
+
 _SCRIPTS = Path(__file__).with_name("scripts")
+# Keep the text in step with scripts/openssh-ssh.sh.
+_KEY_REQUIRED = "An SSH public key is required."
 
 
-def _run(sb, engine: str, action: str, argument: str = ""):
-    process = sb.exec(
-        "bash",
-        "-c",
-        (_SCRIPTS / f"{engine}-ssh.sh").read_text(),
-        "agentix-ssh",
-        action,
-        argument,
-        timeout=90,
+@functools.cache
+def _script(engine: str) -> str:
+    return (_SCRIPTS / f"{engine}-ssh.sh").read_text()
+
+
+async def _run(
+    handle: modal.Sandbox, engine: str, action: str, argument: str = ""
+) -> dict[str, Any]:
+    process = await handle.exec.aio(
+        "bash", "-c", _script(engine), "agentix-ssh", action, argument, timeout=90
     )
-    output = process.stdout.read()
-    errors = process.stderr.read()
-    if process.wait() != 0:
-        raise RuntimeError(f"SSH {action} failed for {sb.object_id}: {errors.strip()}")
+    output, errors, exit_code = await asyncio.gather(
+        process.stdout.read.aio(), process.stderr.read.aio(), process.wait.aio()
+    )
+    if exit_code != 0:
+        if errors.strip() == _KEY_REQUIRED:
+            raise PublicKeyRequired(NEED_PUBLIC_KEY)
+        raise OperationFailed(
+            f"SSH {action} failed for {handle.object_id}: {errors.strip()}"
+        )
     result = json.loads(output)
     if action == "start" and result["status"] != "running":
-        raise RuntimeError(f"SSH did not start for {sb.object_id}.")
+        raise OperationFailed(f"SSH did not start for {handle.object_id}.")
     return result
 
 
-def _public_key(path: str) -> str:
-    candidates = (
-        [Path(path).expanduser()]
-        if path
-        else [Path.home() / ".ssh/id_ed25519.pub", Path.home() / ".ssh/id_rsa.pub"]
-    )
-    key_file = next(
-        (candidate for candidate in candidates if candidate.is_file()), None
-    )
-    if key_file is None:
-        raise ValueError("Provide --public-key=PATH to an SSH public key (.pub file).")
-    key = key_file.read_text().strip()
-    if "\n" in key or not key.startswith(
-        ("ssh-ed25519 ", "ssh-rsa ", "ecdsa-sha2-", "sk-")
-    ):
-        raise ValueError(
-            "Expected one SSH public key, without authorized_keys options."
-        )
-    check = subprocess.run(
-        ["ssh-keygen", "-l", "-f", "-"],
-        input=key + "\n",
-        text=True,
-        capture_output=True,
-    )
-    if check.returncode:
-        raise ValueError(f"Invalid SSH public key: {key_file}")
-    return key
+async def manage(
+    session: Session,
+    action: str,
+    sandbox_id: str,
+    engine: str = "tailscale",
+    hostname: str = "",
+    public_key: str = "",
+) -> dict[str, Any]:
+    """Run `action` (start, stop or status) for one SSH engine of a sandbox.
 
-
-def _manage(
-    action: str, sandbox_id: str, engine: str, hostname: str = "", public_key: str = ""
-):
-    if engine not in ("tailscale", "openssh"):
-        raise ValueError(
-            f"Unsupported SSH engine: {engine}. Choose tailscale or openssh."
-        )
-    if public_key and engine != "openssh":
-        raise ValueError("--public-key is only used by the openssh engine.")
-    if hostname and engine != "tailscale":
-        raise ValueError("--hostname is only used by the tailscale engine.")
-    sb = modal.Sandbox.from_id(sandbox_id=sandbox_id)
-    if engine == "tailscale":
-        result = _run(sb, engine, action, hostname)
-        host = result.get("magicdns") or result.get("ipv4")
-        if host:
-            result["ssh_command"] = shlex.join(["ssh", f"root@{host}"])
-    else:
-        tunnel = sb.tunnels().get(22)
-        if tunnel is None and action == "start":
-            raise ValueError(
-                "This sandbox has no SSH tunnel. Create a new one with agentix sandbox up."
+    `public_key` is the text of the key, not a path. The openssh engine uses it
+    only when it starts a listener; a listener that already runs keeps its key.
+    """
+    check_arguments(engine, hostname, public_key)
+    if public_key:
+        # ssh-keygen runs as a child process. Do not hold up other requests.
+        public_key = await asyncio.to_thread(check_public_key, public_key)
+    async with session.sandbox(sandbox_id) as handle:
+        if engine == "tailscale":
+            result = await _run(handle, engine, action, hostname)
+            host = result.get("magicdns") or result.get("ipv4")
+            if host:
+                result["ssh_command"] = shlex.join(["ssh", f"root@{host}"])
+        elif action == "start":
+            # Without a tunnel, a listener is of no use. Do not start one.
+            tunnel = (await handle.tunnels.aio()).get(22)
+            if tunnel is None:
+                raise InvalidRequest(
+                    "This sandbox has no SSH tunnel. "
+                    "Create a new one with agentix sandbox up."
+                )
+            result = await _run(handle, engine, action, public_key)
+        else:
+            tunnels, result = await asyncio.gather(
+                handle.tunnels.aio(), _run(handle, engine, action)
             )
-        result = _run(sb, engine, "status" if action == "start" else action)
-        if action == "start" and result["status"] != "running":
-            result = _run(sb, engine, action, _public_key(public_key))
-        if tunnel is not None:
+            tunnel = tunnels.get(22)
+        if engine == "openssh" and tunnel is not None:
             host, port = tunnel.tcp_socket
             result.update(
                 host=host,
@@ -94,20 +90,3 @@ def _manage(
                 ssh_command=shlex.join(["ssh", "-p", str(port), f"root@{host}"]),
             )
     return {"sandbox_id": sandbox_id, "engine": engine, **result}
-
-
-def start(
-    sandbox_id: str, engine: str = "tailscale", hostname: str = "", public_key: str = ""
-):
-    """Start SSH, or return the existing connection details if already running."""
-    return _manage("start", sandbox_id, engine, hostname, public_key)
-
-
-def stop(sandbox_id: str, engine: str = "tailscale"):
-    """Stop the selected SSH engine without terminating the sandbox."""
-    return _manage("stop", sandbox_id, engine)
-
-
-def status(sandbox_id: str, engine: str = "tailscale"):
-    """Show SSH state and connection details for the given sandbox."""
-    return _manage("status", sandbox_id, engine)

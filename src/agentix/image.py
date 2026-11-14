@@ -1,10 +1,10 @@
+import functools
 from pathlib import Path
 
 import modal
 
-from .shared import get_app
+from .defaults import APP_NAME, IMAGE_NAME
 
-IMAGE_NAME = "determinate-nix:latest"
 NIX_DIR = Path(__file__).resolve().parents[2] / "nix"
 HOME_CONFIG = "/root/.config/home-manager"
 GENERATION = "/opt/agentix/home-generation"
@@ -21,6 +21,11 @@ REQUIRED_COMMANDS = (
     "python3 uv bun node ruff ty shellcheck shfmt nixfmt statix deadnix "
     "typescript-language-server bash-language-server nixd ps strace"
 )
+
+
+@functools.cache
+def get_app() -> modal.App:
+    return modal.App.lookup(name=APP_NAME, create_if_missing=True)
 
 
 def _ensure_lockfile(image: modal.Image):
