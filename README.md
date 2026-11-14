@@ -128,7 +128,9 @@ SSH rule for the same override. See the
 [OpenSSH client documentation](https://man.openbsd.org/ssh_config#SendEnv) and
 [Tailscale SSH policy documentation](https://tailscale.com/kb/1193/tailscale-ssh#acceptenv).
 
-Rebuild after editing the Nix configuration. Use `image build --force-build`
+Rebuild after editing the Nix configuration. A rebuild keeps the revisions in
+`nix/flake.lock`; `uv run agentix flake update [INPUT...]` moves them first, and with `--build`
+also builds the image when one moved. Use `image build --force-build`
 only when an uncached build is needed. Modal's image-layer cache is used now;
 a separate Nix binary-cache service is deferred. Tailscale startup and persistent
 volume mounting remain manual; see [the Nix setup notes](nix/README.md).

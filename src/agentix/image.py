@@ -4,8 +4,8 @@ from pathlib import Path
 import modal
 
 from .defaults import APP_NAME, IMAGE_NAME
+from .flake import NIX_DIR, lock_in_sandbox
 
-NIX_DIR = Path(__file__).resolve().parents[2] / "nix"
 HOME_CONFIG = "/root/.config/home-manager"
 GENERATION = "/opt/agentix/home-generation"
 # A pinned release, so a rebuild months later installs the same Nix.
@@ -34,22 +34,7 @@ def _ensure_lockfile(image: modal.Image):
     if lockfile.exists():
         return
     image = image.build(app=get_app())
-    sandbox = modal.Sandbox.create(
-        app=get_app(), image=image, runtime="vm", timeout=600
-    )
-    try:
-        sandbox.filesystem.make_directory(HOME_CONFIG)
-        sandbox.filesystem.copy_from_local(
-            NIX_DIR / "flake.nix", f"{HOME_CONFIG}/flake.nix"
-        )
-        process = sandbox.exec("nix", "flake", "lock", HOME_CONFIG, timeout=300)
-        output = process.stdout.read()
-        errors = process.stderr.read()
-        if process.wait() != 0:
-            raise RuntimeError(f"Could not lock Nix inputs: {errors}\n{output}")
-        lockfile.write_text(sandbox.filesystem.read_text(f"{HOME_CONFIG}/flake.lock"))
-    finally:
-        sandbox.terminate(wait=True)
+    lockfile.write_text(lock_in_sandbox(get_app(), image, "lock"))
 
 
 def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):

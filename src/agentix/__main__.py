@@ -22,6 +22,22 @@ def _build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
     return {"image_id": image.object_id}
 
 
+def _flake_update(*inputs: str, build: bool = False, image_name: str = IMAGE_NAME):
+    """Run `nix flake update` in a sandbox and write nix/flake.lock on this host.
+
+    Name inputs to move only those, for example `flake update claude-mods`;
+    with no names every input moves. With `--build`, the image is built and
+    published if an input moved; otherwise run `image build` afterwards.
+    """
+    from .flake import update
+    from .image import get_app
+
+    result = update(get_app(), image_name, inputs)
+    if build and result["changed"]:
+        result |= _build_image(image_name=image_name)
+    return result
+
+
 def _create_sandbox(
     image_name: str = IMAGE_NAME,
     secret_name: str = SECRET_NAME,
@@ -98,6 +114,9 @@ def main():
         {
             "image": {
                 "build": _build_image,
+            },
+            "flake": {
+                "update": _flake_update,
             },
             "sandbox": {
                 "up": _create_sandbox,

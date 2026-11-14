@@ -116,12 +116,17 @@ flakes only include files known to Git. Intel Macs are not supported.
 
 ## Updates
 
-Run `nix flake update` in this directory, in a sandbox, to refresh the pinned
-dependencies. Copy the new `flake.lock` back to the checkout, commit it, and
-rebuild the image. To move only the Claude plugin marketplace to its newest
-commit, run `nix flake update claude-mods` instead. Keep `home.stateVersion` unchanged unless deliberately
-migrating its compatibility settings. The Nix version itself is pinned by
-`NIX_INSTALLER` in `src/agentix/image.py`.
+From the repository root, `uv run agentix flake update` moves every pinned
+input to its newest revision, and `uv run agentix flake update claude-mods`
+moves only the named ones. The command runs `nix flake update` in a sandbox, so
+the host needs no Nix, then writes the new `flake.lock` to this directory and
+lists the inputs that moved. Add `--build` to build and publish the image in
+the same run when an input moved; otherwise rebuild afterwards. Commit the
+lock.
+
+Keep `home.stateVersion` unchanged unless deliberately migrating its
+compatibility settings. The Nix version itself is pinned by `NIX_INSTALLER` in
+`src/agentix/image.py`.
 
 See the [Home Manager manual](https://nix-community.github.io/home-manager/nix-flakes.html).
 
