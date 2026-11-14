@@ -37,6 +37,10 @@ case "$action" in
         /usr/sbin/useradd --system --no-create-home --home-dir /run/sshd \
           --shell /bin/false sshd
       fi
+      # SFTP, and scp through it, start in the working directory like other
+      # SSH sessions. Keep the paths in step with workdir-profile.sh.
+      workdir=$(cat /run/agentix/workdir 2>/dev/null || echo /workdir)
+      [[ -d $workdir ]] || workdir=/root
       cat >"$config" <<EOF
 Port 22
 ListenAddress 0.0.0.0
@@ -51,7 +55,7 @@ AcceptEnv OP_SERVICE_ACCOUNT_TOKEN
 UsePAM no
 AllowUsers root
 PrintMotd no
-Subsystem sftp internal-sftp
+Subsystem sftp internal-sftp -d "$workdir"
 EOF
       sshd=$(command -v sshd)
       "$sshd" -t -f "$config"

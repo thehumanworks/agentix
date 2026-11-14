@@ -1,23 +1,34 @@
-{ pkgs, ... }:
-
-let
-  # In a sandbox, op loads the service account token that `agentix sandbox up`
-  # stored, so SSH sessions need no token forwarding. The Mac keeps plain op.
-  op =
-    if pkgs.stdenv.hostPlatform.isLinux then
-      pkgs.writeShellApplication {
-        name = "op";
-        text = builtins.replaceStrings
-          [ "@op@" ]
-          [ "${pkgs._1password-cli}/bin/op" ]
-          (builtins.readFile ./scripts/op.sh);
-      }
-    else
-      pkgs._1password-cli;
-in
 {
-  # The other modules call this package, so their wrappers find the token too.
-  _module.args.op = op;
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
-  home.packages = [ op ];
+{
+  options.agentix.op = {
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs._1password-cli;
+      defaultText = lib.literalExpression "pkgs._1password-cli";
+      description = ''
+        The `op` command on PATH. The `claude`, `gh`, `gh-lf`, and `ts` wrappers
+        call this package, so a profile that replaces it changes how all of them
+        authenticate.
+      '';
+    };
+
+    tokenFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "/run/agentix/op-token";
+      description = ''
+        A file from which the profile's `op` loads its service account token.
+        When the file is readable, `claude` starts without the token in its
+        environment, and the commands it runs get secrets through `op`.
+      '';
+    };
+  };
+
+  config.home.packages = [ config.agentix.op.package ];
 }

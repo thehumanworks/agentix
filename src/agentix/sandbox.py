@@ -7,7 +7,7 @@ from .shared import get_app
 
 # Modal gives the token only to the processes it starts. SSH sessions do not
 # have it, so the image's `op` wrapper reads it from this root-only file.
-# Keep the path in step with nix/home-manager/modules/scripts/op.sh.
+# Keep the path in step with nix/home-manager/modules/sandbox/op-token.nix.
 OP_TOKEN_FILE = "/run/agentix/op-token"
 _STORE_OP_TOKEN = f"""set -eu
 umask 077
@@ -16,6 +16,10 @@ printf %s "$OP_SERVICE_ACCOUNT_TOKEN" > {OP_TOKEN_FILE}
 """
 
 WORKDIR_FILE = "/run/agentix/workdir"
+
+# Modal's default reservation leaves a sandbox with about 1 GiB, which Nix
+# evaluation, language servers, and test suites exhaust.
+MEMORY_MIB = 8192
 _STORE_WORKDIR = f"""set -eu
 mkdir -p "$(dirname {WORKDIR_FILE})"
 printf '%s\\n' "$1" > {WORKDIR_FILE}
@@ -27,8 +31,14 @@ def create_sandbox(
     secret_name: str = "1password",
     timeout: int = 3600,
     workdir: str = "",
+    memory: int = MEMORY_MIB,
+    cpu: float = 0,
 ):
-    """Start a sandbox in the image's working directory, or in `workdir` if given."""
+    """Start a sandbox in the image's working directory, or in `workdir` if given.
+
+    `memory` is the reservation in MiB. `cpu` reserves that many cores; zero
+    keeps Modal's default.
+    """
     sb = modal.Sandbox.create(
         app=get_app(),
         image=modal.Image.from_name(image_name),
@@ -42,6 +52,8 @@ def create_sandbox(
         else [],
         timeout=timeout,
         workdir=workdir or None,
+        memory=memory,
+        cpu=cpu or None,
         runtime="vm",
         unencrypted_ports=[22],
     )
@@ -61,11 +73,11 @@ def create_sandbox(
             raise RuntimeError(f"Failed to record the working directory: {error}")
     return sb
 
+
 def list_sandboxes() -> list[str]:
-    sandboxes = modal.Sandbox.list(
-        app_id=get_app().app_id
-    )
+    sandboxes = modal.Sandbox.list(app_id=get_app().app_id)
     return [sb.object_id for sb in sandboxes]
+
 
 def execute(command: str, sandbox_id: str):
     sb = modal.Sandbox.from_id(sandbox_id=sandbox_id)

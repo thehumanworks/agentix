@@ -1,7 +1,33 @@
-{ config, lib, pkgs, op, ... }:
-
 {
-  programs.claude-code = {
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+
+let
+  inherit (config.agentix.op) tokenFile;
+
+  # op loads the token from the file, so the commands Claude runs do not need
+  # it in their environment. A different exported token is an override and
+  # stays.
+  dropOpToken = lib.optionalString (tokenFile != null) ''
+    token_file=''${AGENTIX_OP_TOKEN_FILE:-${tokenFile}}
+    if [[ -r $token_file ]] &&
+      [[ -z ''${OP_SERVICE_ACCOUNT_TOKEN:-} || $OP_SERVICE_ACCOUNT_TOKEN == "$(<"$token_file")" ]]; then
+      launch+=(${lib.getExe' pkgs.coreutils "env"} -u OP_SERVICE_ACCOUNT_TOKEN)
+    fi
+  '';
+in
+{
+  options.agentix.claude.trustedDirectories = lib.mkOption {
+    type = lib.types.listOf lib.types.str;
+    default = [ ];
+    example = [ "/workdir" ];
+    description = "Directories where Claude starts without the workspace trust prompt.";
+  };
+
+  config.programs.claude-code = {
     enable = true;
     # Let Claude save interactive preferences; declared values win on activation.
     mutableSettings = true;
@@ -78,27 +104,47 @@
     };
 
     # Install one claude command, which always resolves the token at runtime.
-    package = (pkgs.writeShellApplication {
-      name = "claude";
-      text = builtins.replaceStrings
-        [ "@op@" "@claude@" ]
-        [ "${op}/bin/op" "${pkgs.claude-code}/bin/claude" ]
-        (builtins.readFile ./scripts/claude.sh);
-    }).overrideAttrs {
-      version = pkgs.claude-code.version;
-    };
+    # The version is kept so Home Manager picks the plugin layout for it.
+    package =
+      (pkgs.writeShellApplication {
+        name = "claude";
+        text = ''
+          # Modal sandboxes start with /tmp as 0777, and a mode set during the
+          # image build does not survive into them. Claude refuses to put its
+          # cross-session messaging socket in a world-writable directory that
+          # lacks the sticky bit, so restore the standard 1777 when we own /tmp.
+          if [[ -O /tmp && ! -k /tmp ]]; then
+            chmod +t /tmp || true
+          fi
+
+          export CLAUDE_CODE_OAUTH_TOKEN="op://agentix/claude/oauth/token"
+          launch=(${lib.getExe config.agentix.op.package} run --no-masking --)
+          ${dropOpToken}
+          # Preserve terminal streams so Claude starts its interactive UI.
+          exec "''${launch[@]}" ${lib.getExe pkgs.claude-code} "$@"
+        '';
+      }).overrideAttrs
+        { inherit (pkgs.claude-code) version; };
   };
 
-  # Needed to allow for interactive runs when using CLAUDE_CODE_OAUTH_TOKEN
-  # This activation trigger allows .claude.json to remain mutable.
-  # The sandbox workspaces are also trusted, so Claude starts without asking.
-  home.activation.claudeOnboarding =
-    lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-      run ${lib.getExe (pkgs.writeShellApplication {
-        name = "claude-onboarding";
-        runtimeInputs = [ pkgs.coreutils pkgs.jq ];
-        text = builtins.readFile ./scripts/claude-onboarding.sh;
-      })} ${lib.escapeShellArgs ([ "${config.home.homeDirectory}/.claude.json" ]
-        ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [ "/root" "/workdir" ])}
-    '';
+  # Needed to allow for interactive runs when using CLAUDE_CODE_OAUTH_TOKEN.
+  # An activation script, not a managed file, so .claude.json stays writable.
+  config.home.activation.claudeOnboarding = lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+    run ${
+      lib.getExe (
+        pkgs.writeShellApplication {
+          name = "claude-onboarding";
+          runtimeInputs = [
+            pkgs.coreutils
+            pkgs.jq
+          ];
+          text = builtins.readFile ./scripts/claude-onboarding.sh;
+        }
+      )
+    } ${
+      lib.escapeShellArgs (
+        [ "${config.home.homeDirectory}/.claude.json" ] ++ config.agentix.claude.trustedDirectories
+      )
+    }
+  '';
 }

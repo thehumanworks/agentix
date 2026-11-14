@@ -1,5 +1,129 @@
 # Portable Home Manager
 
+Standalone Home Manager manages user packages and settings for the Modal
+sandboxes and for a Mac. Each profile is one output of `flake.nix`.
+
+| Profile | System | User | Entry point |
+| --- | --- | --- | --- |
+| `modal` | x86_64 Linux | root | `home-manager/profiles/sandbox.nix` |
+| `modal-arm` | ARM64 Linux | root | `home-manager/profiles/sandbox.nix` |
+| `mac` | Apple Silicon macOS | tomas | `home-manager/profiles/mac.nix` |
+
+## Layout
+
+| Path | Contents |
+| --- | --- |
+| `flake.nix` | Pinned inputs, the profile table, the formatter, and the checks |
+| `home-manager/home.nix` | Modules every profile shares |
+| `home-manager/profiles/` | One file per kind of machine: user, home directory, and what only that machine needs. `identity.nix` holds the Git name and emails |
+| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor |
+| `home-manager/modules/sandbox/` | Modules only the sandbox profile imports: Tailscale, the 1Password token file, Claude's sandbox brief |
+| `home-manager/modules/scripts/` | Shell scripts that modules package |
+
+To add a tool everywhere, add it to `modules/tools.nix`. To add it to
+sandboxes only, add it to `profiles/sandbox.nix`. To add a kind of machine, add
+a profile file and one line to `homes` in `flake.nix`. All profiles use one
+nixpkgs revision, including the editor, so a package appears in the image once.
+
+## What a sandbox gets
+
+- Tools for search, data, networking, archives, builds, Python, JavaScript,
+  shell, and Nix, listed in `modules/tools.nix`.
+- Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
+  JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
+  Claude's LSP tool run the same builds. Claude has the Python, TypeScript,
+  Bash, and Nix servers configured.
+- `nix run nixpkgs#NAME`, `nix shell nixpkgs#NAME`, and `nix-shell -p NAME`
+  resolve to the revision the image was built from. A tool that is not
+  installed runs after a download of a few seconds and matches the libraries of
+  the installed ones.
+- direnv with nix-direnv. An SSH session loads a project's `.envrc` on `cd`
+  after `direnv allow`. Commands run without an interactive shell use
+  `direnv exec . COMMAND`.
+- A managed Bash setup for root, so SSH sessions get the same `PATH`, editor,
+  and locale as `sandbox exec`. This holds for an interactive login, for
+  `ssh HOST COMMAND`, and for `ssh HOST 'bash -lc COMMAND'`. All three start in
+  the working directory. The image sets `LANG=C.UTF-8`.
+- `~/.claude/CLAUDE.md`, generated from `modules/sandbox/claude-context.md`. It
+  tells Claude how the sandbox works: where to work, how to get a missing tool,
+  how secrets are reached, and how the environment is changed.
+- Claude starts without the 1Password token in its environment, so the
+  commands it runs do not inherit it and get secrets through `op`. A rule also
+  stops Claude reading the token file. The commands still run as root, so this
+  prevents accidental exposure and is not a security boundary.
+
+## Checks and formatting
+
+There is no Nix on the Mac, so run these in a sandbox, from
+`/root/.config/home-manager` or a checkout of this directory:
+
+```sh
+nix fmt
+nix flake check
+```
+
+`nix fmt` formats every Nix file with nixfmt. `nix flake check` verifies the
+formatting, runs statix and deadnix, and builds the profiles of the current
+system. Add `--all-systems` to evaluate the Mac and ARM profiles too.
+
+## Modal
+
+`uv run agentix image build` copies this directory to
+`/root/.config/home-manager` in the image, builds the `modal` profile, activates
+it, and removes the build inputs from the Nix store. See the
+[project README](../README.md). Nothing below is needed for a normal build.
+
+To try a change in a running sandbox before rebuilding the image:
+
+```sh
+home-manager switch --flake /root/.config/home-manager#modal
+```
+
+The first switch downloads the build inputs the image left out. Use
+`modal-arm` if the image uses ARM64. A switch changes that sandbox only; the
+published image changes when it is rebuilt.
+
+Modal commands do not load shell startup files. The image therefore sets
+`PATH`, `EDITOR`, `VISUAL`, `LANG`, and `NIX_PATH` itself, in
+`src/agentix/image.py`.
+
+## macOS later
+
+Install Nix on the Mac first, with flakes enabled. Change the user and home
+directory in `home-manager/profiles/mac.nix` if needed. Copy this directory,
+including `flake.lock`, to `~/.config/home-manager`, then run as your normal
+user, without sudo:
+
+```sh
+cd ~/.config/home-manager
+nix build '.#homeConfigurations.mac.activationPackage' --no-link
+"$(nix path-info '.#homeConfigurations.mac.activationPackage')/activate"
+export PATH="$HOME/.nix-profile/bin:$PATH"
+home-manager --version
+```
+
+The Mac profile does not manage shell startup files or macOS system settings.
+To load managed environment variables in future shells, source this from your
+shell startup file after Nix's own initialization:
+
+```sh
+. "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
+```
+
+Apply later changes with `home-manager switch --flake ~/.config/home-manager#mac`.
+If these files are inside a Git repository, stage new Nix files before building:
+flakes only include files known to Git. Intel Macs are not supported.
+
+## Updates
+
+Run `nix flake update` in this directory, in a sandbox, to refresh the pinned
+dependencies. Copy the new `flake.lock` back to the checkout, commit it, and
+rebuild the image. Keep `home.stateVersion` unchanged unless deliberately
+migrating its compatibility settings. The Nix version itself is pinned by
+`NIX_INSTALLER` in `src/agentix/image.py`.
+
+See the [Home Manager manual](https://nix-community.github.io/home-manager/nix-flakes.html).
+
 ## Tailscale in Linux sandboxes
 
 After Home Manager activation, run as root in the sandbox:
@@ -45,91 +169,13 @@ ts ip -4
 
 Use this wrapper for the custom socket; the plain CLI targets the default system
 socket. Host DNS is left unchanged. Logs are in `$TAILSCALE_STATE_DIR/daemon.log`
-(or the default state directory). The module installs no service on macOS;
-the native Mac Tailscale application remains responsible for its connection.
+(or the default state directory). Only the sandbox profile includes this
+module; the native Mac Tailscale application remains responsible for its
+connection.
 
 This repository does not yet mount a persistent Modal volume or invoke this
 command at sandbox boot; those are required for automatic recovery across
 sandbox replacement.
-
-Standalone Home Manager manages user packages on both Linux and macOS.
-Edit `home-manager/home.nix` for shared packages and settings. User names,
-home directories, and CPU architectures are declared in `flake.nix`.
-
-| Profile | System | User |
-| --- | --- | --- |
-| `modal` | x86_64 Linux | root |
-| `modal-arm` | ARM64 Linux | root |
-| `mac` | Apple Silicon macOS | tomas |
-| `mac-intel` | Intel macOS | tomas |
-
-## Modal
-
-Copy this entire `nix` directory into the image or sandbox at
-`/root/.config/home-manager`. The project's Modal image already installs Nix
-without systemd. Run the following as root inside that image:
-
-```sh
-export HOME=/root
-export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-cd /root/.config/home-manager
-nix flake lock
-nix build '.#homeConfigurations.modal.activationPackage' --no-link
-"$(nix path-info '.#homeConfigurations.modal.activationPackage')/activate"
-export PATH="$HOME/.nix-profile/bin:$PATH"
-home-manager --version
-rg --version
-```
-
-Use `modal-arm` instead if the image uses ARM64. Save the generated `flake.lock`
-alongside `flake.nix` and copy it with the configuration for repeatable builds.
-The first bootstrap builds the activation package directly, so Home Manager
-does not need to be installed beforehand.
-
-For later changes:
-
-```sh
-home-manager switch --flake /root/.config/home-manager#modal
-```
-
-Modal commands do not necessarily load shell startup files. For packages to
-be available to every command in a baked image, add `/root/.nix-profile/bin`
-to that image's `PATH` after activation, alongside the existing Nix path.
-An activation done only in a running sandbox does not change the published image.
-
-## macOS later
-
-Install Nix on the Mac first, with flakes enabled. Change the Mac user and home
-directory in `flake.nix` if needed. Copy this directory, including `flake.lock`,
-to `~/.config/home-manager`, then run as your normal user, without sudo:
-
-```sh
-cd ~/.config/home-manager
-nix build '.#homeConfigurations.mac.activationPackage' --no-link
-"$(nix path-info '.#homeConfigurations.mac.activationPackage')/activate"
-export PATH="$HOME/.nix-profile/bin:$PATH"
-home-manager --version
-```
-
-Use `mac-intel` on an Intel Mac. To load managed environment variables in future
-shells, source this from your shell startup file after Nix's own initialization:
-
-```sh
-. "$HOME/.nix-profile/etc/profile.d/hm-session-vars.sh"
-```
-
-Apply later changes with `home-manager switch --flake ~/.config/home-manager#mac`.
-If these files are inside a Git repository, stage new Nix files before building:
-flakes only include files known to Git.
-
-## Updates
-
-Run `nix flake update` in this directory to refresh pinned dependencies, then
-build and activate the appropriate profile. Keep `home.stateVersion` unchanged
-unless deliberately migrating its compatibility settings.
-
-This configuration does not manage shell configuration files or macOS system
-settings. See the [Home Manager manual](https://nix-community.github.io/home-manager/nix-flakes.html).
 
 ## Editor: Bun, Python scripts, and Bash
 

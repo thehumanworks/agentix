@@ -1,23 +1,28 @@
 from . import ssh
 from .image import IMAGE_NAME, build_image
-from .sandbox import create_sandbox, execute, list_sandboxes, terminate
+from .sandbox import MEMORY_MIB, create_sandbox, execute, list_sandboxes, terminate
 
 
 def _build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
     image = build_image(force_build=force_build, image_name=image_name)
     return {"image_id": image.object_id}
 
+
 def _create_sandbox(
     image_name: str = IMAGE_NAME,
     secret_name: str = "1password",
     timeout: int = 3600,
     workdir: str = "",
+    memory: int = MEMORY_MIB,
+    cpu: float = 0,
 ):
     sb = create_sandbox(
         image_name=image_name,
         secret_name=secret_name,
         timeout=timeout,
         workdir=workdir,
+        memory=memory,
+        cpu=cpu,
     )
     return {"sandbox_id": sb.object_id}
 
