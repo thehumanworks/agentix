@@ -1,0 +1,2 @@
+[shell_alias]
+agx = "uv run -m src.agentix"
