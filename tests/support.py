@@ -3,7 +3,6 @@
 import asyncio
 import contextlib
 import io
-import os
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -44,10 +43,6 @@ class ModalTestCase(unittest.TestCase):
         self.listing.aio = Mock(side_effect=lambda **_: _each([self.sandbox]))
         self.secret = self._patch("agentix.sandbox.modal.Secret.from_name")
         self._patch("agentix.sandbox.modal.Image.from_name")
-        # The command line must not find a server of the person who runs the tests.
-        environment = patch.dict(os.environ, {"AGENTIX_SERVER": "off"})
-        environment.start()
-        self.addCleanup(environment.stop)
 
     def _patch(self, target):
         patcher = patch(target)

@@ -10,6 +10,3 @@ SANDBOX_TIMEOUT = 3600
 # Modal's default reservation leaves a sandbox with about 1 GiB, which Nix
 # evaluation, language servers, and test suites exhaust.
 SANDBOX_MEMORY_MIB = 8192
-
-# Where `agentix serve` listens, and where the command line looks for it.
-SERVER_SOCKET = "~/.agentix/server.sock"

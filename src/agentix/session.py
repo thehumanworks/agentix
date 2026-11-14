@@ -3,8 +3,7 @@
 Most of the time of a short operation goes to setup: the connection to Modal,
 the app lookup, and, for each sandbox, a lookup plus a separate connection to
 its command router. A `Session` builds each of these once and shares it between
-all later operations. A long-lived process, such as the server, keeps one `Session`
-for its lifetime.
+all later operations.
 """
 
 import asyncio

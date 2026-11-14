@@ -74,30 +74,6 @@ must permit SSH access. For shell operators, explicitly run a shell, for example
 `sandbox up` returns when the sandbox runs and is ready for commands, which
 takes about a second longer than Modal needs to accept it.
 
-## Server
-
-Each command spends most of its time connecting to Modal. `agentix serve` keeps
-those connections open, so each command takes about 0.5 seconds instead of 1.5
-to 3 seconds:
-
-```sh
-uv run agentix serve
-```
-
-The server listens on `~/.agentix/server.sock`, a Unix socket that only your
-user can open. While it runs, every `agentix sandbox` command uses it
-automatically. Without it, commands work in the same way as before. `image
-build` always runs in the command itself.
-
-Use `serve --socket=PATH` to listen on another socket, and set
-`AGENTIX_SERVER=PATH` for the commands that must use it. A server that you name
-in this way must answer. Set `AGENTIX_SERVER=off` to use no server.
-
-The server is local and has no network listener. It is not the public REST or
-MCP interface. The operations are in `src/agentix/sandbox.py` and
-`src/agentix/ssh.py`, and they share the warm state in `src/agentix/session.py`.
-Build a later interface on those modules to get the same speed.
-
 `.python-version` selects the standard CPython 3.14 build. Modal imports take
 about twice as long on the free-threaded build.
 

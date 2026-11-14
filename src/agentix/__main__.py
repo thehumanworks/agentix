@@ -1,7 +1,6 @@
 """The command line. It only parses input and prints results.
 
-Modal is slow to import, so nothing here imports it. A command that a running
-server can do never loads it.
+Modal is slow to import, so only a command that needs it loads it.
 """
 
 import shlex
@@ -11,9 +10,9 @@ from .errors import PublicKeyRequired
 
 
 def _backend():
-    from .backend import connect
+    from .local import Local
 
-    return connect()
+    return Local()
 
 
 def _build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
@@ -92,13 +91,6 @@ def _ssh_status(sandbox_id: str, engine: str = "tailscale"):
     return _backend().ssh("status", sandbox_id, engine)
 
 
-def _serve(socket: str = ""):
-    """Keep Agentix warm. While this runs, the sandbox commands are faster."""
-    from .server import serve
-
-    serve(socket_path=socket)
-
-
 def main():
     from fire import Fire
 
@@ -118,7 +110,6 @@ def main():
                     "status": _ssh_status,
                 },
             },
-            "serve": _serve,
         }
     )
 
