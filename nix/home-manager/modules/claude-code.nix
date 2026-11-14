@@ -35,7 +35,7 @@ in
       advisorModel = "fable";
       attribution = false;
       autoCompactEnabled = true;
-      autoCompactWindow = 500000;
+      autoCompactWindow = 400000;
       # TODO: add autoMemoryDirectory, pointing to a cloud store
       autoMemoryEnabled = true;
       autoScrollEnabled = true;
