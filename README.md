@@ -9,21 +9,34 @@ uv run agentix image build
 uv run agentix sandbox up
 ```
 
-The build installs Nix and activates the `modal` Home Manager profile. If
-`nix/flake.lock` is missing, a temporary sandbox generates it and copies it back
-to this checkout. Keep that lockfile in version control. No local Nix install is
+The build installs a pinned Nix release, activates the `modal` Home Manager
+profile, and removes the build inputs from the Nix store. If `nix/flake.lock`
+is missing, a temporary sandbox generates it and copies it back to this
+checkout. Keep that lockfile in version control. No local Nix install is
 needed. The completed image is published as `determinate-nix:latest`; starting
 a sandbox does not rebuild it.
+
+The image gives an agent search and data tools, Python with uv, Bun and Node,
+linters and formatters, language servers, and direnv. A tool that is not
+installed runs with `nix run nixpkgs#NAME`, from the same nixpkgs revision as
+the image. Claude starts with a brief that describes the sandbox. See
+[the Nix setup notes](nix/README.md) for the full list and the layout.
 
 New sandboxes receive the Modal secret `1password`, which must contain
 `OP_SERVICE_ACCOUNT_TOKEN`. Build containers receive no secrets. Use
 `--secret-name=NAME` to select another secret, or `--secret-name=''` to omit it.
 Sandboxes default to a one-hour lifetime; change it with `--timeout=SECONDS`.
+A sandbox reserves 8192 MiB of memory and Modal's default CPU share. Change
+them with `--memory=MIB` and `--cpu=CORES`.
 
 The image creates `/workdir` and sets it as its working directory, so commands
-run with `sandbox exec` and SSH logins start there. Claude already trusts `/workdir` and
-`/root`. Use `--workdir=PATH` to start a sandbox in another absolute path; Claude
-asks before trusting a directory outside those two.
+run with `sandbox exec`, SSH logins, and `ssh HOST COMMAND` start there. A
+relative path in `rsync`, `scp`, or `sftp` is therefore relative to `/workdir`.
+Tailscale SSH is the exception for `scp` and `sftp`, which start in `/root`.
+
+Claude already trusts `/workdir` and `/root`. Use `--workdir=PATH` to start a
+sandbox in another absolute path; Claude asks before trusting a directory
+outside those two.
 
 Use the returned sandbox ID:
 
@@ -80,6 +93,11 @@ so stopping one does not stop the other. OpenSSH state and logs are stored in
 can read and which is held in memory, not on disk. The `op` command in the image
 loads that file when the variable is not set, and `claude`, `gh`, `gh-lf`, and
 `ts` call the same `op`. Run the returned `ssh_command` as it is.
+
+Claude starts without the token in its environment, so the commands it runs
+do not inherit it, and it is denied reading the token file with its Read tool.
+Its commands still run as root and can run `op`, so treat this as protection
+against accidental exposure, not as a boundary.
 
 Anyone who can open a root session in the sandbox can use the token. Sandboxes
 created before this change, and sandboxes started with `--secret-name=''`, have

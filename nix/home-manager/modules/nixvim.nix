@@ -5,6 +5,11 @@
     enable = true;
     defaultEditor = true;
     vimAlias = true;
+    # No plugin here needs the Ruby provider, which costs about 40 MB.
+    withRuby = false;
+    # Build the editor from the same package set as everything else, so the
+    # language servers on PATH and the ones Neovim starts are one copy.
+    nixpkgs.useGlobalPackages = true;
     globals.mapleader = " ";
 
     opts = {
@@ -22,7 +27,11 @@
     };
 
     # Keep search available even outside the usual Home Manager shell.
-    extraPackages = [ pkgs.ripgrep pkgs.uv pkgs.shellcheck ];
+    extraPackages = [
+      pkgs.ripgrep
+      pkgs.uv
+      pkgs.shellcheck
+    ];
 
     plugins = {
       blink-cmp = {

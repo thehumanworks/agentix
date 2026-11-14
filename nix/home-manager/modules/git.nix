@@ -1,15 +1,21 @@
-{ pkgs, op, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 let
   # Each command resolves its host and token. op must already be authenticated.
-  mkGh = name: host: token:
+  mkGh =
+    name: host: token:
     pkgs.writeShellApplication {
       inherit name;
       text = ''
         export GH_HOST="${host}"
         export GH_TOKEN="${token}"
         export GH_NO_UPDATE_NOTIFIER=1
-        exec ${op}/bin/op run -- ${pkgs.gh}/bin/gh "$@"
+        exec ${lib.getExe config.agentix.op.package} run -- ${lib.getExe pkgs.gh} "$@"
       '';
     };
 
@@ -17,13 +23,11 @@ let
   workGh = mkGh "gh-lf" "op://agentix/gh/work/host" "op://agentix/gh/work/token";
 in
 {
+  # The committer identity is set by the profile; see ../profiles/identity.nix.
   programs.git = {
     enable = true;
+    lfs.enable = true;
     settings = {
-      user = {
-        name = "Tomas Roda";
-        email = "rodat.dev@proton.me";
-      };
       init.defaultBranch = "main";
       push.autoSetupRemote = true;
       push.default = "simple";
@@ -34,19 +38,9 @@ in
       # Host-specific helpers work for ordinary git clone/fetch/push over HTTPS.
       credential."https://leadforensics.ghe.com".helper = [
         ""
-        "${workGh}/bin/gh-lf auth git-credential"
+        "${lib.getExe workGh} auth git-credential"
       ];
     };
-
-    # Match stored remote URLs, independent of where the repository lives.
-    includes = map (url: {
-      condition = "hasconfig:remote.*.url:${url}";
-      contents.user.email = "rodat@leadforensics.com";
-    }) [
-      "https://leadforensics.ghe.com/**"
-      "git@leadforensics.ghe.com:*/**"
-      "ssh://git@leadforensics.ghe.com/**"
-    ];
   };
 
   programs.gh = {
@@ -58,11 +52,12 @@ in
     };
     gitCredentialHelper = {
       enable = true;
-      hosts = [ "https://github.com" "https://gist.github.com" ];
+      hosts = [
+        "https://github.com"
+        "https://gist.github.com"
+      ];
     };
   };
 
-  home.packages = [
-    workGh
-  ];
+  home.packages = [ workGh ];
 }

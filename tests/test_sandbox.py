@@ -6,7 +6,7 @@ from unittest.mock import patch
 from fire import Fire
 
 from agentix.__main__ import main
-from agentix.sandbox import OP_TOKEN_FILE, WORKDIR_FILE, create_sandbox
+from agentix.sandbox import MEMORY_MIB, OP_TOKEN_FILE, WORKDIR_FILE, create_sandbox
 
 
 class SandboxWorkdirTests(unittest.TestCase):
@@ -58,6 +58,38 @@ class SandboxWorkdirTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "working directory"):
             create_sandbox(secret_name="", workdir="/srv/project")
         self.create.return_value.terminate.assert_called_once()
+
+
+class SandboxResourceTests(unittest.TestCase):
+    def setUp(self):
+        self.create = patch("agentix.sandbox.modal.Sandbox.create").start()
+        patch("agentix.sandbox.modal.Image.from_name").start()
+        patch("agentix.sandbox.modal.Secret.from_name").start()
+        patch("agentix.sandbox.get_app").start()
+        self.addCleanup(patch.stopall)
+        self.create.return_value.object_id = "sb-test"
+        self.create.return_value.exec.return_value.wait.return_value = 0
+
+    def test_default_reserves_memory_and_keeps_modal_cpu(self):
+        create_sandbox(secret_name="")
+        self.assertEqual(self.create.call_args.kwargs["memory"], MEMORY_MIB)
+        self.assertIsNone(self.create.call_args.kwargs["cpu"])
+
+    def test_cli_accepts_memory_and_cpu(self):
+        real_fire = Fire
+        with (
+            patch(
+                "fire.Fire",
+                side_effect=lambda commands: real_fire(
+                    commands,
+                    command=["sandbox", "up", "--memory=16384", "--cpu=4"],
+                ),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            main()
+        self.assertEqual(self.create.call_args.kwargs["memory"], 16384)
+        self.assertEqual(self.create.call_args.kwargs["cpu"], 4)
 
 
 class SandboxOpTokenTests(unittest.TestCase):

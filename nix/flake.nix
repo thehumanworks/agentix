@@ -1,36 +1,108 @@
 {
-  description = "Portable Home Manager environments for Modal and macOS";
+  description = "Portable Home Manager environments for Modal sandboxes and macOS";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
-    nixvim.url = "github:nix-community/nixvim";
     home-manager = {
       url = "github:nix-community/home-manager/master";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    # Nixvim tests against its own nixpkgs pin and advises against `follows`.
+    # One package set keeps the image half the size; `nix flake check` and the
+    # image build's editor smoke test catch a mismatch after an update.
+    nixvim = {
+      url = "github:nix-community/nixvim";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { nixpkgs, home-manager, nixvim, ... }:
+  outputs =
+    inputs@{
+      self,
+      nixpkgs,
+      home-manager,
+      nixvim,
+      ...
+    }:
     let
-      mkHome = system: username: homeDirectory:
+      inherit (nixpkgs) lib;
+
+      # One entry per machine type. The profile holds everything that differs.
+      homes = {
+        modal = {
+          system = "x86_64-linux";
+          profile = ./home-manager/profiles/sandbox.nix;
+        };
+        modal-arm = {
+          system = "aarch64-linux";
+          profile = ./home-manager/profiles/sandbox.nix;
+        };
+        mac = {
+          system = "aarch64-darwin";
+          profile = ./home-manager/profiles/mac.nix;
+        };
+      };
+
+      forAllSystems = lib.genAttrs (lib.unique (lib.mapAttrsToList (_: home: home.system) homes));
+
+      pkgsFor = forAllSystems (
+        system:
+        import nixpkgs {
+          inherit system;
+          config.allowUnfreePredicate =
+            pkg:
+            builtins.elem (lib.getName pkg) [
+              "claude-code"
+              "1password-cli"
+            ];
+        }
+      );
+
+      mkHome =
+        { system, profile }:
         home-manager.lib.homeManagerConfiguration {
-          pkgs = import nixpkgs {
-            inherit system;
-            config.allowUnfreePredicate = pkg:
-              builtins.elem (nixpkgs.lib.getName pkg) [ "claude-code" "1password-cli" ];
-          };
+          pkgs = pkgsFor.${system};
+          extraSpecialArgs = { inherit inputs; };
           modules = [
             nixvim.homeModules.nixvim
-            ./home-manager/home.nix
-            { home = { inherit username homeDirectory; }; }
+            profile
           ];
         };
-    in {
-      homeConfigurations = {
-        modal = mkHome "x86_64-linux" "root" "/root";
-        modal-arm = mkHome "aarch64-linux" "root" "/root";
-        mac = mkHome "aarch64-darwin" "tomas" "/Users/tomas";
-        mac-intel = mkHome "x86_64-darwin" "tomas" "/Users/tomas";
-      };
+    in
+    {
+      homeConfigurations = lib.mapAttrs (_: mkHome) homes;
+
+      # `nix fmt` formats every Nix file under this directory. The root is tied
+      # to flake.nix: outside a Git checkout treefmt otherwise picks its own
+      # root, and as root in a sandbox that rewrote files in /nix/store.
+      formatter = forAllSystems (
+        system: pkgsFor.${system}.nixfmt-tree.override { settings.tree-root-file = "flake.nix"; }
+      );
+
+      # `nix flake check` builds this system's profiles and lints the sources.
+      checks = forAllSystems (
+        system:
+        let
+          pkgs = pkgsFor.${system};
+          lint =
+            name: tools: command:
+            pkgs.runCommand "agentix-${name}" { nativeBuildInputs = tools; } ''
+              cd ${self}
+              ${command}
+              touch $out
+            '';
+        in
+        {
+          format = lint "format" [
+            pkgs.nixfmt
+            pkgs.findutils
+          ] "find . -name '*.nix' -exec nixfmt --check {} +";
+          statix = lint "statix" [ pkgs.statix ] "statix check .";
+          deadnix = lint "deadnix" [ pkgs.deadnix ] "deadnix --fail .";
+        }
+        // lib.mapAttrs' (
+          name: _: lib.nameValuePair "home-${name}" self.homeConfigurations.${name}.activationPackage
+        ) (lib.filterAttrs (_: home: home.system == system) homes)
+      );
     };
 }

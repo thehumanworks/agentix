@@ -11,23 +11,55 @@
     gawk
     diffutils
     patch
+    file
+    tree
 
-    # Search, structured data, and HTTP.
+    # Search and structured data.
     ripgrep
-    jq
+    fd
     fzf
-    curl
+    ast-grep
+    jq
+    yq-go
+    sqlite
 
-    # General scripting, Python projects, and shell validation.
+    # Network and transfer.
+    curl
+    wget
+    rsync
+    dnsutils
+    lsof
+
+    # Archives.
+    zip
+    unzip
+    zstd
+
+    # Builds and task runners.
+    gnumake
+    just
+    pkg-config
+
+    # Python, JavaScript, and shell.
     python3
     uv
     bun
+    nodejs
     shellcheck
+    shfmt
 
-    # Nix language servers, available directly on PATH.
-    nixd
-    nil
+    # Nix formatting and linting; the flake's checks run the same tools.
+    nixfmt
+    statix
+    deadnix
 
     herdr
   ];
+
+  # Loads a project's .envrc. `use flake` environments are cached and kept from
+  # garbage collection by nix-direnv.
+  programs.direnv = {
+    enable = true;
+    nix-direnv.enable = true;
+  };
 }
