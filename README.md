@@ -51,6 +51,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | --- | --- |
 | `image build [--force-build]` | Build the image from `nix/` and publish it; prints `image_id` |
 | `flake update [INPUT...] [--build]` | Move pinned Nix inputs in `nix/flake.lock`; `--build` also rebuilds when one moved |
+| `config show` | The defaults `sandbox up` uses, and where each comes from |
 | `sandbox up [FLAGS]` | Start a sandbox; prints `sandbox_id` and `name` |
 | `sandbox ls` | Every name with its current sandbox, and running sandboxes without a name |
 | `sandbox exec SANDBOX 'COMMAND'` | Run one command and print its output |
@@ -91,9 +92,65 @@ that has a name. The command line uses
 | `--no-snapshot` | off | Modal saves nothing when the sandbox ends |
 | `--ephemeral` | off | No name, no record, no snapshot |
 
+Every flag above except `--name`, `--hostname`, and `--ephemeral` can get
+its default from your config file instead; see
+[Defaults for `sandbox up`](#defaults-for-sandbox-up).
+
 `sandbox up` returns once the sandbox is ready for commands, about a second
 after Modal accepts it. It does not build the image. Sandboxes run in
 Modal's VM runtime and reserve TCP port 22 for the OpenSSH tunnel.
+
+### Defaults for `sandbox up`
+
+To stop retyping the same flags, put them in `~/.config/agentix/config.toml`
+(or `$XDG_CONFIG_HOME/agentix/config.toml`), under `[sandbox.up]`:
+
+```toml
+[sandbox.up]
+timeout = 7200
+memory = 16384
+tailscale = true
+```
+
+| Key | Type | Built-in default | Flag |
+| --- | --- | --- | --- |
+| `image_name` | string | `"determinate-nix:latest"` | `--image-name` |
+| `secret_name` | string | `"1password"`; `""` attaches none | `--secret-name` |
+| `timeout` | integer, seconds | `3600` | `--timeout` |
+| `memory` | integer, MiB | `8192` | `--memory` |
+| `cpu` | number, cores | `0`, Modal's default share | `--cpu` |
+| `workdir` | string | `""`, which is `/workdir` | `--workdir` |
+| `tailscale` | boolean | `false` | `--tailscale` |
+| `no_snapshot` | boolean | `false` | `--no-snapshot` |
+
+A flag on the command line wins over the file, and the file wins over the
+built-in default, also when the flag gives the built-in default: with
+`timeout = 7200` in the file, `--timeout=3600` starts a sandbox for an hour.
+Turn a boolean off with `--notailscale` or `--tailscale=False`, and
+`--no-snapshot=False`; a value such as `false` in lower case is refused.
+Fire reads `--workdir=None` as a flag not given, so the file's value
+applies; use `--workdir=` for an empty workdir, which is `/workdir`.
+`--ephemeral` still saves no snapshot, whatever the file says. Only
+`sandbox up` reads the file; `sandbox restore` uses the options the name was
+created with.
+
+Without the file, nothing changes. A key that is not in the table above, a
+value of the wrong type, invalid TOML, or a file that cannot be read stops
+`sandbox up` before anything starts, with a message that names the file and
+the key. Keys are written with underscores, as help prints the flags.
+
+`config show` prints each key with the value `sandbox up` would use and its
+source, `default` or `config PATH`:
+
+```sh
+$ uv run agentix config show
+{"key": "timeout", "value": 7200, "source": "config /home/me/.config/agentix/config.toml", "type": "integer"}
+{"key": "memory", "value": 8192, "source": "default", "type": "integer"}
+...
+```
+
+Because the flags of `sandbox up` default to the file, its help shows
+`Default: None` for them; `config show` has the values.
 
 ### Running commands
 
@@ -368,8 +425,13 @@ build creates it first. See [Modal](nix/README.md#modal) for the details.
 
 Root's Home Manager generation, activated at build time, with:
 
-- search and data tools (ripgrep, fd, fzf, ast-grep, jq, yq, sqlite),
-  network and archive tools, make and just;
+- search and data tools (ripgrep, fd, fzf, ast-grep, jq, yq, sqlite,
+  psql), network and archive tools, make and just, hyperfine, watchexec,
+  difftastic (`difft`), and nix-output-monitor (`nom`);
+- a C and C++ compiler (`cc`, `gcc`, `g++`) with binutils;
+- a headless Chromium, `chrome-headless-shell`, which Playwright finds too;
+- comma, so `, COMMAND` runs a command that is not installed, with a prebuilt
+  nix-index database, and `nix-locate`;
 - Python 3 with uv, Bun, and Node; ruff, ty, shellcheck, shfmt, nixfmt,
   statix, and deadnix; language servers for Python, TypeScript, Bash, Nix,
   and more, used by Neovim and by Claude Code's LSP tool;
@@ -385,13 +447,14 @@ The image build checks that every command in the manifest,
 `/root/.nix-profile/share/agentix/manifest.json`, resolves in root's
 profile.
 
-The image has no `apt` or `dpkg`, no C compiler (`gcc`, `cc`), no `sudo`
-(you are root), no `pip` (use `uv`), and no `perl`, `gpg`, or `useradd`.
-Run anything missing from nixpkgs, at the image's revision:
+The image has no `apt` or `dpkg`, no `sudo` (you are root), no `pip` (use
+`uv`), and no `perl`, `gpg`, or `useradd`. Run anything missing from nixpkgs,
+at the image's revision:
 
 ```sh
-nix shell nixpkgs#gcc -c gcc --version
+, hello                       # comma finds the package in its index
 nix run nixpkgs#hello
+nix shell nixpkgs#gnupg -c gpg --version
 ```
 
 ### Rebuilding
@@ -419,13 +482,20 @@ lock. See [Rex in sandboxes](nix/README.md#rex-in-sandboxes).
 
 ### Profiles and modules
 
-`nix/flake.nix` builds three Home Manager profiles:
+`nix/flake.nix` builds four Home Manager profiles:
 
 | Profile | System | Status |
 | --- | --- | --- |
 | `modal` | x86_64 Linux | The image; built by `image build` and CI |
 | `modal-arm` | ARM64 Linux | Built once under emulation; CI's ARM job should build it, not yet seen green |
+| `linux` | x86_64 Linux | An example of `lib.mkLinuxHome` for a user `agent`; built by CI |
 | `mac` | Apple Silicon macOS | Evaluated by CI, not built; see [macOS later](nix/README.md#macos-later) |
+
+For any other Linux machine or container, `lib.mkLinuxHome { username;
+homeDirectory; }` gives a configuration for that user, root or not, without
+Modal. The sandbox modules that rely on what `sandbox up` writes under
+`/run/agentix`, or on root, stay off there. See
+[Any Linux user](nix/README.md#any-linux-user).
 
 Every module has an `enable` option: `agentix.NAME.enable` for the shared
 modules, which default to on, and `agentix.sandbox.NAME.enable` for the
@@ -458,6 +528,7 @@ image.
 │   ├── flake.py            flake update and the Rex pin
 │   ├── layout.py           paths and environment from nix/sandbox.toml
 │   ├── defaults.py         default image, secret, timeout, memory, store
+│   ├── config.py           defaults for sandbox up from ~/.config/agentix/config.toml
 │   └── scripts/            tailscale-ssh.sh and openssh-ssh.sh, run in the sandbox
 ├── nix/                    the flake; see nix/README.md
 │   ├── flake.nix           inputs, profiles, exported modules, OCI packages, checks
@@ -503,13 +574,12 @@ secret or contacts Modal.
   `ruff check`, and `ruff format --check`. `Nix flake check` runs
   `nix flake check --all-systems --no-build`, which evaluates the x86_64,
   ARM, and Mac outputs, then `nix flake check` on x86_64 Linux: formatting,
-  statix, deadnix, the `modal` profile, the OCI image's root and layer list,
-  and each SSH engine module on and off. `Nix flake check (ARM)` runs the
-  same `nix flake check` beside it on an `ubuntu-24.04-arm` runner, which
-  builds `modal-arm`, the ARM image's root and layer list, and the SSH engine
-  checks. That job is new and has not yet been seen green on GitHub; its
-  first run is its first test. To require CI before merging, require those
-  three checks by name.
+  statix, deadnix, the `modal` and `linux` profiles, the OCI image's root
+  and layer list, and each SSH engine module on and off. `Nix flake check
+  (ARM)` runs the same `nix flake check` beside it on an `ubuntu-24.04-arm`
+  runner, which builds `modal-arm`, the ARM image's root and layer list, and
+  the SSH engine checks. That job has not yet been seen green on GitHub. To
+  require CI before merging, require those three checks by name.
 - `flake-update.yml` runs every Monday and on demand. It runs
   `nix flake update` in `nix/` and the same Nix checks on the new lock,
   building x86_64 only; ARM is built when CI runs on the pull request. When
