@@ -232,6 +232,33 @@ async def execute(session: Session, sandbox_id: str, args: Sequence[str]) -> Exe
     return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code}
 
 
+_STDIN_PIECE = 1 << 20
+
+
+async def execute_bytes(
+    session: Session, sandbox_id: str, args: Sequence[str], stdin: bytes = b""
+) -> tuple[int, bytes, bytes]:
+    """Run a command with `stdin` as its input; its exit code and raw output."""
+    async with session.sandbox(sandbox_id) as handle:
+        process = await handle.exec.aio(*args, text=False)
+
+        async def feed() -> None:
+            # In pieces, each sent before the next is buffered.
+            for start in range(0, len(stdin), _STDIN_PIECE):
+                process.stdin.write(stdin[start : start + _STDIN_PIECE])
+                await process.stdin.drain.aio()
+            process.stdin.write_eof()
+            await process.stdin.drain.aio()
+
+        _, stdout, stderr, exit_code = await asyncio.gather(
+            feed(),
+            process.stdout.read.aio(),
+            process.stderr.read.aio(),
+            process.wait.aio(),
+        )
+    return exit_code, stdout, stderr
+
+
 async def stop(session: Session, sandbox_id: str) -> bool:
     """End a sandbox and wait until it has ended. False if it had already ended.
 
