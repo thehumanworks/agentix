@@ -19,8 +19,8 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
 | `home-manager/users/` | One file per person: the Git name and emails |
-| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
-| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
+| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor, comma and nix-index. `core.nix` declares the options several modules share |
+| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, the C compiler, the headless browser, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
 | `oci/` | The sandbox profile as an OCI image, which the Modal image is made from; see [OCI image](#oci-image) |
 
@@ -42,9 +42,12 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | `agentix.claude.enable` | `claude-code.nix` | Claude Code, its settings and plugins, and the `claude` wrapper |
 | `agentix.git.enable` | `git.nix` | Git, with `gh` and `gh-lf` as HTTPS credential helpers |
 | `agentix.languageServers.enable` | `language-servers.nix` | The language servers, on PATH and in Claude's LSP tool |
+| `agentix.nixIndex.enable` | `nix-index.nix` | comma (`, COMMAND`) and `nix-locate`, with the prebuilt index from nix-index-database, and the shell's command-not-found hook |
 | `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
 | `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
 | `agentix.sandbox.baseCommands.enable` | `sandbox/base-commands.nix` | `tar`, `gzip`, `xz`, `less`, `which`, `flock`, `locale`, `infocmp`, and the other commands a Debian base would provide |
+| `agentix.sandbox.browser.enable` | `sandbox/browser.nix` | `chrome-headless-shell`, Playwright's headless Chromium, run with `--no-sandbox` for root, and `PLAYWRIGHT_BROWSERS_PATH` for Playwright clients |
+| `agentix.sandbox.cc.enable` | `sandbox/cc.nix` | GCC as `cc`, `gcc`, `c++`, and `g++`, and binutils (`ld`, `ar`, `nm`) |
 | `agentix.sandbox.claude.enable` | `sandbox/claude.nix` | Claude's sandbox brief and trusted directories |
 | `agentix.sandbox.manifest.enable` | `sandbox/manifest.nix` | The manifest of commands and shared paths |
 | `agentix.sandbox.opToken.enable` | `sandbox/op-token.nix` | An `op` that loads the token file a sandbox stores |
@@ -127,8 +130,8 @@ not resolve to it on the image's `PATH`, or if the paths differ from the ones
 
 The flake exports `homeManagerModules.default`, which imports every module,
 and one module per concern: `"1password"`, `claude-code`, `git`,
-`language-servers`, `nixvim`, `tools`, `sandbox-base-commands`,
-`sandbox-claude`, `sandbox-manifest`, `sandbox-op-token`, `sandbox-openssh`,
+`language-servers`, `nix-index`, `nixvim`, `tools`, `sandbox-base-commands`,
+`sandbox-browser`, `sandbox-cc`, `sandbox-claude`, `sandbox-manifest`, `sandbox-op-token`, `sandbox-openssh`,
 `sandbox-rex`, `sandbox-tailscale`, and `sandbox-workdir`. Each brings the
 modules it depends on.
 The modules use this flake's pinned inputs, not those of the flake that imports
@@ -185,26 +188,54 @@ Without the unfree setting, evaluation refuses `claude-code` and
 `1password-cli`. With Home Manager inside NixOS and `useGlobalPkgs`, allow
 `config.home-manager.users.NAME.agentix.unfreePackages` in the system's own
 predicate instead. The
-`nixvim` and `sandbox-rex` modules import the Home Manager modules of Nixvim
-and Rex; do not import those again. The gh wrappers, the Claude login, and
+`nixvim`, `nix-index`, and `sandbox-rex` modules import the Home Manager
+modules of Nixvim, nix-index-database, and Rex; do not import those again. The gh wrappers, the Claude login, and
 Tailscale read secrets from the `agentix` vault in 1Password; turn off the
 modules you have no such items for.
 
 ## What a sandbox gets
 
 - Tools for search, data, networking, archives, builds, Python, JavaScript,
-  shell, and Nix, listed in `modules/tools.nix`.
+  shell, and Nix, listed in `modules/tools.nix`, including `psql`,
+  `hyperfine`, `watchexec`, `difft` (difftastic), and `nom`
+  (nix-output-monitor).
 - The commands of a Debian system that agents and the scripts here use:
   `tar`, `gzip`, `xz`, `bzip2`, `less`, `which`, `flock` and the rest of
   util-linux, `locale`, `iconv`, `infocmp`, `tput`, `openssl`, `hostname`, and
   `getent`, listed in `modules/sandbox/base-commands.nix`. They come from the
-  pinned nixpkgs, as everything in the image does. There is no C compiler;
-  use `nix shell nixpkgs#gcc`.
+  pinned nixpkgs, as everything in the image does.
+- A C and C++ compiler: GCC as `cc`, `gcc`, `c++`, and `g++`, with binutils,
+  from `modules/sandbox/cc.nix`. It finds glibc's headers and libraries on its
+  own; other libraries come from a project's Nix shell.
+- A headless Chromium, Playwright's `chrome-headless-shell`, from
+  `modules/sandbox/browser.nix`. On PATH it runs with `--no-sandbox`, which
+  Chromium needs as root: `chrome-headless-shell --dump-dom URL`,
+  `--screenshot=FILE`, `--print-to-pdf=FILE`. The image's
+  `PLAYWRIGHT_BROWSERS_PATH` points Playwright clients of the same minor
+  release as nixpkgs' (in `$PLAYWRIGHT_BROWSERS_PATH/VERSION`) at it: Node's
+  `bunx playwright@1.64`, or nixpkgs' `python3Packages.playwright`. The PyPI
+  wheel under `uv` does not load, because greenlet needs a libstdc++ the
+  image has no system copy of. Other releases look for a build of their own.
+  It starts with the DejaVu fonts, so CJK text renders as boxes. The full
+  Chromium would add about 1.7 GiB; this build adds about 500 MiB.
+- comma and `nix-locate`, from `modules/nix-index.nix`. `, COMMAND ARGS` looks
+  COMMAND up in a prebuilt index of nixpkgs, the small database of the
+  `nix-index-database` input, and runs it from the image's `nixpkgs` without
+  installing it. No index is built at run time. The index is of
+  nixpkgs-unstable in the week the input was locked, so a package that the
+  pinned revision lacks may be named; `nix flake update nix-index-database`
+  moves it.
+- Measured when they were added, the compiler, the browser, comma, and the
+  tools added with them (`psql`, `hyperfine`, `watchexec`, `difft`, `nom`)
+  took the unpacked image from 2.0 to 3.0 GiB: GCC and binutils about
+  330 MiB, the browser and its libraries about 500 MiB, difftastic 86 MiB,
+  PostgreSQL 26 MiB, and the rest under 25 MiB together. Turn a module off
+  to leave its share out.
 - Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
   Claude's LSP tool run the same builds. Claude has the Python, TypeScript,
   Bash, and Nix servers configured.
-- `nix run nixpkgs#NAME`, `nix shell nixpkgs#NAME`, and `nix-shell -p NAME`
+- `, COMMAND`, `nix run nixpkgs#NAME`, `nix shell nixpkgs#NAME`, and `nix-shell -p NAME`
   resolve to the revision the image was built from. A tool that is not
   installed runs after a download of a few seconds and matches the libraries of
   the installed ones.

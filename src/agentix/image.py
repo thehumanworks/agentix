@@ -270,4 +270,27 @@ def _checks() -> list[str]:
         # Each sandbox's rex server makes its own state, including its host
         # ID; none may be baked into the image.
         "test ! -e /root/.local/state/rex",
+        # The compiler builds and links a program against glibc on its own.
+        _if_listed(
+            "cc",
+            "printf '#include <stdio.h>\\nint main(void) { puts(\"ok\"); }\\n' "
+            "> /tmp/agentix-check.c && cc -o /tmp/agentix-check /tmp/agentix-check.c "
+            '&& test "$(/tmp/agentix-check)" = ok',
+        ),
+        # The headless browser renders a page as root, and Playwright finds
+        # the same build where the image's environment points it.
+        _if_listed(
+            "chrome-headless-shell",
+            "chrome-headless-shell --dump-dom 'data:text/html,<title>agentix</title>' "
+            "2> /dev/null | grep '<title>agentix</title>' > /dev/null && "
+            'test -x "$(echo "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/'
+            'chrome-headless-shell-*/chrome-headless-shell)"',
+        ),
+        # comma and nix-locate read the index in the image, without building
+        # one. grep reads all of the output, so nix-locate does not panic on
+        # a closed pipe.
+        _if_listed(
+            ",",
+            "nix-locate --minimal --whole-name --at-root /bin/hello | grep -x hello.out > /dev/null",
+        ),
     ]

@@ -20,6 +20,14 @@
       url = "github:thehumanworks/claude-mods";
       flake = false;
     };
+    # A prebuilt nix-index database for comma and nix-locate, rebuilt weekly
+    # from nixpkgs-unstable. Its packages are built with this flake's nixpkgs;
+    # only the database file comes from here. `nix flake update
+    # nix-index-database` moves it to the newest week.
+    nix-index-database = {
+      url = "github:nix-community/nix-index-database";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     # Rex, the terminal multiplexer: the published release binary, from the
     # snapshot channel the nixos box uses. Both the flake and the binary
     # download without credentials. Rex's flake allows its own unfree licence.

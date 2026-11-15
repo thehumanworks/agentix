@@ -14,12 +14,18 @@ let
   };
 
   claude-code = withInputs ./modules/claude-code.nix;
+  nix-index = withInputs ./modules/nix-index.nix;
   nixvim = withInputs ./modules/nixvim.nix;
   sandbox-rex = withInputs ./modules/sandbox/rex.nix;
 in
 {
   "1password" = ./modules/1password.nix;
-  inherit claude-code nixvim sandbox-rex;
+  inherit
+    claude-code
+    nix-index
+    nixvim
+    sandbox-rex
+    ;
   git = ./modules/git.nix;
   language-servers = ./modules/language-servers.nix;
   tools = ./modules/tools.nix;
@@ -30,6 +36,8 @@ in
     claude-code
   ];
   sandbox-base-commands = ./modules/sandbox/base-commands.nix;
+  sandbox-browser = ./modules/sandbox/browser.nix;
+  sandbox-cc = ./modules/sandbox/cc.nix;
   sandbox-manifest = ./modules/sandbox/manifest.nix;
   sandbox-op-token = ./modules/sandbox/op-token.nix;
   sandbox-openssh = ./modules/sandbox/openssh.nix;
@@ -38,6 +46,8 @@ in
 
   default.imports = [
     ./modules/sandbox/base-commands.nix
+    ./modules/sandbox/browser.nix
+    ./modules/sandbox/cc.nix
     ./modules/sandbox/claude.nix
     ./modules/sandbox/manifest.nix
     ./modules/sandbox/op-token.nix
@@ -49,6 +59,7 @@ in
     claude-code
     ./modules/git.nix
     ./modules/language-servers.nix
+    nix-index
     nixvim
     ./modules/tools.nix
   ];
