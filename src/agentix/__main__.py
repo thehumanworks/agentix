@@ -129,8 +129,16 @@ def _terminate_sandbox(sandbox_id: str):
     return _backend().terminate(sandbox_id)
 
 
-def _execute(sandbox_id: str, command: str, resume: bool | str = False):
+def _execute(
+    sandbox_id: str, command: str, resume: bool | str = False, detach: bool = False
+):
     """Run COMMAND in a sandbox, given its ID or name.
+
+    With --detach, COMMAND runs in the background and the run ID is printed
+    at once; COMMAND goes on when this command or its terminal ends. Follow
+    it with `sandbox logs RUN_ID` and get its exit code with `sandbox wait
+    RUN_ID`. It needs the runner app: `agentix runner deploy`. See
+    docs/detached-runs.md.
 
     With --resume, if a named sandbox reaches its timeout while COMMAND runs,
     it is restored from its exit snapshot and COMMAND continues, as its resume
@@ -139,6 +147,12 @@ def _execute(sandbox_id: str, command: str, resume: bool | str = False):
     --resume='OTHER' names the command that continues it instead. A command
     with no rule is refused. See docs/resume.md.
     """
+    if detach is not False:
+        if detach is not True or resume is not False:
+            raise InvalidRequest(
+                "--detach takes no value and does not go with --resume."
+            )
+        return _backend().start_run(sandbox_id, shlex.split(command))["run_id"]
     if resume is False:
         result = _backend().execute(sandbox_id, shlex.split(command))
         if result["exit_code"] != 0:
@@ -186,6 +200,51 @@ def _check_runs(result: dict[str, Any]) -> None:
                 for run in result.get("runs", [])
             )
         )
+
+
+def _logs(run_id: str):
+    """Print the output of a detached run from its start, until it ends."""
+
+    def write(source: str, text: str) -> None:
+        stream = sys.stderr if source == "stderr" else sys.stdout
+        stream.write(text)
+        stream.flush()
+
+    _backend().follow_run(run_id, write)
+
+
+def _wait(run_id: str):
+    """Wait for a detached run to end, print its exit code, and exit with it.
+
+    A run whose sandbox ended first exits with 128 and says so.
+    """
+    result = _backend().wait_run(run_id)
+    code = result.get("exit_code")
+    if result.get("sandbox_ended") and code in (None, 128):
+        print(f"agentix: the sandbox of {run_id} ended first.", file=sys.stderr)
+    print(code if code is not None else "none")
+    sys.stdout.flush()
+    sys.exit(128 if code is None else code)
+
+
+def _runs(target: str = "", clean: bool = False):
+    """Detached runs of a sandbox (given its ID, or every sandbox of a name), or all.
+
+    Each run's state is running, exited (with its exit code), sandbox ended,
+    failed, or expired. --clean forgets the runs that have ended and deletes
+    their log files in sandboxes that still run; runs that still run stay.
+    """
+    if clean is not False and clean is not True:
+        raise InvalidRequest(f"--clean takes no value, not {clean!r}.")
+    return _backend().runs(target, clean)
+
+
+def _runner_deploy():
+    """Deploy the Modal app that runs `sandbox exec --detach` commands.
+
+    Deploying again is safe. The app costs nothing while no run is going.
+    """
+    return _backend().deploy_runner()
 
 
 def _list_sandboxes():
@@ -482,10 +541,16 @@ def main(argv: Sequence[str] | None = None):
             "config": {
                 "show": _config_show,
             },
+            "runner": {
+                "deploy": _runner_deploy,
+            },
             "sandbox": {
                 "up": _create_sandbox,
                 "down": _terminate_sandbox,
                 "exec": _execute,
+                "logs": _logs,
+                "wait": _wait,
+                "runs": _runs,
                 "ls": _list_sandboxes,
                 "snapshot": _snapshot,
                 "snapshots": _snapshots,

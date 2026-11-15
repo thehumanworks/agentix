@@ -54,7 +54,9 @@ uv run agentix sandbox shell dev --engine=openssh
 | `config show` | The defaults `sandbox up` uses, and where each comes from |
 | `sandbox up [FLAGS]` | Start a sandbox; prints `sandbox_id` and `name` |
 | `sandbox ls` | Every name with its current sandbox, and running sandboxes without a name |
-| `sandbox exec SANDBOX 'COMMAND' [--resume[=CMD]]` | Run one command and print its output; `--resume` continues it after a timeout |
+| `sandbox exec SANDBOX 'COMMAND' [--resume[=CMD]] [--detach]` | Run one command and print its output; `--resume` continues it after a timeout; `--detach` prints a run ID and leaves it running |
+| `sandbox logs RUN` / `sandbox wait RUN` | Follow a detached run's output from its start / wait for it and exit with its exit code |
+| `sandbox runs [SANDBOX] [--clean]` | Detached runs and their state; `--clean` forgets those that ended |
 | `sandbox shell [SANDBOX] [-- COMMAND]` | Start SSH if needed, then log in with `ssh`, or run COMMAND |
 | `sandbox ssh start\|status\|stop SANDBOX` | Control one SSH engine; `start` prints how to connect |
 | `sandbox down SANDBOX` | Stop a sandbox; for a named one, prints the snapshot Modal saved |
@@ -64,6 +66,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox resume NAME` | Restore NAME and continue the `exec --resume` commands its timeout cut off |
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
 | `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
+| `runner deploy` | Deploy the Modal app that runs `exec --detach` commands; safe to repeat |
 
 Each command is `uv run agentix ...`. `SANDBOX` is a sandbox name or a
 sandbox ID (`sb-...`); the snapshot commands take an ID only for a sandbox
@@ -186,6 +189,34 @@ uv run agentix sandbox exec dev 'bash -lc "command -v uv && ls | wc -l"'
 
 A long agent run can outlast the sandbox; see
 [Resuming after a timeout](#resuming-after-a-timeout) for `--resume`.
+
+`--detach` leaves the command running after `exec`, the terminal, or the
+laptop goes away. It prints a run ID (`fc-...`) at once; `sandbox logs RUN`
+prints the output from the start and follows it until the command ends,
+and `sandbox wait RUN` prints the exit code and exits with it (128 when the
+sandbox ended first). Standard output and error come as one stream.
+
+```sh
+uv run agentix runner deploy              # once per workspace; see below
+run=$(uv run agentix sandbox exec dev 'make test' --detach)
+uv run agentix sandbox logs "$run"
+uv run agentix sandbox wait "$run"
+uv run agentix sandbox runs dev           # runs of every sandbox of dev
+uv run agentix sandbox runs dev --clean   # forget runs that have ended
+```
+
+A run is a call of a Modal function, `run` in the app `agentix-runner`,
+which `runner deploy` deploys (set `AGENTIX_RUNNER_APP` for another name).
+It costs nothing while idle, and a small container (0.125 CPU, 256 MiB)
+for as long as a run goes. The function execs the command in the sandbox
+and follows it; the log and exit code stay with Modal, and a copy in
+`/root/.local/state/agentix/detached/RUN/` in the sandbox. Each run also
+leaves a small file in `runs/` on the record Volume, so that `sandbox runs`
+can list it; `--clean` removes those of runs that have surely ended, with
+their logs in sandboxes that still run, and keeps runs whose state is
+unknown. A run lasts at most 24 hours, there is no
+`stop` yet, and `--detach` does not go with `--resume`. Design and failure
+modes: [docs/detached-runs.md](docs/detached-runs.md).
 
 `sandbox shell` is described under [SSH](#ssh). Commands run with
 `sandbox exec`, SSH logins, and `ssh HOST COMMAND` all start in `/workdir`,
@@ -621,6 +652,8 @@ image.
 │   ├── local.py            runs each operation with one Modal session
 │   ├── lifecycle.py        up, down, ls, snapshot(s), restore, purge
 │   ├── resume.py           exec --resume and sandbox resume, with the resume rules
+│   ├── runs.py             exec --detach, sandbox logs, wait, and runs
+│   ├── runner.py           the deployed Modal function that runs detached commands
 │   ├── store.py            the record of a name and how copies merge
 │   ├── recordfiles.py      records as files on the Volume, cached in a Dict
 │   ├── sandbox.py          Modal sandbox calls and the sandbox start command
