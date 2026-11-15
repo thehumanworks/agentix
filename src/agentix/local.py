@@ -83,6 +83,22 @@ class Local:
 
         return _run(run)
 
+    def shell(
+        self, target: str, engine: str, hostname: str = "", public_key: str = ""
+    ) -> dict[str, Any]:
+        """How to log in to a running sandbox with ssh, once it answers.
+
+        Without a target, the only sandbox that runs. See `ssh.connect`.
+        """
+
+        async def run(session: Session):
+            sandbox_id, name = await lifecycle.running(session, target)
+            return await ssh.connect(
+                session, sandbox_id, name, engine, hostname, public_key
+            )
+
+        return _run(run)
+
     def snapshot(self, target: str) -> dict[str, Any]:
         return _run(lambda session: lifecycle.take_snapshot(session, target))
 

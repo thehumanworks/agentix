@@ -4,6 +4,7 @@ set -euo pipefail
 action=$1
 hostname=${2:-}
 socket=/run/agentix-tailscale/tailscaled.sock
+system_keys=/etc/ssh
 
 if [[ $action == start ]] && { ! command -v ts >/dev/null || ! command -v tailscale >/dev/null; }; then
   echo "This sandbox's image has no Tailscale: agentix.sandbox.tailscale is off in its Home Manager profile." >&2
@@ -80,6 +81,19 @@ wait_dns_label() {
   done
 }
 
+# The SSH host keys that tailscaled presents, without comments: for each type,
+# the system's key, since tailscaled runs as root, or else its own, which it
+# keeps in the state directory of ts.
+host_keys() {
+  local state_dir=${TAILSCALE_STATE_DIR:-$HOME/.local/state/agentix/tailscale}
+  local type key
+  for type in rsa ecdsa ed25519; do
+    key=$system_keys/ssh_host_${type}_key
+    if [[ ! -f $key ]]; then key=$state_dir/ssh/ssh_host_${type}_key; fi
+    if [[ -f $key ]]; then ssh-keygen -y -f "$key" | cut -d ' ' -f 1,2; fi
+  done | jq -cRs 'split("\n") | map(select(. != ""))'
+}
+
 read_status
 case "$action" in
   start)
@@ -144,8 +158,13 @@ case "$action" in
   *) echo "Unknown action: $action" >&2; exit 2 ;;
 esac
 
-jq -cn --argjson data "$data" --argjson enabled "$enabled" '{
+keys='[]'
+# A key that cannot be read is left out; SSH itself still works.
+if [[ -S $socket ]]; then keys=$(host_keys) || keys='[]'; fi
+jq -cn --argjson data "$data" --argjson enabled "$enabled" --argjson keys "$keys" '{
   status: (if $enabled and $data.BackendState == "Running" then "running" else "stopped" end),
+  online: ($data.Self.Online == true),
   magicdns: (($data.Self.DNSName // "") | rtrimstr(".")),
-  ipv4: ([$data.TailscaleIPs[]? | select(contains(":") | not)] | first // "")
+  ipv4: ([$data.TailscaleIPs[]? | select(contains(":") | not)] | first // ""),
+  host_keys: $keys
 }'

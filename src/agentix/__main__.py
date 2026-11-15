@@ -3,7 +3,12 @@
 Modal is slow to import, so only a command that needs it loads it.
 """
 
+import os
 import shlex
+import sys
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from typing import Any
 
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import PublicKeyRequired
@@ -142,20 +147,95 @@ def _ssh_start(
     from . import ssh_input
 
     ssh_input.check_arguments(engine, hostname, public_key)
+    return _with_public_key(
+        engine,
+        public_key,
+        lambda key: _backend().ssh("start", sandbox_id, engine, hostname, key),
+    )
+
+
+def _with_public_key(engine: str, path: str, start: Callable[[str], Any]) -> Any:
+    """Call `start` with the text of the public key at `path`, for openssh.
+
+    A listener that already runs needs no key, so a key that cannot be read
+    is reported only if the sandbox asks for it.
+    """
+    from . import ssh_input
+
     key, key_problem = "", None
     if engine == "openssh":
-        # A listener that already runs needs no key. Report a key problem only
-        # if the sandbox asks for the key.
         try:
-            key = ssh_input.read_public_key(public_key)
+            key = ssh_input.read_public_key(path)
         except ValueError as error:
             key_problem = error
     try:
-        return _backend().ssh("start", sandbox_id, engine, hostname, key)
+        return start(key)
     except PublicKeyRequired:
         if key_problem is None:
             raise
         raise key_problem from None
+
+
+def _shell(
+    name: str = "",
+    engine: str = "tailscale",
+    hostname: str = "",
+    public_key: str = "",
+    command: Sequence[str] = (),
+):
+    """Log in to a running sandbox with ssh, given its name or ID.
+
+    Without a name, the only sandbox that runs. SSH is started if it does not
+    run yet, with --engine=tailscale (the default) or --engine=openssh, and
+    ssh starts once the sandbox answers. Run one command instead with
+    `agentix sandbox shell NAME -- COMMAND`; it gets a terminal when this one
+    has one. ssh accepts only the host keys that the sandbox reports through
+    Modal. A stopped sandbox is not restored: restore it first.
+    """
+    from . import ssh_input
+
+    ssh_input.check_arguments(engine, hostname, public_key)
+    details = _with_public_key(
+        engine,
+        public_key,
+        lambda key: _backend().shell(name, engine, hostname, key),
+    )
+    argv = ["ssh", *details["ssh_options"]]
+    identity = Path(public_key).expanduser().with_suffix("") if public_key else None
+    if identity is not None and public_key.endswith(".pub") and identity.is_file():
+        argv += ["-i", str(identity)]
+    if command and sys.stdin.isatty() and sys.stdout.isatty():
+        argv.append("-t")
+    argv.append(details["destination"])
+    if command:
+        argv += ["--", *command]
+    label = details["name"] or details["sandbox_id"]
+    print(
+        f"Connecting to {label} as {details['destination']} with {engine}. ssh "
+        "trusts only host keys that the sandbox reported through Modal "
+        f"({details['host_key_fingerprints'][-1]}).",
+        file=sys.stderr,
+    )
+    if warning := details.get("warning"):
+        print(f"Warning: {warning}", file=sys.stderr)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execvp("ssh", argv)
+
+
+def _shell_command(command: Sequence[str]) -> Callable[..., Any]:
+    """`sandbox shell` for Fire, with the command that followed `--`."""
+
+    def shell(
+        name: str = "",
+        engine: str = "tailscale",
+        hostname: str = "",
+        public_key: str = "",
+    ):
+        return _shell(name, engine, hostname, public_key, command)
+
+    shell.__doc__ = _shell.__doc__
+    return shell
 
 
 def _ssh_stop(sandbox_id: str, engine: str = "tailscale"):
@@ -168,9 +248,16 @@ def _ssh_status(sandbox_id: str, engine: str = "tailscale"):
     return _backend().ssh("status", sandbox_id, engine)
 
 
-def main():
+def main(argv: Sequence[str] | None = None):
     from fire import Fire
 
+    args = list(sys.argv[1:] if argv is None else argv)
+    # Fire reads what follows `--` as flags of its own. After `sandbox shell`,
+    # it is the command to run in the sandbox.
+    command: list[str] = []
+    if args[:2] == ["sandbox", "shell"] and "--" in args:
+        split = args.index("--")
+        args, command = args[:split], args[split + 1 :]
     Fire(
         {
             "image": {
@@ -188,18 +275,18 @@ def main():
                 "snapshots": _snapshots,
                 "restore": _restore,
                 "purge": _purge,
+                "shell": _shell_command(command),
                 "ssh": {
                     "start": _ssh_start,
                     "stop": _ssh_stop,
                     "status": _ssh_status,
                 },
             },
-        }
+        },
+        command=args,
     )
 
 
 if __name__ == "__main__":
-    import os
-
     os.environ["PAGER"] = "cat"
     main()

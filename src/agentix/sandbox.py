@@ -201,6 +201,11 @@ async def terminate(session: Session, sandbox_id: str) -> Terminated:
     return {"id": sandbox_id, "status": "terminated"}
 
 
+async def is_running(session: Session, sandbox_id: str) -> bool:
+    async with session.sandbox(sandbox_id) as handle:
+        return await handle.poll.aio() is None
+
+
 async def name_of(session: Session, sandbox_id: str) -> str:
     """The name of a sandbox, or "" for one started without a name."""
     async with session.sandbox(sandbox_id) as handle:

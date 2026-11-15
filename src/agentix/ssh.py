@@ -1,10 +1,16 @@
 """Control SSH inside an existing sandbox."""
 
 import asyncio
+import base64
+import contextlib
 import functools
+import hashlib
 import json
+import os
 import re
 import shlex
+import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +73,7 @@ async def manage(
     hostname: str = "",
     public_key: str = "",
     name: str | None = None,
+    host_keys: bool = False,
 ) -> dict[str, Any]:
     """Run `action` (start, stop or status) for one SSH engine of a sandbox.
 
@@ -76,6 +83,9 @@ async def manage(
 
     `public_key` is the text of the key, not a path. The openssh engine uses it
     only when it starts a listener; a listener that already runs keeps its key.
+
+    With `host_keys`, the result has the public host keys of the SSH server,
+    as `TYPE BASE64` lines, read in the sandbox.
     """
     check_arguments(engine, hostname, public_key)
     if public_key:
@@ -119,6 +129,9 @@ async def manage(
                 user="root",
                 ssh_command=shlex.join(["ssh", "-p", str(port), f"root@{host}"]),
             )
+    keys = result.pop("host_keys", [])
+    if host_keys:
+        result["host_keys"] = keys
     return {"sandbox_id": sandbox_id, "engine": engine, **result}
 
 
@@ -139,3 +152,196 @@ def _renamed(result: dict[str, Any], hostname: str, again: str) -> str:
         "earlier sandbox's, Tailscale removes it about an hour after it went "
         f"offline; then {again} takes the name."
     )
+
+
+async def connect(
+    session: Session,
+    sandbox_id: str,
+    name: str,
+    engine: str = "tailscale",
+    hostname: str = "",
+    public_key: str = "",
+) -> dict[str, Any]:
+    """Start SSH unless it runs, wait until it answers, and say how to log in.
+
+    Returns `destination` and `ssh_options` for `ssh`. The options make ssh
+    accept only the host keys that the sandbox reported through Modal, from a
+    known_hosts file of agentix: it never asks, and the user's own
+    known_hosts file is neither read nor changed.
+
+    SSH that runs already is used as it is, with its hostname, unless
+    `hostname` asks for another one.
+    """
+    details = None
+    if not hostname:
+        details = await manage(session, "status", sandbox_id, engine, host_keys=True)
+    # A Tailscale node can run and still be offline: start reconnects it.
+    if (
+        details is None
+        or details["status"] != "running"
+        or details.get("online") is False
+    ):
+        details = await manage(
+            session,
+            "start",
+            sandbox_id,
+            engine,
+            hostname,
+            public_key,
+            name=name,
+            host_keys=True,
+        )
+    options = []
+    if engine == "tailscale":
+        host = details["magicdns"] or details["ipv4"]
+        # Connecting to the address needs no DNS, which can lag behind a node
+        # that just enrolled. ssh still matches its configuration on the name.
+        address, port = details["ipv4"] or host, 22
+        if address != host:
+            options += ["-o", f"HostName={address}"]
+        await wait_until_reachable(address, port, engine)
+        keys = details["host_keys"]
+    else:
+        if "host" not in details:
+            raise InvalidRequest(
+                "This sandbox has no SSH tunnel. "
+                "Create a new one with agentix sandbox up."
+            )
+        host = address = details["host"]
+        port = details["port"]
+        options += ["-p", str(port)]
+        await wait_until_reachable(address, port, engine)
+        # The sandbox reports the fingerprint of its key. The key itself comes
+        # from the server, and only one with that fingerprint is kept.
+        expected = details.get("host_key_fingerprint", "")
+        keys = await asyncio.to_thread(scan_host_keys, address, port, expected)
+        if expected and not keys:
+            raise OperationFailed(
+                f"The SSH server at {address}:{port} did not present the host key "
+                f"that {sandbox_id} reported ({expected}), so ssh was not started."
+            )
+    if not keys:
+        raise OperationFailed(
+            f"SSH runs in {sandbox_id}, but its host key was not found, so its "
+            "identity cannot be checked."
+        )
+    # One file per engine: each has host keys of its own.
+    alias = f"agentix-{name or sandbox_id.lower()}-{engine}"
+    known_hosts = await asyncio.to_thread(write_known_hosts, alias, keys)
+    options += [
+        "-o",
+        f"HostKeyAlias={alias}",
+        "-o",
+        f'UserKnownHostsFile="{known_hosts}"',
+        "-o",
+        "StrictHostKeyChecking=yes",
+    ]
+    result = {
+        "sandbox_id": sandbox_id,
+        "name": name,
+        "engine": engine,
+        "destination": f"root@{host}",
+        "ssh_options": options,
+        "host_key_fingerprints": [fingerprint(key) for key in keys],
+    }
+    if "warning" in details:
+        result["warning"] = details["warning"]
+    return result
+
+
+# How long to wait for a started SSH server to answer. A new Tailscale node
+# reaches the other nodes of the tailnet within seconds.
+REACHABLE_TIMEOUT = 60
+
+
+async def wait_until_reachable(
+    host: str, port: int, engine: str, timeout: float = REACHABLE_TIMEOUT
+) -> None:
+    """Wait until an SSH server at host:port sends its greeting."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port), 5
+            )
+            try:
+                # A server may send other lines before its version.
+                for _ in range(10):
+                    greeting = await asyncio.wait_for(reader.readline(), 5)
+                    if not greeting or greeting.startswith(b"SSH-"):
+                        break
+            finally:
+                writer.close()
+            if greeting.startswith(b"SSH-"):
+                return
+            problem = f"it answered {greeting[:40]!r}"
+        except (OSError, TimeoutError) as error:
+            problem = str(error) or type(error).__name__
+        if loop.time() >= deadline:
+            hint = (
+                " Is this computer on the tailnet, and does its policy allow SSH?"
+                if engine == "tailscale"
+                else ""
+            )
+            raise OperationFailed(
+                f"SSH at {host}:{port} did not answer within {timeout:g} s "
+                f"({problem}).{hint}"
+            )
+        await asyncio.sleep(0.5)
+
+
+def fingerprint(key: str) -> str:
+    """The SHA256 fingerprint of a `TYPE BASE64` public key, as ssh shows it."""
+    blob = base64.b64decode(key.split()[1], validate=True)
+    digest = base64.b64encode(hashlib.sha256(blob).digest()).decode()
+    return "SHA256:" + digest.rstrip("=")
+
+
+def scan_host_keys(host: str, port: int, expected: str) -> list[str]:
+    """The host keys that the server at host:port presents with `expected`."""
+    scan = subprocess.run(
+        ["ssh-keyscan", "-T", "10", "-p", str(port), host],
+        capture_output=True,
+        text=True,
+    )
+    keys = []
+    for line in scan.stdout.splitlines():
+        fields = line.split()
+        if line.startswith("#") or len(fields) < 3:
+            continue
+        key = f"{fields[1]} {fields[2]}"
+        with contextlib.suppress(ValueError, IndexError):
+            if fingerprint(key) == expected:
+                keys.append(key)
+    return keys
+
+
+def known_hosts_directory() -> Path:
+    state = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(state) / "agentix" / "known_hosts"
+
+
+# Every login rewrites the known_hosts file of its sandbox. One that is older
+# than this is of a sandbox that nobody logged in to for a month.
+_KNOWN_HOSTS_AGE = 30 * 24 * 3600
+
+
+def write_known_hosts(alias: str, keys: list[str]) -> Path:
+    """Write the host keys of `alias` to a file of its own, and return its path.
+
+    Each sandbox has its own file, so concurrent logins to different
+    sandboxes do not interfere. A file is replaced, never edited.
+    """
+    directory = known_hosts_directory()
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    now = time.time()
+    for old in directory.iterdir():
+        with contextlib.suppress(OSError):
+            if now - old.stat().st_mtime > _KNOWN_HOSTS_AGE:
+                old.unlink()
+    path = directory / alias
+    staged = path.with_name(f".{alias}.{os.getpid()}")
+    staged.write_text("".join(f"{alias} {key}\n" for key in keys))
+    staged.replace(path)
+    return path

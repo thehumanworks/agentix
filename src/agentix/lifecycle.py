@@ -346,6 +346,71 @@ async def restore(
     )
 
 
+async def running(session: Session, target: str = "") -> tuple[str, str]:
+    """The ID and name of the running sandbox that `target` names.
+
+    `target` is a name or a sandbox ID; without one, the only sandbox that
+    runs is meant. A sandbox that has ended is refused with what to do
+    instead: it is not restored here.
+    """
+    if not target:
+        rows = [row for row in await ls(session) if row["status"] == "running"]
+        if len(rows) == 1:
+            return rows[0]["sandbox_id"], rows[0]["name"]
+        if not rows:
+            raise NotFound(
+                "No sandbox is running. Start one with agentix sandbox up, or "
+                "continue one with agentix sandbox restore NAME; agentix "
+                "sandbox ls lists them."
+            )
+        listed = "\n".join(
+            f"  {row['name'] or row['sandbox_id']}"
+            + (f" ({row['sandbox_id']})" if row["name"] else "")
+            for row in rows
+        )
+        raise InvalidRequest(
+            f"{len(rows)} sandboxes are running. Name one, as in agentix "
+            f"sandbox shell NAME:\n{listed}"
+        )
+    if names.is_sandbox_id(target):
+        if await sandbox.is_running(session, target):
+            return target, await sandbox.name_of(session, target)
+        name = await sandbox.name_of(session, target)
+        hint = f" It was {name}; see agentix sandbox ls." if name else ""
+        raise InvalidRequest(f"{target} is not running.{hint}")
+    record = await store.load(session, names.check_name(target))
+    record, outcomes = await _reconcile(session, record, 0)
+    if _is_running(record, outcomes):
+        return record["sandbox_id"], record["name"]
+    raise InvalidRequest(_stopped(record))
+
+
+def _stopped(record: store.Record) -> str:
+    name = record["name"]
+    if store.pending(record):
+        return (
+            f"{name} is stopped, and Modal is still saving its snapshot. "
+            f"Shortly, continue it with agentix sandbox restore {name}."
+        )
+    if record["snapshots"]:
+        latest = store.ordered(record)[-1]
+        return (
+            f"{name} is stopped. Continue it from its latest snapshot, of "
+            f"{latest['created_at']}, with agentix sandbox restore {name}, "
+            f"then run agentix sandbox shell {name} again."
+        )
+    reason = (
+        ""
+        if record["options"].get("exit_snapshot", True)
+        else ", because it was started with --no-snapshot"
+    )
+    return (
+        f"{name} is stopped and has no snapshot to continue from{reason}. Start "
+        f"it afresh with agentix sandbox purge {name}, then agentix sandbox up "
+        f"--name={name}."
+    )
+
+
 def _nothing_to_restore(record: store.Record) -> str:
     name = record["name"]
     if record["options"].get("exit_snapshot", True):

@@ -27,7 +27,16 @@ class TailscaleScriptTests(unittest.TestCase):
             .replace(
                 "/run/agentix-tailscale/tailscaled.sock", str(self.root / "socket")
             )
+            .replace("system_keys=/etc/ssh", f"system_keys={self.root / 'etc-ssh'}")
         )
+        # Prints a public key named after the private key file.
+        keygen = self.root / "ssh-keygen"
+        keygen.write_text(
+            '#!/bin/sh\n[ "$1" = -y ] && [ "$2" = -f ] || exit 9\n'
+            'grep -q unreadable "$3" && exit 1\n'
+            'echo "ssh-test $(basename "$(dirname "$3")")/$(basename "$3") comment"\n'
+        )
+        keygen.chmod(0o755)
         stub = """import json, os, sys
 from pathlib import Path
 root = Path(os.environ['TEST_ROOT'])
@@ -115,6 +124,7 @@ else:
                 **os.environ,
                 "TEST_ROOT": str(self.root),
                 "PATH": path or f"{self.root}:{os.environ['PATH']}",
+                "TAILSCALE_STATE_DIR": str(self.root / "ts-state"),
             },
             text=True,
             capture_output=True,
@@ -128,8 +138,10 @@ else:
             result,
             {
                 "status": "running",
+                "online": True,
                 "magicdns": "existing.test.ts.net",
                 "ipv4": "100.64.0.2",
+                "host_keys": [],
             },
         )
         self.assertFalse((self.root / "mutations").exists())
@@ -162,8 +174,10 @@ else:
             result,
             {
                 "status": "running",
+                "online": True,
                 "magicdns": "existing.test.ts.net",
                 "ipv4": "100.64.0.9",
+                "host_keys": [],
             },
         )
         self.assertEqual((self.root / "mutations").read_text(), "logout\nenroll\n")
@@ -251,7 +265,13 @@ else:
         for action in ("status", "stop"):
             self.assertEqual(
                 self.run_action(action),
-                {"status": "stopped", "magicdns": "", "ipv4": ""},
+                {
+                    "status": "stopped",
+                    "online": False,
+                    "magicdns": "",
+                    "ipv4": "",
+                    "host_keys": [],
+                },
             )
         self.assertFalse((self.root / "mutations").exists())
 
@@ -262,6 +282,27 @@ else:
         self.assertEqual(error.exception.stdout, "")
         self.assertIn("agentix.sandbox.tailscale is off", error.exception.stderr)
         self.assertFalse((self.root / "mutations").exists())
+
+    def test_host_keys_are_those_that_tailscaled_presents(self):
+        # The system's key of a type wins over the one in the state directory.
+        for path in (
+            "etc-ssh/ssh_host_rsa_key",
+            "ts-state/ssh/ssh_host_rsa_key",
+            "ts-state/ssh/ssh_host_ed25519_key",
+        ):
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text("private")
+        self.assertEqual(
+            self.run_action("status")["host_keys"],
+            ["ssh-test etc-ssh/ssh_host_rsa_key", "ssh-test ssh/ssh_host_ed25519_key"],
+        )
+
+    def test_unreadable_host_key_does_not_fail_ssh(self):
+        key = self.root / "ts-state/ssh/ssh_host_ed25519_key"
+        key.parent.mkdir(parents=True)
+        key.write_text("unreadable")
+        result = self.run_action("start")
+        self.assertEqual((result["status"], result["host_keys"]), ("running", []))
 
     def test_disconnected_network_is_not_reported_as_running_ssh(self):
         self.state["BackendState"] = "Stopped"

@@ -68,6 +68,40 @@ uv run agentix sandbox ssh stop dev
 uv run agentix sandbox down dev
 ```
 
+`sandbox shell NAME` logs in to a running sandbox in one step. It starts SSH
+unless it runs already (Tailscale by default, or `--engine=openssh` for the
+Modal tunnel), waits until the sandbox answers, and then becomes `ssh`, so the
+session has your terminal and ends with the exit code of the sandbox side:
+
+```sh
+uv run agentix sandbox shell dev
+uv run agentix sandbox shell dev -- pwd
+uv run agentix sandbox shell dev --engine=openssh
+```
+
+What follows `--` runs in the sandbox, as with `ssh HOST COMMAND`. It gets a
+terminal when yours is one, so `-- nvim` works and `-- ls | wc -l` gets plain
+output. Without a name, `sandbox shell` opens the only sandbox that runs; when
+several run, it lists them and asks for a name. A stopped sandbox is not
+restored: the command says which snapshot `sandbox restore NAME` would
+continue from. SSH that runs already keeps its Tailscale hostname, unless you
+pass `--hostname`. OpenSSH starts with your public key as `sandbox ssh start`
+does; with `--public-key=PATH`, the private key next to it is used too.
+
+`sandbox shell` checks the sandbox's identity with what the sandbox reports
+through Modal, not by trust on first use. Tailscale SSH reports its host keys.
+OpenSSH reports the fingerprint of its key, and the key that the tunnel
+presents is used only if it has that fingerprint. ssh then runs with
+`StrictHostKeyChecking=yes` and a known_hosts file of agentix, in
+`~/.local/state/agentix/known_hosts/` (or `$XDG_STATE_HOME/agentix/`), so it
+never asks, refuses any other key, and leaves `~/.ssh/known_hosts` as it is.
+It connects to the address that the Tailscale node reports, under its
+MagicDNS name, so it reaches the sandbox also when Tailscale named it
+`dev-1`. A plain `ssh root@dev` keeps using your own known_hosts file. A
+restored sandbox has the host keys of its snapshot, but a new sandbox under a
+purged name has new ones, which that plain ssh refuses until you remove the
+old entry, with `ssh-keygen -R dev.TAILNET.ts.net`.
+
 `sandbox up --tailscale` also starts Tailscale SSH, as `sandbox ssh start`
 does, and prints its address next to the sandbox ID. `--hostname=NAME` sets
 the Tailscale hostname. A new sandbox enrolls with a key from 1Password, so
