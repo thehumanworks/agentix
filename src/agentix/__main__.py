@@ -66,7 +66,7 @@ def _create_sandbox(
     # Refuse before anything is created.
     names.check_ephemeral(name, ephemeral)
     if name:
-        names.check_name(name)
+        names.check_new_name(name)
     ssh_input.check_tailscale_start(tailscale, hostname, secret_name)
     return _backend().create_sandbox(
         image_name=image_name,
@@ -134,9 +134,10 @@ def _ssh_start(
 ):
     """Start SSH in a sandbox, given its ID or name.
 
-    Tailscale names default to the lowercase sandbox ID.
-
-    An explicit hostname also applies when Tailscale is already running.
+    The Tailscale hostname defaults to the sandbox name, so that a restored
+    sandbox keeps its address, and to the lowercase sandbox ID for a sandbox
+    without a name. An explicit hostname also applies when Tailscale is
+    already running.
     """
     from . import ssh_input
 

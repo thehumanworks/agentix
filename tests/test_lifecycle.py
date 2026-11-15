@@ -107,7 +107,7 @@ class UpTests(LifecycleTestCase):
         self.assertEqual(self.stored("dev")["sandbox_id"], "sb-other")
 
     def test_invalid_name_is_refused_before_modal_is_contacted(self):
-        for name in ("sb-dev", "Dev"):
+        for name in ("sb-dev", "Dev", "dev-"):
             with self.subTest(name=name), self.assertRaises(InvalidRequest):
                 self.run_cli("sandbox", "up", f"--name={name}")
         self.app_lookup.aio.assert_not_called()
@@ -144,11 +144,11 @@ class UpTests(LifecycleTestCase):
                 "ssh_command": "ssh root@dev.test.ts.net",
             },
         )
-        self.assertEqual(
-            self.sandbox.exec.aio.call_args.args[-2:], ("start", "sb-test")
-        )
-        # One session: the new handle is used without a lookup.
+        # The name is the hostname, so a restored sandbox gets the address again.
+        self.assertEqual(self.sandbox.exec.aio.call_args.args[-2:], ("start", "dev"))
+        # One session: the new handle is used without a lookup, nor its tags.
         self.lookup.aio.assert_not_called()
+        self.sandbox.get_tags.aio.assert_not_called()
 
     def test_cli_passes_the_tailscale_hostname(self):
         self.sandbox.process.stdout.read.aio.return_value = TAILSCALE
@@ -315,6 +315,14 @@ class RestoreTests(LifecycleTestCase):
     def test_chosen_snapshot_is_used(self):
         self.run_cli("sandbox", "restore", "dev", "--snapshot=im-older")
         self.snapshot_image.assert_called_once_with("im-older")
+
+    def test_tailscale_keeps_the_name_as_hostname(self):
+        restored = self.create.aio.return_value
+        restored.process.stdout.read.aio.return_value = TAILSCALE
+        result = self.run_core(lifecycle.restore, "dev", tailscale=True)
+        self.assertEqual(restored.exec.aio.call_args.args[-2:], ("start", "dev"))
+        self.assertEqual(result["ssh_command"], "ssh root@dev.test.ts.net")
+        self.assertNotIn("warning", result)
 
     def test_snapshot_of_another_name_is_refused(self):
         with self.assertRaisesRegex(NotFound, "not a snapshot of dev"):
@@ -493,6 +501,13 @@ class EphemeralTests(LifecycleTestCase):
             OperationFailed, "sb-test is running.*ssh start sb-test"
         ):
             self.run_core(lifecycle.up, OPTIONS, tailscale=True, ephemeral=True)
+
+    def test_tailscale_hostname_is_the_sandbox_id(self):
+        self.sandbox.process.stdout.read.aio.return_value = TAILSCALE
+        self.run_core(lifecycle.up, OPTIONS, tailscale=True, ephemeral=True)
+        self.assertEqual(
+            self.sandbox.exec.aio.call_args.args[-2:], ("start", "sb-test")
+        )
 
 
 class NameResolutionTests(LifecycleTestCase):

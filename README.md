@@ -55,8 +55,9 @@ image both read.
 
 `sandbox up` prints the new sandbox ID and a name, such as `brisk-otter`.
 Choose the name with `--name=NAME`: up to 63 lowercase letters, digits, and
-dashes, starting with a letter but not with `sb-`. Every command that takes a
-sandbox ID also takes the name:
+dashes, starting with a letter but not with `sb-`, and ending with a letter or
+digit, so that the name is also a hostname. Every command that takes a sandbox
+ID also takes the name:
 
 ```sh
 uv run agentix sandbox up --name=dev
@@ -75,12 +76,27 @@ sandbox starts but Tailscale does not, the error names the sandbox, which keeps
 running; retry with `sandbox ssh start`.
 
 `sandbox ssh start` defaults to `--engine=tailscale` and prints `magicdns` and
-`ipv4`. The default Tailscale hostname is the full sandbox ID in lowercase,
-so concurrent and replacement sandboxes have distinct SSH hostnames. You can
-also pass the sandbox ID as `--sandbox-id=sb-REPLACE` and override the name with
-`--hostname=agentix-dev`. Each start applies the requested name (or the sandbox
-ID when omitted), including when Tailscale is already running. Use distinct
-custom names for distinct sandboxes.
+`ipv4`. The default Tailscale hostname is the sandbox name, so `ssh root@dev`
+reaches the sandbox `dev`, also after `sandbox restore dev`. A sandbox without
+a name, such as one started with `--ephemeral`, gets its sandbox ID in
+lowercase. So does a name from an earlier version that ends with a dash, which
+Tailscale would drop. You can also pass the sandbox ID as
+`--sandbox-id=sb-REPLACE` and override the name with `--hostname=agentix-dev`.
+Each start applies the requested name (or the default when omitted), including
+when Tailscale is already running. Use distinct custom names for distinct
+sandboxes.
+
+Tailscale gives every node a name of its own. When another node of the tailnet
+has the name already, the sandbox becomes `dev-1`, and `ssh root@dev` reaches
+that other node. `sandbox ssh start` then adds a `warning` and prints the
+`ssh_command` that reaches the sandbox. The other node is usually an earlier
+sandbox of the name: one that ended less than an hour ago, before a
+`sandbox purge` and a new `sandbox up --name=dev`. With an ephemeral auth key,
+Tailscale removes a node about an hour after it went offline (its
+documentation says 30 to 60 minutes; two that were watched took 66 and 70). The
+sandbox keeps `dev-1` after that, until its hostname changes, so each
+`sandbox ssh start dev` renames it away and back, which takes `dev` once it
+is free.
 
 For an existing sandbox named `modal`, rerun `sandbox ssh start SANDBOX_ID`
 and use the new returned `ssh_command`. This renames its existing Tailscale
@@ -205,9 +221,15 @@ including `/workdir`, `/root`, and `/tmp`, but no running processes, because
 memory is not saved. `/run` is not saved either, so no snapshot holds the
 1Password token; the new sandbox stores it again. SSH does not run until you
 start it again. Tailscale keeps its state in `/root`, so a restored sandbox
-rejoins the tailnet as the same node; its hostname becomes the new sandbox ID
-unless you pass `--hostname`. OpenSSH keeps its host key, so the fingerprint
-stays the same.
+rejoins the tailnet as the same node, with the same address, under its name.
+If the tailnet has removed that node meanwhile, as it does with an ephemeral
+auth key, `tailscaled` still reports `Running` from the saved state, but the
+node stays offline and Tailscale asks it to log in. `sandbox ssh start`
+notices that, logs the old node key out, and enrolls the sandbox again with
+the 1Password key: under the same name, with a new IP address, in about 10
+seconds. Either way the Tailscale SSH host keys stay, because they are in the
+snapshot too. OpenSSH keeps its host key as well, so its fingerprint stays the
+same.
 
 `sandbox purge NAME` deletes every snapshot of a name, then the name. It
 refuses while the sandbox runs; `--terminate` stops it first and also deletes

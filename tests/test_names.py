@@ -25,6 +25,23 @@ class NameTests(unittest.TestCase):
             with self.subTest(name=name), self.assertRaises(InvalidRequest):
                 names.check_name(name)
 
+    def test_new_names_are_hostnames(self):
+        for name in ("dev", "brisk-otter", "a1", "a--b", "x" * 63):
+            with self.subTest(name=name):
+                self.assertEqual(names.check_new_name(name), name)
+                self.assertTrue(names.is_hostname(name))
+        for name in ("dev-", "Dev", "1dev", "sb-dev", "x" * 64):
+            with self.subTest(name=name), self.assertRaises(InvalidRequest):
+                names.check_new_name(name)
+
+    def test_names_from_before_the_hostname_rule_are_still_found(self):
+        self.assertEqual(names.check_name("dev-"), "dev-")
+        self.assertFalse(names.is_hostname("dev-"))
+
+    def test_up_refuses_a_name_that_is_no_hostname(self):
+        with self.assertRaisesRegex(InvalidRequest, "ending with a letter or digit"):
+            names.check_new_name("dev-")
+
     def test_names_cannot_look_like_sandbox_ids(self):
         self.assertTrue(names.is_sandbox_id("sb-01M7E2QYVQSTRC7J9YK9CBSQ5C"))
         self.assertFalse(names.is_sandbox_id("brisk-otter"))

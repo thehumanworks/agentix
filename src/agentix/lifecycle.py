@@ -113,7 +113,9 @@ async def _started(
     if not tailscale:
         return result
     try:
-        details = await ssh.manage(session, "start", sandbox_id, "tailscale", hostname)
+        details = await ssh.manage(
+            session, "start", sandbox_id, "tailscale", hostname, name=name
+        )
     except Exception as error:
         label = f"{sandbox_id} ({name})" if name else sandbox_id
         raise OperationFailed(
@@ -145,7 +147,7 @@ async def up(
         sandbox_id = await sandbox.create(session, **options)
         return await _started(session, sandbox_id, "", tailscale, hostname)
     if name:
-        if await store.find(session, names.check_name(name)) is not None:
+        if await store.find(session, names.check_new_name(name)) is not None:
             raise InvalidRequest(_taken(name))
     else:
         for _ in range(_NAME_ATTEMPTS):
