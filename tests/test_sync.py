@@ -138,6 +138,35 @@ class SafetyTests(SyncTestCase):
         self.sync()
         self.assertEqual((self.box / "a.txt").read_text(), "ONE\ntwo\nTHREE\n")
 
+    def test_a_file_synced_before_and_changed_since_is_no_conflict(self):
+        (self.host / "notes.txt").write_text("first\n")
+        (self.host / "a.txt").write_text("one\ntwo\nthree\nhost\n")
+        self.sync()
+        # Edits on both sides since: the untracked file on the host, a
+        # tracked file in the sandbox.
+        (self.host / "notes.txt").write_text("first\nsecond\n")
+        (self.box / "b.txt").write_text("box\n")
+        self.sync()
+        self.assertEqual((self.box / "notes.txt").read_text(), "first\nsecond\n")
+        self.assertEqual((self.box / "b.txt").read_text(), "box\n")
+        (self.box / "notes.txt").write_text("first\nsecond\nthird\n")
+        self.sync(pull=True)
+        self.assertEqual(
+            (self.host / "notes.txt").read_text(), "first\nsecond\nthird\n"
+        )
+        self.assertEqual((self.host / "b.txt").read_text(), "box\n")
+        self.assertEqual((self.host / "a.txt").read_text(), "one\ntwo\nthree\nhost\n")
+
+    def test_after_undo_a_pull_does_not_take_back_what_was_sent(self):
+        (self.host / "new.txt").write_text("new\n")
+        self.sync()
+        subprocess.run(
+            [*SCRIPT, "undo", str(self.box)], check=True, capture_output=True
+        )
+        self.assertFalse((self.box / "new.txt").exists())
+        self.assertEqual(self.sync(pull=True)["result"], "unchanged")
+        self.assertEqual((self.host / "new.txt").read_text(), "new\n")
+
     def test_ignored_file_in_the_way_is_refused(self):
         (self.host / ".gitignore").write_text("")
         (self.host / ".env").write_text("from host\n")

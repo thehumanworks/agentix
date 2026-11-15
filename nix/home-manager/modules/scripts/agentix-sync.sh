@@ -9,15 +9,22 @@
 #   agentix-sync pack [DIR]   standard input: the commits the other side has
 #                             (from its `info`); standard output: a Git bundle
 #                             of this working tree as a commit on top of HEAD
-#   agentix-sync apply [DIR]  standard input: that bundle; merges its changes
+#   agentix-sync apply [DIR] [BASE]
+#                             standard input: that bundle; merges its changes
 #                             into this working tree, or changes nothing
+#   agentix-sync mark [DIR] COMMIT
+#                             records COMMIT, which the other side applied, as
+#                             the last state both sides agreed on
 #   agentix-sync undo [DIR]   puts back the working tree from before the last
 #                             apply (or undo)
 #
 # The working tree, untracked files included and ignored files left out,
 # becomes a commit whose parent is HEAD. `apply` merges the sender's changes,
-# from its HEAD to that commit, into this side's working tree with
-# `git merge-tree`, so the two HEADs may differ. If any file conflicts, or a
+# from BASE to that commit, into this side's working tree with
+# `git merge-tree`, so the two HEADs may differ. BASE is the last state both
+# sides agreed on (refs/agentix-sync/synced on both, which `info` shows), so
+# that a file synced before and changed since on one side is not a conflict;
+# without it, the sender's HEAD. If any file conflicts, or a
 # file the sender adds exists here but Git ignores it, apply changes nothing
 # and lists the files (exit code 3). Otherwise it first saves this side's
 # working tree as refs/agentix-sync/backup/TIME, then writes only the files
@@ -28,6 +35,7 @@ set -euo pipefail
 PROTOCOL=1
 OUTGOING=refs/agentix-sync/outgoing
 INCOMING=refs/agentix-sync/incoming
+SYNCED=refs/agentix-sync/synced
 BACKUPS=refs/agentix-sync/backup
 # Snapshot commits are internal; they need no identity from the user's config.
 export GIT_AUTHOR_NAME=agentix-sync GIT_AUTHOR_EMAIL=agentix-sync@localhost
@@ -130,6 +138,9 @@ cmd_info() {
   printf 'origin %s\n' "$(git config --get remote.origin.url || true)"
   git rev-list --max-parents=0 HEAD | sed 's/^/root /'
   # What the other side need not send.
+  if git rev-parse -q --verify "$SYNCED^{commit}" >/dev/null; then
+    printf 'synced %s %s\n' "$(git rev-parse "$SYNCED")" "$(git rev-parse "$SYNCED^")"
+  fi
   git for-each-ref --format='known %(objectname)' refs/heads refs/remotes
   printf 'known %s\n' "$(git rev-parse HEAD)"
 }
@@ -164,8 +175,12 @@ cmd_apply() {
   local theirs base mine merged code=0
   theirs=$(git rev-parse "$INCOMING^{commit}")
   base=$(git rev-parse "$theirs^")
+  if [[ -n ${2:-} ]]; then
+    base=$(git rev-parse -q --verify "$2^{commit}") || die "no commit $2 to merge from"
+  fi
   mine=$(snapshot)
-  printf 'base %s\n' "$base"
+  printf 'incoming %s\n' "$theirs"
+  printf 'sender-head %s\n' "$(git rev-parse "$theirs^")"
   printf 'head %s\n' "$(git rev-parse HEAD)"
   git merge-tree --write-tree --name-only --no-messages --merge-base="$base" "$mine" "$theirs" >"$work/merge" || code=$?
   if ((code == 1)); then
@@ -177,6 +192,7 @@ cmd_apply() {
   fi
   merged=$(head -n 1 "$work/merge")
   if [[ $merged == "$(git rev-parse "$mine^{tree}")" ]]; then
+    git update-ref "$SYNCED" "$theirs"
     printf 'result unchanged\n'
     return
   fi
@@ -189,7 +205,15 @@ cmd_apply() {
   backup "$mine" "before applying $theirs"
   report_changes "$mine" "$merged"
   write_tree "$mine" "$merged"
+  git update-ref "$SYNCED" "$theirs"
   printf 'result applied\n'
+}
+
+cmd_mark() {
+  enter "${1:-}"
+  local commit
+  commit=$(git rev-parse -q --verify "${2:-}^{commit}") || die "no commit ${2:-} to mark"
+  git update-ref "$SYNCED" "$commit"
 }
 
 cmd_undo() {
@@ -208,8 +232,10 @@ cmd_undo() {
     sed 's/^/ignored /' "$work/ignored"
     exit 3
   fi
-  # Saved first, so that undo can itself be undone.
+  # Saved first, so that undo can itself be undone. The working tree no
+  # longer holds what the other side has, so the two agree on nothing now.
   backup "$mine" "before going back to $latest"
+  git update-ref -d "$SYNCED"
   report_changes "$mine" "$latest"
   write_tree "$mine" "$latest"
   printf 'restored %s\n' "$latest"
@@ -217,7 +243,7 @@ cmd_undo() {
 }
 
 case ${1:-} in
-  info | pack | apply | undo)
+  info | pack | apply | mark | undo)
     command=$1
     shift
     "cmd_$command" "$@"
@@ -226,7 +252,7 @@ case ${1:-} in
     printf 'agentix-sync %s\n' "$PROTOCOL"
     ;;
   *)
-    echo "usage: agentix-sync info|pack|apply|undo [DIR], or agentix-sync version" >&2
+    echo "usage: agentix-sync info|pack|apply|mark|undo [DIR], or agentix-sync version" >&2
     exit 2
     ;;
 esac

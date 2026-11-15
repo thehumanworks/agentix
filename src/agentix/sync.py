@@ -10,6 +10,7 @@ Keep this module free of heavy imports: the command line reads it on every run.
 """
 
 import asyncio
+import contextlib
 import re
 import shlex
 import subprocess
@@ -39,8 +40,12 @@ class Side:
     path: str
     command: Sequence[str] = INSTALLED
 
-    async def call(self, action: str, stdin: bytes = b"") -> tuple[int, str, bytes]:
-        code, out, err = await self.run([*self.command, action, self.path], stdin)
+    async def call(
+        self, action: str, stdin: bytes = b"", *args: str
+    ) -> tuple[int, str, bytes]:
+        code, out, err = await self.run(
+            [*self.command, action, self.path, *args], stdin
+        )
         return code, err.decode(errors="replace").strip(), out
 
 
@@ -94,6 +99,8 @@ async def info(
         key, _, value = line.partition(" ")
         if key in ("root", "known"):
             result[key].append(value)
+        elif key == "synced":
+            result[key] = tuple(value.split(" "))
         else:
             result[key] = value
     return result
@@ -131,18 +138,26 @@ async def sync(here: Side, there: Side, pull: bool = False) -> dict[str, Any]:
     )
     check_same_repository(here_info, there_info)
     sender, receiver = (there, here) if pull else (here, there)
-    receiver_info = here_info if pull else there_info
+    sender_info, receiver_info = (
+        (there_info, here_info) if pull else (here_info, there_info)
+    )
     known = "".join(f"{sha}\n" for sha in receiver_info["known"]).encode()
     code, err, bundle = await sender.call("pack", known)
     if code != 0:
         raise OperationFailed(f"agentix-sync pack failed in {sender.label}: {err}")
-    code, err, out = await receiver.call("apply", bundle)
+    code, err, out = await receiver.call(
+        "apply", bundle, *_base(here_info, there_info, sender_info)
+    )
     report = _report(out.decode(errors="replace"))
     where = f"{receiver.label} ({receiver.path})"
     if code == 3:
         raise OperationFailed(_conflict_message(sender, receiver, report))
     if code != 0 or "result" not in report:
         raise OperationFailed(f"agentix-sync apply failed in {where}: {err}")
+    # Now both sides hold the sender's snapshot. If this fails, the next sync
+    # merges from the sender's HEAD instead.
+    with contextlib.suppress(Exception):
+        await sender.call("mark", b"", report["incoming"])
     result: dict[str, Any] = {
         "from": f"{sender.label} ({sender.path})",
         "to": where,
@@ -157,14 +172,24 @@ async def sync(here: Side, there: Side, pull: bool = False) -> dict[str, Any]:
             f"{shlex.join([*undo, 'undo', receiver.path])}, run in "
             f"{receiver.label}; the backup is commit {commit[:12]}"
         )
-    if report.get("base") != report.get("head"):
+    if report["sender-head"] != report["head"]:
         result["note"] = (
             f"{receiver.label} is on commit {report['head'][:12]} and "
-            f"{sender.label} on {report['base'][:12]}: only the uncommitted "
+            f"{sender.label} on {report['sender-head'][:12]}: only the uncommitted "
             f"changes were merged in. {sender.label}'s commit is in "
             "refs/agentix-sync/incoming^ there."
         )
     return result
+
+
+def _base(here: dict[str, Any], there: dict[str, Any], sender: dict[str, Any]):
+    """The last snapshot both sides applied, if the sender is still on its
+    commit, as the base to merge from: then a file that one side changed
+    since is no conflict. Otherwise none, and the sender's HEAD is the base."""
+    synced = here.get("synced")
+    if synced and synced == there.get("synced") and synced[1] == sender["head"]:
+        return [synced[0]]
+    return []
 
 
 def _conflict_message(sender: Side, receiver: Side, report: dict[str, Any]) -> str:

@@ -252,10 +252,13 @@ PATH, and the host runs the same file from `nix/` (or `nix run
   as a Git bundle without the commits the other side has, so only the
   changes cross.
 - It merges: the sender's changes are merged into the receiver's working
-  tree as `git merge` would, so the two may be on different commits; then
-  only the uncommitted changes move, and the sender's commit is kept in
-  `refs/agentix-sync/incoming^` there. Changes show as unstaged, and new
-  files as untracked; the index and HEAD stay.
+  tree as `git merge` would, from the last state both sides agreed on
+  (`refs/agentix-sync/synced`), else from the sender's HEAD. So a file
+  synced before and changed since on one side is no conflict, and the two
+  may be on different commits; then only the uncommitted changes move, and
+  the sender's commit is kept in `refs/agentix-sync/incoming^` there.
+  Changes show as unstaged, and new files as untracked; the index and HEAD
+  stay.
 - It refuses conflicts: if a file changed on both sides in ways that do not
   merge, or a file it would add is already there but ignored by Git, nothing
   changes on either side and the files are listed.
