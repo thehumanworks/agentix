@@ -36,6 +36,10 @@ class PathTest(unittest.TestCase):
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": "/cfg"}):
             self.assertEqual(config.path(), Path("/cfg/agentix/config.toml"))
 
+    def test_relative_xdg_config_home_is_ignored(self):
+        with patch.dict(os.environ, {"HOME": "/home/x", "XDG_CONFIG_HOME": "cfg"}):
+            self.assertEqual(config.path(), Path("/home/x/.config/agentix/config.toml"))
+
 
 class LoadTest(ConfigTestCase):
     def test_missing_file_changes_nothing(self):
@@ -126,6 +130,18 @@ class LoadTest(ConfigTestCase):
                 self.assertIn(expected, str(caught.exception))
                 self.assertIn(str(file), str(caught.exception))
 
+    def test_non_finite_numbers_are_refused(self):
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                file = self.write_config(f"[sandbox.up]\ncpu = {value}\n")
+                with self.assertRaises(ConfigError) as caught:
+                    config.load()
+                self.assertIn("cpu must be a finite number", str(caught.exception))
+                self.assertIn(str(file), str(caught.exception))
+        self.write_config("")
+        with self.assertRaisesRegex(ConfigError, "--cpu: cpu must be a finite"):
+            config.up_options(cpu=float("inf"))
+
     def test_invalid_toml_is_a_clear_error(self):
         file = self.write_config("[sandbox.up\ntimeout = \n")
         with self.assertRaises(ConfigError) as caught:
@@ -191,6 +207,10 @@ class PrecedenceTest(ConfigTestCase):
         self.assertEqual(options["memory"], 4096)
         options = config.up_options(ignore_file=("workdir",), workdir="/x")
         self.assertEqual(options["workdir"], "/x")
+
+    def test_unknown_ignore_file_name_is_refused(self):
+        with self.assertRaisesRegex(ValueError, "workdri"):
+            config.up_options(ignore_file=("workdri",))
 
     def test_flag_of_the_wrong_type_is_refused(self):
         with self.assertRaisesRegex(

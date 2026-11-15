@@ -128,6 +128,8 @@ built-in default, also when the flag gives the built-in default: with
 `timeout = 7200` in the file, `--timeout=3600` starts a sandbox for an hour.
 Turn a boolean off with `--notailscale` or `--tailscale=False`, and
 `--no-snapshot=False`; a value such as `false` in lower case is refused.
+Fire reads `--workdir=None` as a flag not given, so the file's value
+applies; use `--workdir=` for an empty workdir, which is `/workdir`.
 `--ephemeral` still saves no snapshot, whatever the file says. Only
 `sandbox up` reads the file; `sandbox restore` uses the options the name was
 created with.

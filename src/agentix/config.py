@@ -9,6 +9,7 @@ Keep this module free of heavy imports: the command line reads it on every
 `sandbox up`.
 """
 
+import math
 import os
 import tomllib
 from collections.abc import Collection
@@ -55,8 +56,11 @@ UP_KEYS: dict[str, Key] = {
 
 def path() -> Path:
     """Where the config file is, whether or not it exists."""
-    base = os.environ.get("XDG_CONFIG_HOME") or "~/.config"
-    return Path(base).expanduser() / "agentix" / "config.toml"
+    # The XDG spec says to ignore a relative XDG_CONFIG_HOME.
+    base = Path(os.environ.get("XDG_CONFIG_HOME") or "")
+    if not base.is_absolute():
+        base = Path("~/.config").expanduser()
+    return base / "agentix" / "config.toml"
 
 
 def _article(word: str) -> str:
@@ -76,7 +80,13 @@ def _check_type(key: Key, value: Any, where: str) -> Any:
             f"{where}: {key.name} must be {_article(key.type_name)} {key.type_name}, "
             f"not {type(value).__name__} {value!r}."
         )
-    return float(value) if key.type_name == "number" else value
+    if key.type_name == "number":
+        value = float(value)
+        if not math.isfinite(value):
+            raise ConfigError(
+                f"{where}: {key.name} must be a finite number, not {value!r}."
+            )
+    return value
 
 
 def load(file: Path | None = None) -> dict[str, Any]:
@@ -135,7 +145,7 @@ def resolve(
     that replaces that option, as --repo replaces workdir.
     """
     file = path() if file is None else file
-    unknown = set(flags) - set(UP_KEYS)
+    unknown = (set(flags) | set(ignore_file)) - set(UP_KEYS)
     if unknown:
         raise ValueError(f"Not keys of the config file: {sorted(unknown)}")
     configured = load(file)
