@@ -146,7 +146,8 @@ SSH rule for the same override. See the
 
 Rebuild after editing the Nix configuration. A rebuild keeps the revisions in
 `nix/flake.lock`; `uv run agentix flake update [INPUT...]` moves them first, and with `--build`
-also builds the image when one moved. Use `image build --force-build`
+also builds the image when one moved. Rex moves only when named, as
+`flake update rex`; see [Rex in sandboxes](nix/README.md#rex-in-sandboxes). Use `image build --force-build`
 only when an uncached build is needed. Modal's image-layer cache is used now;
 a separate Nix binary-cache service is deferred. Persistent volume mounting
 remains manual; see [the Nix setup notes](nix/README.md).
@@ -218,9 +219,10 @@ OCI image check. On a fresh runner that fetches about 620 MiB and adds about
 in `nix/` and the same Nix checks on the new lock. When they pass, it opens a
 pull request from `automation/flake-update` with the new `flake.lock`, or
 updates the one already open. When they fail, the run fails and its summary
-lists the inputs that moved. It does not build or publish the image: after
-merging its pull request, rebuild the image and verify it as `AGENTS.md`
-requires.
+lists the inputs that moved. Rex stays at the snapshot that `nix/flake.nix`
+names; move it with `uv run agentix flake update rex`. It does not build or
+publish the image: after merging its pull request, rebuild the image and
+verify it as `AGENTS.md` requires.
 
 The runners install the Determinate Nix release that `src/agentix/image.py`
 pins for the image. `ci.yml` keeps the store paths that
