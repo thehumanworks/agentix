@@ -131,8 +131,9 @@ not resolve to it on the image's `PATH`, or if the paths differ from the ones
 The flake exports `homeManagerModules.default`, which imports every module,
 and one module per concern: `"1password"`, `claude-code`, `git`,
 `language-servers`, `nix-index`, `nixvim`, `tools`, `sandbox-base-commands`,
-`sandbox-browser`, `sandbox-cc`, `sandbox-claude`, `sandbox-manifest`, `sandbox-op-token`, `sandbox-openssh`,
-`sandbox-rex`, `sandbox-tailscale`, and `sandbox-workdir`. Each brings the
+`sandbox-browser`, `sandbox-cc`, `sandbox-claude`, `sandbox-manifest`,
+`sandbox-op-token`, `sandbox-openssh`, `sandbox-rex`, `sandbox-tailscale`, and
+`sandbox-workdir`. Each brings the
 modules it depends on.
 The modules use this flake's pinned inputs, not those of the flake that imports
 them.
@@ -189,9 +190,10 @@ Without the unfree setting, evaluation refuses `claude-code` and
 `config.home-manager.users.NAME.agentix.unfreePackages` in the system's own
 predicate instead. The
 `nixvim`, `nix-index`, and `sandbox-rex` modules import the Home Manager
-modules of Nixvim, nix-index-database, and Rex; do not import those again. The gh wrappers, the Claude login, and
-Tailscale read secrets from the `agentix` vault in 1Password; turn off the
-modules you have no such items for.
+modules of Nixvim, nix-index-database, and Rex; do not import those again.
+The gh wrappers, the Claude login, and Tailscale read secrets from the
+`agentix` vault in 1Password; turn off the modules you have no such items
+for.
 
 ## What a sandbox gets
 
@@ -217,14 +219,23 @@ modules you have no such items for.
   wheel under `uv` does not load, because greenlet needs a libstdc++ the
   image has no system copy of. Other releases look for a build of their own.
   It starts with the DejaVu fonts, so CJK text renders as boxes. The full
-  Chromium would add about 1.7 GiB; this build adds about 500 MiB.
+  Chromium would add about 1.7 GiB; this build adds about 500 MiB. Running
+  as root with `--no-sandbox` leaves the sandbox as its only isolation, so
+  avoid untrusted sites in sandboxes that hold tokens. With the module off,
+  remove `PLAYWRIGHT_*` from `[env]` in `sandbox.toml`; the image build fails
+  while `PLAYWRIGHT_BROWSERS_PATH` names no browser.
 - comma and `nix-locate`, from `modules/nix-index.nix`. `, COMMAND ARGS` looks
   COMMAND up in a prebuilt index of nixpkgs, the small database of the
   `nix-index-database` input, and runs it from the image's `nixpkgs` without
   installing it. No index is built at run time. The index is of
   nixpkgs-unstable in the week the input was locked, so a package that the
   pinned revision lacks may be named; `nix flake update nix-index-database`
-  moves it.
+  moves it. When several packages have COMMAND, comma asks with fzy if
+  standard input and error are a terminal and `COMMA_NONINTERACTIVE` is not
+  1. Otherwise it runs the package whose attribute is COMMAND, or lists the
+  candidates and fails. comma remembers choices in `~/.cache/comma`, which
+  sandbox snapshots keep; agents set `COMMA_CACHING=0` (or pass
+  `--cache-level 0`) to leave no record.
 - Measured when they were added, the compiler, the browser, comma, and the
   tools added with them (`psql`, `hyperfine`, `watchexec`, `difft`, `nom`)
   took the unpacked image from 2.0 to 3.0 GiB: GCC and binutils about
@@ -235,10 +246,10 @@ modules you have no such items for.
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
   Claude's LSP tool run the same builds. Claude has the Python, TypeScript,
   Bash, and Nix servers configured.
-- `, COMMAND`, `nix run nixpkgs#NAME`, `nix shell nixpkgs#NAME`, and `nix-shell -p NAME`
-  resolve to the revision the image was built from. A tool that is not
-  installed runs after a download of a few seconds and matches the libraries of
-  the installed ones.
+- `, COMMAND`, `nix run nixpkgs#NAME`, `nix shell nixpkgs#NAME`, and
+  `nix-shell -p NAME` resolve to the revision the image was built from. A
+  tool that is not installed runs after a download of a few seconds and
+  matches the libraries of the installed ones.
 - direnv with nix-direnv. An SSH session loads a project's `.envrc` on `cd`
   after `direnv allow`. Commands run without an interactive shell use
   `direnv exec . COMMAND`.

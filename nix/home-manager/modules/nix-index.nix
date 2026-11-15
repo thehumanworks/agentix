@@ -20,47 +20,86 @@ let
   index = import inputs.nix-index-database { inherit pkgs; };
 
   # comma asks which package to run when several have the command, with fzy,
-  # which needs a terminal; agents have none, and fzy fails. Without one, this
-  # picks the package named after the command (hello for `, hello`, not
-  # haskellPackages.hello or tests.*), says which on standard error, and lists
-  # the others. With a terminal, fzy asks as before.
+  # which needs a terminal; agents have none, and fzy fails. The wrapper below
+  # tells this picker whether someone can answer: with a terminal on standard
+  # input and error, and without COMMA_NONINTERACTIVE=1, fzy asks as before.
+  # Otherwise it takes the package whose attribute is the command's name, as
+  # hello for `, hello`, and says so on standard error. With no such package
+  # it guesses nothing: it lists the candidates, prints nothing, and comma
+  # exits with an error.
   picker = pkgs.writeShellApplication {
     name = "comma-picker";
     runtimeInputs = [
       pkgs.coreutils
-      pkgs.gawk
-      pkgs.gnugrep
     ];
     text = ''
       candidates=$(cat)
-      if { : < /dev/tty; } 2> /dev/null; then
+      if [[ ''${COMMA_INTERACTIVE:-} == 1 ]]; then
         exec ${lib.getExe pkgs.fzy} <<< "$candidates"
       fi
-      choice=$(printf '%s\n' "$candidates" | awk -v cmd="''${COMMA_COMMAND:-}" '
-        NF {
-          attr = $0; sub(/\.[^.]*$/, "", attr); n = split(attr, part, ".")
-          rank = (attr == cmd) ? 0 : (part[n] == cmd) ? 1 : 2
-          printf "%d %d %03d %s\n", rank, (attr ~ /^tests\./), n, $0
-        }' | sort -k1,1n -k2,2n -k3,3n -k4,4 | awk 'NR == 1 { print $4 }')
-      others=$(printf '%s\n' "$candidates" | grep -vxF "$choice" | tr '\n' ' ' || true)
-      echo "comma: running ''${COMMA_COMMAND:-it} from $choice''${others:+ (also in: $others)}" >&2
-      printf '%s\n' "$choice"
+      command=''${COMMA_COMMAND:-}
+      # Each candidate is ATTRIBUTE.OUTPUT, such as hello.out.
+      while IFS= read -r candidate; do
+        if [[ -n $command && ''${candidate%.*} == "$command" ]]; then
+          echo "comma: running $command from nixpkgs#$command" >&2
+          printf '%s\n' "$candidate"
+          exit 0
+        fi
+      done <<< "$candidates"
+      {
+        echo "comma: several packages have bin/$command, and none is named $command:"
+        while IFS= read -r candidate; do
+          echo "  ''${candidate%.*}"
+        done <<< "$candidates"
+        echo "Run one of them with: nix shell nixpkgs#ATTRIBUTE -c $command ARGS"
+      } >&2
+      exit 1
     '';
   };
+
+  # Finds the command in comma's arguments for the picker: the first word that
+  # is not an option or an option's value, or the word after `--`.
+  wrapper =
+    name:
+    pkgs.writeShellScript "comma-wrapper" ''
+      command=
+      skip=
+      dashes=
+      for arg; do
+        if [[ -n $dashes ]]; then
+          command=$arg
+          break
+        elif [[ -n $skip ]]; then
+          skip=
+          continue
+        fi
+        case $arg in
+          --) dashes=1 ;;
+          -P | --picker | -F | --nixpkgs-flake | -c | --print-completions | --cache-level) skip=1 ;;
+          -*) ;;
+          *)
+            command=$arg
+            break
+            ;;
+        esac
+      done
+      export COMMA_COMMAND=$command
+      if [[ -t 0 && -t 2 && ''${COMMA_NONINTERACTIVE:-} != 1 ]]; then
+        export COMMA_INTERACTIVE=1
+      else
+        export COMMA_INTERACTIVE=0
+      fi
+      export COMMA_PICKER=''${COMMA_PICKER:-${lib.getExe picker}}
+      exec ${index.comma-with-db}/bin/${name} "$@"
+    '';
+
   comma = pkgs.symlinkJoin {
     name = "comma-agentix";
     paths = [ index.comma-with-db ];
     postBuild = ''
-      for name in , comma; do
-        rm "$out/bin/$name"
-        cat > "$out/bin/$name" <<SH
-      #!${pkgs.runtimeShell}
-      for arg; do case \$arg in -*) ;; *) export COMMA_COMMAND=\$arg; break ;; esac; done
-      export COMMA_PICKER=\''${COMMA_PICKER:-${lib.getExe picker}}
-      exec ${index.comma-with-db}/bin/$name "\$@"
-      SH
-        chmod +x "$out/bin/$name"
-      done
+      rm "$out/bin/," "$out/bin/comma"
+      ln -s ${wrapper ","} "$out/bin/,"
+      ln -s ${wrapper "comma"} "$out/bin/comma"
     '';
   };
 in

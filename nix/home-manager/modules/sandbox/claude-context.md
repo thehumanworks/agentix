@@ -8,9 +8,13 @@ when the sandbox ends, so push or hand back anything that must survive.
 ## Tools
 
 - Every tool on PATH comes from one pinned nixpkgs revision through Home Manager.
-- Need a tool that is missing? `, COMMAND ARGS` (comma) finds the package that
-  has COMMAND in a prebuilt index and runs it without installing it;
-  `nix-locate bin/COMMAND` lists the candidates. Or name the package:
+- Need a tool that is missing? `COMMA_CACHING=0 , COMMAND ARGS` (comma) finds
+  the package that has COMMAND in a prebuilt index and runs it without
+  installing it. When several packages have it and none is named COMMAND,
+  comma lists them and fails; pick one with `nix shell`. `COMMA_CACHING=0`
+  (or `--cache-level 0`) keeps comma from remembering the choice in
+  `~/.cache`, which snapshots keep. `nix-locate bin/COMMAND` lists the
+  candidates. Or name the package:
   `nix run nixpkgs#NAME -- ARGS` or `nix shell nixpkgs#NAME -c COMMAND`.
   `nixpkgs` resolves to the image's revision, so most packages download from the
   binary cache in seconds. Find names with `nix search nixpkgs TERM`.
@@ -29,6 +33,8 @@ when the sandbox ends, so push or hand back anything that must survive.
   `nix shell --impure --expr '(import <nixpkgs> {}).python3.withPackages (p: [ p.playwright ])' -c python3 SCRIPT`.
   The PyPI wheel under `uv` fails to load (its greenlet needs libstdc++), and
   other releases do not find a browser.
+  The browser runs as root with `--no-sandbox`, so this sandbox is its only
+  isolation: do not open untrusted sites while the sandbox holds tokens.
 - Python: use `uv` (`uv run`, `uv sync`, `uv tool run`); do not `pip install`
   into the system interpreter. JavaScript and TypeScript: `bun` and `node`.
 - Also installed: `psql`, `hyperfine` (benchmarks), `watchexec` (rerun on

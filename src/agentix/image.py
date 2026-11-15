@@ -277,15 +277,24 @@ def _checks() -> list[str]:
             "> /tmp/agentix-check.c && cc -o /tmp/agentix-check /tmp/agentix-check.c "
             '&& test "$(/tmp/agentix-check)" = ok',
         ),
-        # The headless browser renders a page as root, and Playwright finds
-        # the same build where the image's environment points it.
+        # The headless browser renders a page as root. Chromium's own
+        # messages are shown only when it fails.
         _if_listed(
             "chrome-headless-shell",
             "chrome-headless-shell --dump-dom 'data:text/html,<title>agentix</title>' "
-            "2> /dev/null | grep '<title>agentix</title>' > /dev/null && "
-            'test -x "$(echo "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/'
-            'chrome-headless-shell-*/chrome-headless-shell)"',
+            "> /tmp/agentix-dom 2> /tmp/agentix-chrome.log; "
+            "grep '<title>agentix</title>' /tmp/agentix-dom > /dev/null "
+            "|| { cat /tmp/agentix-chrome.log; exit 1; }",
         ),
+        # nix/sandbox.toml gives the image PLAYWRIGHT_BROWSERS_PATH whatever
+        # modules are on. It must name the browser module's directory, with
+        # a build Playwright can start, so that the module is not turned off
+        # with the variable left pointing nowhere.
+        'if [ -n "${PLAYWRIGHT_BROWSERS_PATH:-}" ]; then '
+        'test -x "$(echo "$PLAYWRIGHT_BROWSERS_PATH"/chromium_headless_shell-*/'
+        'chrome-headless-shell-*/chrome-headless-shell)" || { echo "PLAYWRIGHT_BROWSERS_PATH '
+        "names no browser: turn on agentix.sandbox.browser, or remove PLAYWRIGHT_* "
+        'from [env] in nix/sandbox.toml"; exit 1; }; fi',
         # comma and nix-locate read the index in the image, without building
         # one. grep reads all of the output, so nix-locate does not panic on
         # a closed pipe.

@@ -35,6 +35,8 @@ readyFile = "/run/agentix/ready"
 # keeps the bundle in that directory, not one file per certificate.
 # PLAYWRIGHT_* point Playwright at the image's headless Chromium, and
 # home-manager/modules/sandbox/browser.nix sets the same for login shells.
+# With agentix.sandbox.browser off, remove them: the image build fails while
+# PLAYWRIGHT_BROWSERS_PATH names no browser.
 [env]
 PATH = "/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 HOME = "/root"
