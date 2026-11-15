@@ -45,7 +45,8 @@ class SandboxCreateTests(ModalTestCase):
         self.assertIn("umask 077", command[2])
         self.assertIn(f'"$OP_SERVICE_ACCOUNT_TOKEN" > {OP_TOKEN_FILE}', command[2])
         self.assertIn(f"> {WORKDIR_FILE}", command[2])
-        self.assertEqual(command[3:], ("agentix-init", "/srv/project", "", "", ""))
+        # Without an idle stop, the start command is as it was before it.
+        self.assertEqual(command[2:], (sandbox._INIT, "agentix-init", "/srv/project"))
         self.sandbox.exec.aio.assert_not_called()
 
     def test_returns_only_when_the_main_command_has_written_its_files(self):
@@ -80,6 +81,7 @@ class SandboxCreateTests(ModalTestCase):
     def test_idle_stop_hands_the_main_command_to_the_watcher(self):
         self.run_core(sandbox.create, name="dev", idle_stop=1200)
         args = self.create.aio.call_args.args
+        self.assertEqual(args[2], sandbox._INIT_IDLE)
         self.assertEqual(args[4:], ("", "1200", "30", idle.WATCHER))
         self.assertEqual(
             self.create.aio.call_args.kwargs["tags"],
@@ -125,11 +127,15 @@ class SandboxInitScriptTests(unittest.TestCase):
         self.token_file = self.root / "run/op-token"
         self.workdir_file = self.root / "run/workdir"
         self.ready_file = self.root / "run/ready"
-        self.script = (
-            sandbox._INIT.replace(OP_TOKEN_FILE, str(self.token_file))
+        self.flag_file = self.root / "run/idle-stop"
+        self.script = self.local(sandbox._INIT).replace("exec sleep infinity", "exit 0")
+
+    def local(self, script):
+        return (
+            script.replace(OP_TOKEN_FILE, str(self.token_file))
             .replace(WORKDIR_FILE, str(self.workdir_file))
             .replace(READY_FILE, str(self.ready_file))
-            .replace("exec sleep infinity", "exit 0")
+            .replace(idle.RUN_DIR, str(self.root / "run"))
         )
 
     def run_script(self, workdir="", token=None, idle_args=()):
@@ -148,17 +154,21 @@ class SandboxInitScriptTests(unittest.TestCase):
         self.assertTrue(sandbox._INIT.rstrip().endswith("exec sleep infinity"))
 
     def test_idle_stop_execs_the_watcher_after_the_files(self):
+        self.script = self.local(sandbox._INIT_IDLE)
         watcher = 'test -e "${4#test -e }" || exit 9; echo "$0 $*"; exit 75'
         result = self.run_script(idle_args=("120", "20", watcher))
         self.assertEqual(result.returncode, 75)
         self.assertEqual(
-            result.stdout, f"agentix-idle watch 120 20 test -e {self.ready_file}\n"
+            result.stdout,
+            f"agentix-idle watch 120 20 test -e {self.ready_file} "
+            f"{self.root}/run/used.\n",
         )
+        # So the commands agentix starts leave marks.
+        self.assertTrue(self.flag_file.exists())
 
-    def test_no_idle_stop_keeps_the_sandbox_alive(self):
-        result = self.run_script(idle_args=("", "", ""))
-        self.assertEqual(result.returncode, 0)
-        self.assertTrue(self.ready_file.exists())
+    def test_without_an_idle_stop_no_flag_is_made(self):
+        self.assertEqual(self.run_script().returncode, 0)
+        self.assertFalse(self.flag_file.exists())
 
     def test_token_is_stored_in_a_root_only_file(self):
         self.assertEqual(self.run_script(token="secret-value").returncode, 0)
@@ -216,7 +226,7 @@ class SandboxUseTests(ModalTestCase):
         self.sandbox.process.wait.aio.return_value = 3
         result = self.run_core(sandbox.execute, "sb-test", ["ls", "a b"])
         self.assertEqual(result, {"stdout": "out", "stderr": "problem", "exit_code": 3})
-        self.sandbox.exec.aio.assert_called_once_with("ls", "a b")
+        self.sandbox.exec.aio.assert_called_once_with(*idle.wrap(["ls", "a b"]))
 
     def test_execute_needs_a_command(self):
         with self.assertRaises(InvalidRequest):
@@ -226,7 +236,7 @@ class SandboxUseTests(ModalTestCase):
     def test_cli_exec_splits_the_command_and_prints_output(self):
         self.sandbox.process.stdout.read.aio.return_value = "hello"
         output = self.run_cli("sandbox", "exec", "sb-test", "echo 'a b'")
-        self.sandbox.exec.aio.assert_called_once_with("echo", "a b")
+        self.sandbox.exec.aio.assert_called_once_with(*idle.wrap(["echo", "a b"]))
         self.assertIn("hello", output)
 
     def test_cli_exec_reports_a_failed_command(self):

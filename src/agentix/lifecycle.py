@@ -136,6 +136,7 @@ async def up(
     hostname: str = "",
     ephemeral: bool = False,
     clone: str = "",
+    idle_stop: int = 0,
 ) -> dict[str, Any]:
     """Start a sandbox under `name`, or under a new name if none is given.
 
@@ -144,6 +145,8 @@ async def up(
     record, and no exit snapshot, so stopping it leaves nothing behind.
     `clone`, OWNER/NAME[@REF], is cloned into NAME in the image's workdir,
     which becomes the sandbox's workdir; a sandbox whose clone fails is removed.
+    `idle_stop`, in seconds, stops the sandbox once nothing has used it for
+    that long; it is recorded with the sandbox, so restores keep it.
     """
     names.check_ephemeral(name, ephemeral)
     check_tailscale_start(tailscale, hostname, options["secret_name"])
@@ -154,7 +157,7 @@ async def up(
         options = {**options, "workdir": workdir}
     if ephemeral:
         options = {**options, "exit_snapshot": False}
-        sandbox_id = await sandbox.create(session, **options)
+        sandbox_id = await sandbox.create(session, **options, idle_stop=idle_stop)
         await _clone(session, sandbox_id, clone)
         return await _started(session, sandbox_id, "", tailscale, hostname)
     if name:
@@ -170,10 +173,12 @@ async def up(
     # Modal refuses a name that a running sandbox has, so of two commands that
     # start one name at once, only one gets this far. The record is written
     # once, with the sandbox in it, because each write takes over a second.
-    sandbox_id = await sandbox.create(session, **options, name=name)
+    sandbox_id = await sandbox.create(
+        session, **options, name=name, idle_stop=idle_stop
+    )
     await _clone(session, sandbox_id, clone)
     record = store.new_record(name, options)
-    store.add_sandbox(record, sandbox_id)
+    store.add_sandbox(record, sandbox_id, idle_stop=idle_stop)
     try:
         claimed = await store.claim(session, record)
     except Exception:
@@ -258,7 +263,7 @@ async def ls(session: Session) -> list[dict[str, Any]]:
             if record["sandbox_id"]
             else "none",
             "snapshots": len(record["snapshots"]),
-            "idle_stop": idle.describe(record["options"].get("idle_stop", 0)),
+            "idle_stop": idle.describe(store.idle_stop(record)),
         }
         for record in sorted(records, key=lambda record: record["name"])
     ]
@@ -333,11 +338,14 @@ async def restore(
     snapshot_id: str = "",
     tailscale: bool = False,
     hostname: str = "",
+    idle_stop: int | None = None,
 ) -> dict[str, Any]:
     """Start a new sandbox for a name from a snapshot, the latest by default.
 
     The sandbox the name has now must have ended. The new one gets the options
-    the name was created with.
+    the name was created with, and the idle stop of the sandbox it had last,
+    unless `idle_stop` (seconds; 0 for none) gives a new one, which later
+    restores keep.
     """
     if hostname and not tailscale:
         raise InvalidRequest("--hostname is only used with --tailscale.")
@@ -364,9 +372,15 @@ async def restore(
         if not record["snapshots"]:
             raise NotFound(_nothing_to_restore(record))
         snapshot_id = store.ordered(record)[-1]["id"]
+    if idle_stop is None:
+        idle_stop = store.idle_stop(record)
     try:
         sandbox_id = await sandbox.create(
-            session, **record["options"], name=name, snapshot_id=snapshot_id
+            session,
+            **record["options"],
+            name=name,
+            snapshot_id=snapshot_id,
+            idle_stop=idle_stop,
         )
     except modal.exception.NotFoundError as error:
         if snapshot_id not in str(error):
@@ -378,7 +392,9 @@ async def restore(
         ) from error
 
     def change(latest: store.Record) -> None:
-        store.add_sandbox(latest, sandbox_id, restored_from=snapshot_id)
+        store.add_sandbox(
+            latest, sandbox_id, restored_from=snapshot_id, idle_stop=idle_stop
+        )
 
     await store.update(session, name, change)
     return await _started(

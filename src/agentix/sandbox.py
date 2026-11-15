@@ -10,14 +10,14 @@ import modal.experimental
 
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import InvalidRequest, OperationFailed
-from .idle import IDLE_TAG, WATCHER, poll_interval
+from .idle import FLAG, IDLE_TAG, MARKS, WATCHER, poll_interval, wrap
 from .layout import OP_TOKEN_FILE, READY_FILE, WORKDIR_FILE
 from .session import Session
 
 # The start command writes the token file, the --workdir override, and, last,
 # the ready file, which `create` waits for. The paths are in layout.py. Then it
-# sleeps, or, with an idle stop, runs the watcher of idle.py, which ends the
-# sandbox once nothing has run for that long.
+# sleeps, or, with an idle stop (_INIT_IDLE), runs the watcher of idle.py,
+# which ends the sandbox once nothing has run for that long.
 
 # A sandbox is normally ready in about a second.
 READY_TIMEOUT = 60
@@ -51,11 +51,17 @@ if [ -n "$1" ]; then
   printf '%s\\n' "$1" > {WORKDIR_FILE}
 fi
 : > {READY_FILE}
-if [ -n "${{2:-}}" ]; then
-  exec sh -c "$4" agentix-idle watch "$2" "$3" "test -e {READY_FILE}"
-fi
 exec sleep infinity
 """
+# With an idle stop, $2 is its seconds, $3 how often to look, $4 the watcher.
+# The flag is made before the ready file, so the first command is marked.
+_INIT_IDLE = _INIT.replace(
+    f": > {READY_FILE}\nexec sleep infinity\n",
+    f""": > {FLAG}
+: > {READY_FILE}
+exec sh -c "$4" agentix-idle watch "$2" "$3" "test -e {READY_FILE}" {MARKS}
+""",
+)
 
 
 class ExecResult(TypedDict):
@@ -112,18 +118,15 @@ async def create(
         if snapshot_id
         else modal.Image.from_name(image_name)
     )
+    command = ["sh", "-c", _INIT, "agentix-init", workdir]
+    if idle_stop:
+        command[2] = _INIT_IDLE
+        command += [str(idle_stop), str(poll_interval(idle_stop)), WATCHER]
     tags = {NAME_TAG: name} if name else {}
     if idle_stop:
         tags[IDLE_TAG] = str(idle_stop)
     handle = await modal.Sandbox.create.aio(
-        "sh",
-        "-c",
-        _INIT,
-        "agentix-init",
-        workdir,
-        str(idle_stop) if idle_stop else "",
-        str(poll_interval(idle_stop)) if idle_stop else "",
-        WATCHER if idle_stop else "",
+        *command,
         app=await session.app(),
         name=name or None,
         tags=tags or None,
@@ -222,7 +225,7 @@ async def execute(session: Session, sandbox_id: str, args: Sequence[str]) -> Exe
     if not args:
         raise InvalidRequest("Provide a command to run.")
     async with session.sandbox(sandbox_id) as handle:
-        process = await handle.exec.aio(*args)
+        process = await handle.exec.aio(*wrap(args))
         stdout, stderr, exit_code = await asyncio.gather(
             process.stdout.read.aio(), process.stderr.read.aio(), process.wait.aio()
         )

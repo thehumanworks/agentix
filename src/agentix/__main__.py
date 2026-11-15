@@ -270,13 +270,22 @@ def _snapshots(name: str):
 
 
 def _restore(
-    name: str, snapshot: str = "", tailscale: bool = False, hostname: str = ""
+    name: str,
+    snapshot: str = "",
+    tailscale: bool = False,
+    hostname: str = "",
+    idle_stop: str | None = None,
 ):
     """Start a new sandbox for NAME from its latest snapshot, or from --snapshot=ID.
 
     The sandbox NAME has now must have ended; stop it with `sandbox down`.
+    It keeps the idle stop NAME had; --idle-stop=DURATION or off changes it,
+    also for later restores.
     """
-    return _backend().restore(name, snapshot, tailscale, hostname)
+    from . import idle
+
+    limit = None if idle_stop is None else idle.seconds(idle_stop)
+    return _backend().restore(name, snapshot, tailscale, hostname, limit)
 
 
 def _purge(name: str, terminate: bool = False):

@@ -34,12 +34,15 @@ class WatcherTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.root)
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+        self.marks = f"{self.run_dir}/used."
         self.proc = FakeProc(self.root)
 
     def run_watcher(self, mode="check", limit=60, interval=5, shell="sh"):
         return subprocess.run(
             [shell, "-c", idle.WATCHER, "agentix-idle", mode, str(limit)]
-            + [str(interval), PROBE, str(self.root)],
+            + [str(interval), PROBE, self.marks, str(self.root)],
             capture_output=True,
             text=True,
             timeout=30,
@@ -60,6 +63,45 @@ class WatcherTests(unittest.TestCase):
         self.proc.add(43, "gpg-agent", 1, "gpg-agent --daemon")
         self.proc.add(44, "my (odd) name", 1, "gone", state="Z")
         self.assertEqual(self.check(), "idle")
+
+    def test_nix_wrapped_daemons_are_idle(self):
+        # wrapProgram runs tailscaled as .tailscaled-wrapped, which the
+        # kernel names .tailscaled-wra; argv[0] stays tailscaled.
+        self.proc.add(41, ".tailscaled-wra", 1, "/nix/store/x/bin/tailscaled --tun=u")
+        self.proc.add(42, ".gpg-agent-wrap", 1, "/nix/store/y/bin/.gpg-agent-wrapped")
+        self.assertEqual(self.check(), "idle")
+
+    def test_a_wrapped_tailscale_ssh_session_is_busy(self):
+        self.proc.add(41, ".tailscaled-wra", 1, "/nix/store/x/bin/tailscaled --tun=u")
+        self.proc.add(
+            52, ".tailscaled-wra", 41, "/nix/store/x/bin/tailscaled be-child ssh"
+        )
+        self.assertEqual(self.check(), "busy")
+
+    def test_a_process_whose_command_line_cannot_be_read_is_busy(self):
+        pid = self.proc.add(50, "secret", 1, "x")
+        (self.root / str(pid) / "cmdline").unlink()
+        self.assertEqual(self.check(), "busy")
+
+    def test_a_process_with_an_empty_command_line_is_busy(self):
+        self.proc.add(50, "odd", 1, "")
+        self.assertEqual(self.check(), "busy")
+
+    def test_a_mark_is_busy_and_check_keeps_it(self):
+        mark = Path(f"{self.marks}123")
+        mark.touch()
+        self.assertEqual(self.check(), "busy")
+        self.assertTrue(mark.exists())
+
+    def test_watch_removes_marks_and_counts_from_after_them(self):
+        mark = Path(f"{self.marks}123")
+        mark.touch()
+        started = time.monotonic()
+        result = self.run_watcher("watch", limit=2, interval=1)
+        self.assertEqual(result.returncode, idle.IDLE_EXIT_CODE)
+        self.assertFalse(mark.exists())
+        # The first look saw the mark, so idle time starts at the second.
+        self.assertGreaterEqual(time.monotonic() - started, 3)
 
     def test_an_exec_command_is_busy(self):
         # `sandbox exec`, --resume, and detached runs: children of PID 1.
@@ -96,7 +138,7 @@ class WatcherTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             subprocess.run(
                 ["sh", "-c", idle.WATCHER, "agentix-idle", "watch", "1", "1"]
-                + [PROBE, str(self.root)],
+                + [PROBE, self.marks, str(self.root)],
                 capture_output=True,
                 timeout=4,
             )
@@ -104,13 +146,72 @@ class WatcherTests(unittest.TestCase):
     def test_the_watcher_does_not_count_itself_on_the_real_proc(self):
         # Something else runs here, so only a crash would print nothing.
         result = subprocess.run(
-            ["sh", "-c", idle.WATCHER, "agentix-idle", "check", "60", "5", PROBE],
+            ["sh", "-c", idle.WATCHER, "agentix-idle", "check", "60", "5", PROBE]
+            + [self.marks],
             capture_output=True,
             text=True,
             timeout=30,
         )
         self.assertIn(result.stdout.strip(), ("busy", "idle"))
         self.assertEqual(result.stderr, "")
+
+
+class ExecWrapperTests(unittest.TestCase):
+    """The wrapper of every command agentix starts, run here with its paths."""
+
+    def setUp(self):
+        self.run_dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.run_dir)
+        self.wrapper = idle.EXEC_WRAPPER.replace(idle.RUN_DIR, str(self.run_dir))
+
+    def run_wrapped(self, *args, shell="sh"):
+        return subprocess.run(
+            [shell, "-c", self.wrapper, "agentix-exec", *args],
+            capture_output=True,
+            text=True,
+        )
+
+    def marks(self):
+        return sorted(path.name for path in self.run_dir.glob("used.*"))
+
+    def test_command_keeps_its_arguments_output_and_exit_code(self):
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                result = self.run_wrapped("sh", "-c", 'echo "$1"; exit 3', "x", "a b")
+                self.assertEqual((result.stdout, result.returncode), ("a b\n", 3))
+                self.assertEqual(result.stderr, "")
+
+    def test_no_mark_without_an_idle_stop(self):
+        self.run_wrapped("true")
+        self.assertEqual(self.marks(), [])
+
+    def test_mark_with_an_idle_stop(self):
+        (self.run_dir / "idle-stop").touch()
+        result = self.run_wrapped("true")
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(len(self.marks()), 1)
+
+    def test_an_unwritable_mark_is_silent(self):
+        (self.run_dir / "idle-stop").touch()
+        self.wrapper = idle.EXEC_WRAPPER.replace(
+            idle.MARKS, f"{self.run_dir}/missing/used."
+        ).replace(idle.RUN_DIR, str(self.run_dir))
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                result = self.run_wrapped("echo", "ok", shell=shell)
+                self.assertEqual((result.stdout, result.stderr), ("ok\n", ""))
+
+    def test_wrap(self):
+        self.assertEqual(
+            idle.wrap(["ls", "a b"]),
+            ["sh", "-c", idle.EXEC_WRAPPER, "agentix-exec", "ls", "a b"],
+        )
+
+    def test_detached_runs_mark_the_same_files(self):
+        from agentix import runner
+
+        self.assertEqual((runner.IDLE_FLAG, runner.IDLE_MARKS), (idle.FLAG, idle.MARKS))
+        self.assertIn(f'"{idle.MARKS}$$"', runner.WRAPPER)
 
 
 class ParseTests(unittest.TestCase):

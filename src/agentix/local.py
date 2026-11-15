@@ -49,11 +49,10 @@ class Local:
             "memory": memory,
             "cpu": cpu,
             "exit_snapshot": exit_snapshot,
-            "idle_stop": idle_stop,
         }
         return _run(
             lambda session: lifecycle.up(
-                session, options, name, tailscale, hostname, ephemeral, repo
+                session, options, name, tailscale, hostname, ephemeral, repo, idle_stop
             )
         )
 
@@ -148,11 +147,16 @@ class Local:
         return [dict(item) for item in _run(lambda s: lifecycle.snapshots(s, target))]
 
     def restore(
-        self, target: str, snapshot_id: str, tailscale: bool, hostname: str
+        self,
+        target: str,
+        snapshot_id: str,
+        tailscale: bool,
+        hostname: str,
+        idle_stop: int | None = None,
     ) -> dict[str, Any]:
         return _run(
             lambda session: lifecycle.restore(
-                session, target, snapshot_id, tailscale, hostname
+                session, target, snapshot_id, tailscale, hostname, idle_stop
             )
         )
 

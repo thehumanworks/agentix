@@ -16,6 +16,10 @@ import sys
 
 import modal
 
+# What idle.py calls FLAG and MARKS: a sandbox with an idle stop has the
+# flag, and each command agentix starts leaves a mark that the watcher sees.
+IDLE_FLAG = "/run/agentix/idle-stop"
+IDLE_MARKS = "/run/agentix/used."
 # Kept apart from the markers of `sandbox exec --resume`, in runs/.
 RUNS_DIR = "/root/.local/state/agentix/detached"
 # A call follows the command for at most this long, Modal's limit, which is
@@ -28,13 +32,15 @@ NO_EXIT_CODE = 255
 # another call started.
 PID_WAIT_TRIES = 25
 
-# Runs in the sandbox as `sh -c WRAPPER agentix-run DIR COMMAND...`. The first
+# Runs in the sandbox as `sh -c WRAPPER agentix-run DIR COMMAND...`. It
+# leaves an idle-stop mark, as idle.EXEC_WRAPPER does. The first
 # call makes DIR and starts COMMAND in the background, with its output in
 # DIR/output.log and its exit code in DIR/exit afterwards. Every call then
 # prints the log from its start until COMMAND has ended. So a call that Modal
 # retries, say after a preemption, follows the run instead of starting it
 # again, and killing a call leaves COMMAND running.
 WRAPPER = f"""set -u
+[ -e {IDLE_FLAG} ] && {{ true > "{IDLE_MARKS}$$"; }} 2>/dev/null
 dir=$1
 shift
 mkdir -p "${{dir%/*}}"

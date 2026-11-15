@@ -382,7 +382,8 @@ class EndToEndTest(ConfigTestCase):
         args = self.create.aio.call_args.args
         self.assertEqual(args[5:7], ("120", "20"))
         self.assertIn("busy()", args[7])
-        self.assertEqual(self.stored("dev")["options"]["idle_stop"], 120)
+        self.assertEqual(self.stored("dev")["sandboxes"][0]["idle_stop"], 120)
+        self.assertNotIn("idle_stop", self.stored("dev")["options"])
 
 
 if __name__ == "__main__":

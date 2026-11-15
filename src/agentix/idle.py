@@ -11,8 +11,12 @@ Keep this module free of heavy imports: the command line reads it on every
 `sandbox up`.
 """
 
+import posixpath
+from collections.abc import Sequence
+
 from . import durations
 from .errors import InvalidRequest
+from .layout import READY_FILE
 
 # The exit code of the watcher, which Modal reports as the sandbox's.
 IDLE_EXIT_CODE = 75
@@ -26,32 +30,66 @@ MINIMUM = 60
 _LONGEST_POLL = 30
 _SHORTEST_POLL = 5
 
-# Runs as `sh -c WATCHER agentix-idle MODE SECONDS POLL PROBE [PROC]`. MODE
-# "watch" exits IDLE_EXIT_CODE once nothing has run for SECONDS, looking every
-# POLL seconds; "check" prints busy or idle once. PROBE is the argv, joined by
-# spaces, of Modal's readiness probe, which Modal runs now and then. PROC is
-# /proc, or a stand-in for tests.
+# In /run, a tmpfs, so that no snapshot keeps them. The start command makes
+# FLAG when the sandbox has an idle stop; while it is there, each command
+# that agentix starts leaves a file named MARKS and its PID, which the
+# watcher removes when it sees it. runner.py spells these paths too.
+RUN_DIR = posixpath.dirname(READY_FILE)
+FLAG = f"{RUN_DIR}/idle-stop"
+MARKS = f"{RUN_DIR}/used."
+# Runs as `sh -c EXEC_WRAPPER agentix-exec COMMAND...`: leaves a mark, then
+# becomes COMMAND, so its output, exit code, and PID are COMMAND's. `true`,
+# not `:`: a failed redirection of a special builtin would end the shell.
+EXEC_WRAPPER = f"""[ -e {FLAG} ] && {{ true > "{MARKS}$$"; }} 2>/dev/null
+exec "$@"
+"""
+
+
+def wrap(args: Sequence[str]) -> list[str]:
+    """`args` as agentix runs it in a sandbox, so that the watcher sees it."""
+    return ["sh", "-c", EXEC_WRAPPER, "agentix-exec", *args]
+
+
+# Runs as `sh -c WATCHER agentix-idle MODE SECONDS POLL PROBE MARKS [PROC]`.
+# MODE "watch" exits IDLE_EXIT_CODE once nothing has run for SECONDS, looking
+# every POLL seconds; "check" prints busy or idle once. PROBE is the argv,
+# joined by spaces, of Modal's readiness probe, which Modal runs now and then.
+# MARKS is the prefix of the files that EXEC_WRAPPER leaves; PROC is /proc, or
+# a stand-in for tests.
 #
-# Every process counts, except: PID 1 (Modal's agent) and kernel threads;
-# the watcher and what it starts; zombies; the SSH listeners, which run
-# whether or not anyone is logged in (sshd that PID 1 holds, and tailscaled,
-# but not its `be-child` session processes); and agents that a login leaves
-# behind. Commands from `sandbox exec`, with or without --resume, and the
-# commands of detached runs are children of PID 1, and SSH sessions are
-# children of a listener, so each counts while it runs.
+# A look is busy if a mark is there, so that a command shorter than POLL is
+# seen too, or if a process runs that counts. Every process counts, except:
+# PID 1 (Modal's agent) and kernel threads; the watcher and what it starts;
+# zombies; the SSH listeners, which run whether or not anyone is logged in
+# (sshd that PID 1 holds, and tailscaled, but not its `be-child` session
+# processes); and agents that a login leaves behind. Names are matched on the
+# kernel's name and on argv[0], because Nix wraps some programs, so that
+# tailscaled runs as `.tailscaled-wra`. Commands from `sandbox exec`, with or
+# without --resume, and the commands of detached runs are children of PID 1,
+# and SSH sessions are children of a listener, so each counts while it runs.
+# A process that cannot be read counts, so a fault keeps the sandbox up.
 #
 # The clock is /proc/uptime, which a wall clock change does not move.
 WATCHER = r"""set -u
-mode=$1 limit=$2 interval=$3 probe="$4 " proc=${5:-/proc}
+mode=$1 limit=$2 interval=$3 probe="$4 " marks=$5 proc=${6:-/proc}
 self=$$
 
+marked() {
+  set -- "$marks"*
+  [ -e "$1" ] || return 1
+  if [ "$mode" = watch ]; then rm -f "$@"; fi
+  return 0
+}
+
 busy() {
+  marked && return 0
   for dir in "$proc"/[0-9]*; do
     pid=${dir##*/}
     [ "$pid" = 1 ] && continue
     [ "$pid" = "$self" ] && continue
     line=
     { IFS= read -r line < "$dir/stat"; } 2>/dev/null
+    # It ended since the listing.
     [ -n "$line" ] || continue
     comm=${line#*\(}
     comm=${comm%\)*}
@@ -61,16 +99,24 @@ busy() {
     [ "$state" = Z ] && continue
     [ "$pid" = 2 ] || [ "$ppid" = 2 ] && continue
     [ "$ppid" = "$self" ] && continue
-    case $comm in
-      ssh-agent|gpg-agent|keyboxd|scdaemon|dirmngr) continue ;;
-      sshd) [ "$ppid" = 1 ] && continue ;;
-    esac
-    args=$(tr '\0' ' ' < "$dir/cmdline" 2>/dev/null) || continue
-    [ -n "$args" ] || continue
+    args=$({ tr '\0' ' ' < "$dir/cmdline"; } 2>/dev/null) || return 0
+    [ -n "$args" ] || return 0
     [ "$args" = "$probe" ] && continue
-    if [ "$comm" = tailscaled ]; then
-      case $args in *be-child*) ;; *) continue ;; esac
-    fi
+    # The kernel's name and argv[0], without what Nix's wrappers add.
+    c=${comm#.}
+    c=${c%-wrapped}
+    c=${c%-wra}
+    n=${args%% *}
+    n=${n##*/}
+    n=${n#.}
+    n=${n%-wrapped}
+    for x in "$c" "$n"; do
+      case $x in
+        ssh-agent|gpg-agent|keyboxd|scdaemon|dirmngr) continue 2 ;;
+        sshd) [ "$ppid" = 1 ] && continue 2 ;;
+        tailscaled) case $args in *be-child*) ;; *) continue 2 ;; esac ;;
+      esac
+    done
     return 0
   done
   return 1

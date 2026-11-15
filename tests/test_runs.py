@@ -237,7 +237,7 @@ class ListAndCleanTest(RunsTestCase):
             [f"runs/{SB}/fc-b.json"],
         )
         # Their logs go from the sandboxes that still run.
-        removed = [call.args for call in self.sandbox.exec.aio.await_args_list]
+        removed = [call.args[4:] for call in self.sandbox.exec.aio.await_args_list]
         self.assertIn(("rm", "-rf", "--", f"{runner.RUNS_DIR}/fc-a"), removed)
         self.assertIn(("rm", "-rf", "--", f"{runner.RUNS_DIR}/fc-c"), removed)
 
@@ -264,7 +264,7 @@ class ListAndCleanTest(RunsTestCase):
         cleaned = self.runs_listed("--clean")
         self.assertEqual([run["run_id"] for run in cleaned], ["fc-c"])
         self.assertIn(f"runs/{SB}/fc-a.json", self.volume.files)
-        removed = [call.args for call in self.sandbox.exec.aio.await_args_list]
+        removed = [call.args[4:] for call in self.sandbox.exec.aio.await_args_list]
         self.assertNotIn(("rm", "-rf", "--", f"{runner.RUNS_DIR}/fc-a"), removed)
 
     def test_a_run_file_with_a_traversal_id_is_never_cleaned(self):

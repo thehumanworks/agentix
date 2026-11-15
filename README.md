@@ -132,7 +132,10 @@ continues it, and the restored sandbox stops when idle again. A watcher in
 the sandbox does it, so the laptop that started it may be offline. Any
 process left running, such as a server, also counts as use. The duration is
 at least `1m`; `--idle-stop=off` turns off a config-file default.
-`sandbox ls` shows the setting. How it works:
+`sandbox restore NAME --idle-stop=1h` (or `off`) changes it for that and
+later restores. With a public OpenSSH port, a scanner's connection that
+never logs in counts as use for up to 120 s. `sandbox ls` shows the setting.
+How it works:
 [docs/idle-stop.md](docs/idle-stop.md).
 
 ### Defaults for `sandbox up`
@@ -278,8 +281,9 @@ so `expires_at` and `expired` are computed from the date.
 
 `sandbox restore NAME` starts a new sandbox under the name, from the latest
 snapshot or from `--snapshot=ID`, with the options the name was created
-with. The current sandbox of the name must have ended. It accepts
-`--tailscale` and `--hostname` as `sandbox up` does. The new sandbox has the
+with, and the idle stop it had. The current sandbox of the name must have
+ended. It accepts `--tailscale`, `--hostname` and `--idle-stop` as `sandbox
+up` does. The new sandbox has the
 saved files, including `/workdir`, `/root`, and `/tmp`, but no processes:
 SSH and Tailscale run again once started, for example by `sandbox shell`.
 `/run` is not saved, so no snapshot holds the 1Password token; the new
