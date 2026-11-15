@@ -257,14 +257,21 @@ uv run agentix sandbox resume dev
 ```
 
 How a command continues is a rule per harness, in
-[`src/agentix/resume.py`](src/agentix/resume.py): `claude ...` continues as
-`claude --continue ...` (the latest conversation in the workdir, given the
-same prompt again), `codex exec ...` as `codex exec resume --last ...`, and
-`pi ...` as `pi --continue ...`. The codex and pi rules are untried, as
-neither is in the image yet. A command with no rule, including one run
-through `sh -c`, is refused unless `--resume='COMMAND'` says how it
-continues. Nothing is resumed that was not started with `--resume`. Only
-named sandboxes that keep exit snapshots can resume.
+[`src/agentix/resume.py`](src/agentix/resume.py). `claude -p TASK ...`
+starts with its own `--session-id` and continues as
+`claude --resume ID -p CONTINUE ...`; `codex exec TASK ...` continues as
+`codex exec resume --last CONTINUE ...`, and `pi -p TASK ...` as
+`pi --continue -p CONTINUE ...`. CONTINUE is a neutral prompt (carry on,
+check what is done first), not the task again, so that the task is not
+started twice. Still, a resumed agent may repeat a step whose result the
+snapshot lacks, such as a pull request opened just before the timeout:
+write tasks with side effects so they check first. codex and pi take the
+latest session in the workdir, so run one of them per sandbox; their rules
+are untried, as neither is in the image yet. A command with no rule, a
+claude command that names its own session, and one run through `sh -c` are
+refused unless `--resume='COMMAND'` says how it continues. Nothing is
+resumed that was not started with `--resume`. Only named sandboxes that
+keep exit snapshots can resume.
 
 `exec --resume` prints on standard error what a timeout will lead to, and
 at each resume the snapshot, the new sandbox, and the command that

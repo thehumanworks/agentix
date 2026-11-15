@@ -12,24 +12,54 @@ from agentix.errors import InvalidRequest, OperationFailed
 SNAPSHOT = {"id": "im-1", "sandbox_id": "sb-old", "kind": "timeout"}
 
 
+P = resume.CONTINUE_PROMPT
+
+
 class PlanTest(unittest.TestCase):
-    def test_claude_keeps_the_rest_of_the_command(self):
-        then, how = resume.plan(["claude", "-p", "fix it", "--model", "m"], True)
-        self.assertEqual(then, ["claude", "--continue", "-p", "fix it", "--model", "m"])
+    def setUp(self):
+        patcher = patch("agentix.resume.uuid.uuid4", return_value="U")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_claude_gets_its_own_session_and_a_neutral_prompt(self):
+        first, then, how = resume.plan(["claude", "-p", "fix it", "--model", "m"], True)
+        self.assertEqual(
+            first, ["claude", "--session-id", "U", "-p", "fix it", "--model", "m"]
+        )
+        # The task is not given again, so it cannot be done twice.
+        self.assertEqual(then, ["claude", "--resume", "U", "-p", P, "--model", "m"])
         self.assertEqual(how, "the claude rule")
 
-    def test_first_word_matches_by_base_name(self):
-        then, _ = resume.plan(["/root/.nix-profile/bin/claude", "-p", "x"], True)
+    def test_first_word_matches_by_base_name_and_is_kept(self):
+        first, then, _ = resume.plan(["/opt/bin/claude", "--print", "x"], True)
         self.assertEqual(
-            then, ["/root/.nix-profile/bin/claude", "--continue", "-p", "x"]
+            first, ["/opt/bin/claude", "--session-id", "U", "--print", "x"]
         )
+        self.assertEqual(then, ["/opt/bin/claude", "--resume", "U", "--print", P])
+
+    def test_claude_without_a_prompt_after_p_is_refused(self):
+        for argv in (
+            ["claude"],
+            ["claude", "fix", "-p"],
+            ["claude", "-p", "--model", "m", "x"],
+        ):
+            with self.assertRaisesRegex(InvalidRequest, "prompt is not right after -p"):
+                resume.plan(argv, True)
+
+    def test_claude_that_names_a_session_is_refused(self):
+        for word in ("-c", "--continue", "--resume", "--session-id=abc"):
+            with self.assertRaisesRegex(InvalidRequest, "which session"):
+                resume.plan(["claude", word, "-p", "x"], True)
 
     def test_rules_can_match_a_subcommand(self):
-        then, how = resume.plan(["codex", "exec", "do it"], True)
-        self.assertEqual(then, ["codex", "exec", "resume", "--last", "do it"])
+        first, then, how = resume.plan(["codex", "exec", "do it", "--full-auto"], True)
+        self.assertEqual(first, ["codex", "exec", "do it", "--full-auto"])
+        self.assertEqual(then, ["codex", "exec", "resume", "--last", P, "--full-auto"])
         self.assertEqual(how, "the codex rule")
         with self.assertRaises(InvalidRequest):
             resume.plan(["codex", "login"], True)
+        with self.assertRaises(InvalidRequest):
+            resume.plan(["codex", "exec", "resume", "x"], True)
 
     def test_a_command_without_a_rule_is_refused(self):
         for argv in (["bash", "-c", "claude -p x"], ["claudette"], ["make"]):
@@ -37,13 +67,18 @@ class PlanTest(unittest.TestCase):
                 resume.plan(argv, True)
 
     def test_a_given_resume_command_is_used_for_any_command(self):
-        then, how = resume.plan(["./build.sh"], "./build.sh --continue 'a b'")
+        first, then, how = resume.plan(["./build.sh"], "./build.sh --continue 'a b'")
+        self.assertEqual(first, ["./build.sh"])
         self.assertEqual(then, ["./build.sh", "--continue", "a b"])
         self.assertEqual(how, "--resume")
-        # Fire reads --resume=7 as a number.
-        self.assertEqual(resume.plan(["x"], 7)[0], ["7"])
         with self.assertRaises(InvalidRequest):
             resume.plan(["x"], "")
+
+    def test_a_value_that_is_not_text_is_refused(self):
+        # Fire reads --resume=7 as a number and --resume=[a] as a list.
+        for value in (7, ["a"], False, None):
+            with self.assertRaisesRegex(InvalidRequest, "a command in quotes"):
+                resume.plan(["claude", "-p", "x"], value)
 
 
 class WrapperTest(unittest.TestCase):
@@ -87,6 +122,10 @@ class WrapperTest(unittest.TestCase):
         self.assertEqual((empty.returncode, empty.stdout), (0, b""))
 
 
+START = ["claude", "--session-id", "U", "-p", "x"]
+CONTINUE = ["claude", "--resume", "U", "-p", resume.CONTINUE_PROMPT]
+
+
 def marker(run_id, sandbox_id, command, then, resumes=0):
     return json.dumps(
         {
@@ -120,6 +159,8 @@ class WatchTest(unittest.TestCase):
             "agentix.store.load": AsyncMock(side_effect=self.load),
             "agentix.sandbox.execute": AsyncMock(side_effect=self.execute),
             "agentix.resume.POLL_INTERVAL": 0,
+            "agentix.resume.END_WAIT": 0.2,
+            "agentix.resume.uuid.uuid4": Mock(return_value="U"),
         }
         for target, value in patches.items():
             patcher = patch(target, value)
@@ -184,14 +225,19 @@ class WatchTest(unittest.TestCase):
         self.results = {"sb-1": [0]}
         self.exits = {"sb-1": [None]}
         result = self.start(["claude", "-p", "x"])
-        self.assertEqual(
-            result["runs"], [{"command": ["claude", "-p", "x"], "exit_code": 0}]
-        )
+        self.assertEqual(result["runs"], [{"command": START, "exit_code": 0}])
         self.assertEqual(self.restored, [])
-        self.assertIn(
-            "continues with `claude --continue -p x` (the claude rule)", self.notices[0]
-        )
+        self.assertIn("Running `claude --session-id U -p x`", self.notices[0])
+        self.assertIn("continues with `claude --resume U -p", self.notices[0])
+        self.assertIn("(the claude rule)", self.notices[0])
         self.assertEqual(len(self.notices), 1)
+
+    def test_a_command_that_fails_by_itself_is_not_resumed(self):
+        # No poll either: exits[] is empty, so a poll would fail.
+        self.results = {"sb-1": [1]}
+        result = self.start(["claude", "-p", "x"])
+        self.assertEqual(result["runs"][0]["exit_code"], 1)
+        self.assertEqual(self.restored, [])
 
     def test_the_wrapper_gets_the_marker(self):
         self.results = {"sb-1": [0]}
@@ -211,36 +257,37 @@ class WatchTest(unittest.TestCase):
         run = json.loads(args[6])
         self.assertEqual(run["id"], args[5])
         self.assertEqual(run["sandbox_id"], "sb-1")
-        self.assertEqual(run["resume"], ["claude", "--continue", "-p", "x"])
-        self.assertEqual(args[7:], ["claude", "-p", "x"])
+        self.assertEqual(run["resume"], CONTINUE)
+        self.assertEqual(run["command"], START)
+        self.assertEqual(args[7:], START)
 
     def test_a_timeout_restores_and_resumes(self):
-        then = ["claude", "--continue", "-p", "x"]
+        then = CONTINUE
         self.results = {"sb-1": [128], "sb-new1": [0]}
         # The sandbox reports its exit a moment after the command returns.
         self.exits = {"sb-1": [None, None, 124], "sb-new1": [None]}
         self.snapshots = [{"id": "im-1", "sandbox_id": "sb-1", "kind": "timeout"}]
         self.markers = {
-            "sb-new1": marker("r1", "sb-1", ["claude", "-p", "x"], then)
+            "sb-new1": marker("r1", "sb-1", START, then)
             + "\n"
             + marker("old", "sb-0", ["claude", "-p", "y"], ["claude", "--continue"])
         }
         result = self.start(["claude", "-p", "x"])
         self.assertEqual(self.restored, ["sb-new1"])
         # The marker of an earlier sandbox is not resumed.
-        self.assertEqual(
-            self.executed, [("sb-1", ["claude", "-p", "x"]), ("sb-new1", then)]
-        )
+        self.assertEqual(self.executed, [("sb-1", START), ("sb-new1", then)])
         self.assertEqual(result["sandbox_id"], "sb-new1")
         self.assertEqual(result["resumes"], 1)
         self.assertEqual(result["runs"], [{"command": then, "exit_code": 0}])
         self.assertIn(
-            "`claude -p x` was running when sb-1 reached its timeout", self.notices[1]
-        )
-        self.assertIn(
-            "as sb-new1; continuing with `claude --continue -p x` (resume 1 of 3)",
+            "`claude --session-id U -p x` was running when sb-1 reached its timeout",
             self.notices[1],
         )
+        self.assertIn(
+            "as sb-new1; continuing with `claude --resume U -p",
+            self.notices[1],
+        )
+        self.assertIn("(resume 1 of 3)", self.notices[1])
         self.assertEqual(len(self.outputs), 2)
 
     def test_an_end_that_is_not_the_timeout_is_not_resumed(self):
@@ -249,7 +296,18 @@ class WatchTest(unittest.TestCase):
         result = self.start(["claude", "-p", "x"])
         self.assertTrue(result["stopped"])
         self.assertEqual(self.restored, [])
+        self.assertIn("Lost `claude --session-id U -p x`", self.notices[1])
+        self.assertIn("gone. It may still be running", self.notices[1])
         self.assertIn("exit code 137, not at its timeout", self.notices[-1])
+
+    def test_lost_contact_with_a_running_sandbox_says_so(self):
+        self.results = {"sb-1": [OperationFailed("network")]}
+        self.exits = {"sb-1": [None]}
+        result = self.start(["claude", "-p", "x"])
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["runs"][0]["exit_code"], None)
+        self.assertEqual(self.restored, [])
+        self.assertIn("It may still be running there", self.notices[-1])
         self.assertIn("agentix sandbox resume dev", self.notices[-1])
 
     def test_resumes_stop_at_the_limit(self):
@@ -274,7 +332,7 @@ class WatchTest(unittest.TestCase):
         with patch(
             "agentix.lifecycle.restore", AsyncMock(side_effect=snapshot_of_current)
         ):
-            result = self.start(["claude"])
+            result = self.start(["claude", "-p", "x"])
         self.assertEqual(len(self.restored), resume.MAX_RESUMES)
         self.assertTrue(result["stopped"])
         self.assertIn("after 3 resumes", self.notices[-1])
@@ -294,15 +352,15 @@ class WatchTest(unittest.TestCase):
             return await self.restore(session, target)
 
         with patch("agentix.lifecycle.restore", AsyncMock(side_effect=flaky)):
-            result = self.start(["claude"])
+            result = self.start(["claude", "-p", "x"])
         self.assertEqual(result["resumes"], 1)
 
     def test_refuses_sandboxes_without_a_snapshot(self):
         with self.assertRaisesRegex(InvalidRequest, "has no name"):
-            self.start(["claude"], target="sb-1")
+            self.start(["claude", "-p", "x"], target="sb-1")
         self.options = {"exit_snapshot": False}
         with self.assertRaisesRegex(InvalidRequest, "--no-snapshot"):
-            self.start(["claude"])
+            self.start(["claude", "-p", "x"])
         with self.assertRaisesRegex(InvalidRequest, "No resume rule"):
             self.start(["make"])
         self.assertEqual(self.executed, [])
@@ -344,10 +402,6 @@ class WatchTest(unittest.TestCase):
         self.assertIn("nothing was resumed", self.notices[0])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class CommandLineTest(unittest.TestCase):
     def run_cli(self, *argv, result=None):
         backend = Mock()
@@ -376,11 +430,18 @@ class CommandLineTest(unittest.TestCase):
             main(["sandbox", "exec", "dev", "true"])
         backend.execute_resumable.assert_not_called()
 
+    def test_runs_that_all_exit_0_succeed(self):
+        done = {"runs": [{"command": ["claude"], "exit_code": 0}], "stopped": True}
+        self.run_cli("sandbox", "resume", "dev", result=done)
+
     def test_a_command_that_did_not_finish_fails(self):
         failed = {"runs": [{"command": ["claude"], "exit_code": 1}]}
         with self.assertRaisesRegex(RuntimeError, r"`claude` \(1\)"):
             self.run_cli("sandbox", "exec", "dev", "claude", "--resume", result=failed)
+        lost = {"runs": [{"command": ["claude"], "exit_code": None}], "stopped": True}
         with self.assertRaises(RuntimeError):
-            self.run_cli(
-                "sandbox", "resume", "dev", result={"runs": [], "stopped": True}
-            )
+            self.run_cli("sandbox", "resume", "dev", result=lost)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -133,7 +133,8 @@ def _execute(sandbox_id: str, command: str, resume: bool | str = False):
 
     With --resume, if a named sandbox reaches its timeout while COMMAND runs,
     it is restored from its exit snapshot and COMMAND continues, as its resume
-    rule says (claude becomes claude --continue), up to 3 times.
+    rule says (claude resumes its own session with a neutral prompt), up
+    to 3 times.
     --resume='OTHER' names the command that continues it instead. A command
     with no rule is refused. See docs/resume.md.
     """
@@ -176,8 +177,7 @@ def _output(run: dict[str, Any], result: dict[str, Any]) -> None:
 
 
 def _check_runs(result: dict[str, Any]) -> None:
-    failed = [run for run in result.get("runs", []) if run["exit_code"] != 0]
-    if failed or result.get("stopped"):
+    if any(run["exit_code"] != 0 for run in result.get("runs", [])):
         raise RuntimeError(
             "Not every command finished: "
             + ", ".join(
