@@ -5,6 +5,8 @@ import contextlib
 import copy
 import io
 import json
+import os
+import tempfile
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -131,6 +133,13 @@ class ModalTestCase(unittest.TestCase):
     """Replace every Modal call that the core makes."""
 
     def setUp(self):
+        # No test reads the config file of whoever runs the tests.
+        config_home = tempfile.TemporaryDirectory()
+        self.addCleanup(config_home.cleanup)
+        environ = patch.dict(os.environ, {"XDG_CONFIG_HOME": config_home.name})
+        environ.start()
+        self.addCleanup(environ.stop)
+        self.config_home = config_home.name
         # A Modal call that no stand-in replaces fails here, rather than reaching
         # the real workspace and its records.
         self._patch("modal.client._Client.from_env").side_effect = AssertionError(
