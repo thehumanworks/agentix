@@ -21,12 +21,13 @@ Warm runs are 1.5x faster; cold runs (no bytecode, page cache dropped) are
 about even, since click's modules compile on the first run. Commands that
 reach Modal still spend about 400 ms (warm) importing it.
 
-`tests/test_cli_surface.py` runs 335 spellings of the old surface (every
+`tests/test_cli_surface.py` runs every spelling of the old surface (every
 command, positional, and flag, each as `--a-b=V`, `--a-b V`, `--a_b`, the
-Fire short flag, a positional as `--name=V`, and booleans as `--x`,
-`--x=True`, `--x False`, `--nox`) and checks the call each command's
-function gets. The same spellings were run through the Fire command line of
-main (182aecb) and gave the same calls, all 335.
+Fire short flag as `-x V` and `-x=V`, a positional as `--name=V`, booleans
+as `--x`, `--x=True`, `--x False`, `-x False`, `--nox`, and `=None` on the
+options the config file sets) and checks the call each command's function
+gets. The same 396 spellings were run through the Fire command line of main
+(fac5c20, with `cost`) and gave the same calls, all 396.
 
 Behaviour changes:
 
@@ -38,11 +39,9 @@ Behaviour changes:
   typed take `true`/`false`, `1`/`0`, `yes`/`no` in any case
   (`--tailscale=false` was refused; `--terminate=false` and
   `--ephemeral=false` meant true). `--snapshot` turns `no_snapshot` off.
-- `--yes`, `--keep-latest`, `--pull`, `--clean`, and `--detach` still take
+- `--yes`, `--keep-latest`, `--pull`, `--clean`, `--detach`, and `cost --json` still take
   no value but `True`/`False`; other values now exit 2 with click's message
   ("does not take a value") instead of exit 1 with ours.
-- `--workdir=None` (and `=None` on any option the config file can set) is
-  refused with exit 2; Fire read it as "not given".
 - Flags are not filled by position: `sandbox up img 3` and
   `sandbox restore dev im-1` exit 2. Fire set `image_name`/`secret_name` and
   `snapshot`.
@@ -274,10 +273,9 @@ One branch, one commit per step, tests green at each step.
 
 Spellings that change, and why:
 
-- `--workdir=None` (and `=None` on any config-backed option): today it means
-  "not given". New: refused with a message that says to leave the flag out,
-  or to pass `--workdir=` for `/workdir`. Keeping it silently would make
-  `None` a reserved path.
+- `--workdir=None` (and `=None` on any config-backed option) was planned to
+  be refused; on review it was kept as "not given", as Fire and the README
+  had it.
 - Filling a flag by position (`sandbox up img 3`,
   `sandbox restore dev im-x`): undocumented and the cause of `_prune`'s
   `*extra`; now exit 2, "unexpected extra argument".

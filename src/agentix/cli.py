@@ -32,8 +32,8 @@ BOOLEAN_WORDS = {
 }
 
 
-class NotNone(click.ParamType):
-    """A value that refuses the literal None, which Fire read as "not given"."""
+class NoneIsNotGiven(click.ParamType):
+    """A value where the literal None means "not given", as it did with Fire."""
 
     def __init__(self, inner: click.ParamType):
         self.inner = inner
@@ -41,13 +41,7 @@ class NotNone(click.ParamType):
 
     def convert(self, value, param, ctx):
         if value == "None":
-            flag = param.opts[0] if param is not None else "the flag"
-            self.fail(
-                f"{flag}=None is no longer read as 'not given': leave {flag} out "
-                "to use the config file or the built-in default.",
-                param,
-                ctx,
-            )
+            return None
         return self.inner.convert(value, param, ctx)
 
 
@@ -72,11 +66,11 @@ def opt(name: str, *short: str, type: Any = str, default: Any = "", **attrs) -> 
     """An option that takes a value, as --NAME=VALUE or --NAME VALUE.
 
     A default of None marks an option that the config file can set: None
-    means "not given", and the literal None is refused.
+    means "not given", and so does the literal value None, as with Fire.
     """
     kind = click.types.convert_type(type)
     if default is None:
-        kind = NotNone(kind)
+        kind = NoneIsNotGiven(kind)
     return [click.Option([name, *short], type=kind, default=default, **attrs)]
 
 
@@ -189,6 +183,18 @@ def _resolve(root: click.Group, args: list[str]) -> tuple[click.Command, int]:
     return command, i
 
 
+def _context(root: click.Group, path: list[str]) -> click.Context:
+    """A context for the command that `path` names, for a usage message."""
+    command: click.Command = root
+    ctx = click.Context(root, info_name="agentix", **root.context_settings)
+    for name in path:
+        command = command.commands[name]  # type: ignore[attr-defined]
+        ctx = click.Context(
+            command, parent=ctx, info_name=name, **command.context_settings
+        )
+    return ctx
+
+
 def legacy_args(root: click.Group, args: Sequence[str]) -> list[str]:
     """Rewrite the spellings python-fire took into ones click takes.
 
@@ -234,6 +240,8 @@ def legacy_args(root: click.Group, args: Sequence[str]) -> list[str]:
             name = "--" + name[2:].replace("_", "-")
         elif len(token) > 2 and token[2] == "=":
             name, eq, value = token[:2], "=", token[3:]
+        elif len(token) == 2 and token in options:
+            name, eq, value = token, "", ""
         else:
             out.append(token)
             continue
@@ -273,7 +281,8 @@ def legacy_args(root: click.Group, args: Sequence[str]) -> list[str]:
             word = BOOLEAN_WORDS.get(value.lower())
             if word is None:
                 raise click.UsageError(
-                    f"{name} takes True or False, or no value, not {value!r}."
+                    f"{name} takes True or False, or no value, not {value!r}.",
+                    ctx=_context(root, head),
                 )
             out += toggle(option, word == on)
         elif i < len(rest) and rest[i] in ("True", "False"):

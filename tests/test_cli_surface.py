@@ -156,7 +156,7 @@ def spellings():
             for flag in ("--" + name.replace("_", "-"), "--" + name):
                 forms += [[f"{flag}={sample}"], [flag, sample]]
             if short:
-                forms += [[short, sample]]
+                forms += [[short, sample], [f"{short}={sample}"]]
             for form in forms:
                 yield command + form + rest + extra, function, given | extra_given
         for flag, short, sample, value in values:
@@ -178,7 +178,8 @@ def spellings():
             on = [[flag], [_underscored(flag)], [f"{flag}=True"], [flag, "True"]]
             off = [[f"{flag}=False"], [flag, "False"], ["--no" + key]]
             if short:
-                on.append([short])
+                on += [[short], [short, "True"], [f"{short}=True"]]
+                off += [[short, "False"], [f"{short}=False"]]
             for form in on:
                 yield base + form, function, given | extra_given | {key: True}
             for form in off:
@@ -265,6 +266,21 @@ class OldSurfaceTest(CliTestCase):
             with self.subTest(argv=argv):
                 self.assertEqual(self.call(argv, "_execute")["resume"], "./x -c")
 
+    def test_none_is_not_given_for_options_the_config_file_sets(self):
+        up = self.call(
+            [
+                "sandbox",
+                "up",
+                "--workdir=None",
+                "--image-name",
+                "None",
+                "--timeout=None",
+                "-m=None",
+            ],
+            "_create_sandbox",
+        )
+        self.assertEqual(up, self.defaults("_create_sandbox"))
+
     def test_empty_values_and_old_negations(self):
         up = self.call(
             [
@@ -337,10 +353,13 @@ class RefusedTest(CliTestCase):
         self.refused("sandbox", "up", "--tailscale=maybe", says="True or False")
         self.refused("sandbox", "up", "--repo", says="requires an argument")
 
-    def test_none_is_no_longer_not_given(self):
-        for flag in ("--workdir=None", "--image-name=None", "--timeout=None"):
-            with self.subTest(flag=flag):
-                self.refused("sandbox", "up", flag, says="leave")
+    def test_bad_boolean_words_show_the_usage(self):
+        with patch.object(cli_main, "_backend") as backend:
+            code, output = self.exit_code("sandbox", "up", "--tailscale=maybe")
+        self.assertEqual(code, 2)
+        self.assertIn("Usage: agentix sandbox up [OPTIONS]", output)
+        self.assertIn("Try 'agentix sandbox up --help' for help.", output)
+        backend.assert_not_called()
 
     def test_flags_are_not_filled_by_position(self):
         self.refused("sandbox", "up", "img", "3", says="unexpected extra argument")

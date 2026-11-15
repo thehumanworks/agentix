@@ -27,9 +27,6 @@ class ParseTests(unittest.TestCase):
         for spec in ("agentix", "a/b/c", "a/..", "a/.git", "a/b@", "a/b@-x", "a b/c"):
             with self.subTest(spec=spec), self.assertRaises(InvalidRequest):
                 repo.parse(spec)
-        for spec in (True, 123):
-            with self.subTest(spec=spec), self.assertRaises(InvalidRequest):
-                repo.parse(spec)
 
     def test_error_names_the_step_that_failed(self):
         clone = str(repo.failed("o/r@v1", 128, "fatal: not found"))

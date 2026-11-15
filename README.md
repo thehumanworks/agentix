@@ -159,9 +159,9 @@ A flag on the command line wins over the file, and the file wins over the
 built-in default, also when the flag gives the built-in default: with
 `timeout = 7200` in the file, `--timeout=3600` starts a sandbox for an hour.
 Turn a boolean off with `--no-tailscale`, and keep the snapshot that the
-file turns off with `--snapshot`. `--workdir=None` is refused: leave the flag
-out to use the file's value, or use `--workdir=` for an empty workdir, which
-is `/workdir`.
+file turns off with `--snapshot`. `--workdir=None` (as for any of these
+flags) reads as the flag not given, so the file's value applies; use
+`--workdir=` for an empty workdir, which is `/workdir`.
 `--ephemeral` still saves no snapshot, whatever the file says. Only
 `sandbox up` reads the file; `sandbox restore` uses the options the name was
 created with.

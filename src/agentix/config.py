@@ -153,9 +153,6 @@ def resolve(
     for name, key in UP_KEYS.items():
         if flags.get(name) is not None:
             value = flags[name]
-            if key.types == (str,):
-                # A caller may pass a number for a string option.
-                value = str(value)
             flag = "--" + name.replace("_", "-")
             result[name] = (_check_type(key, value, flag), "flag")
         elif name in configured and name not in ignore_file:
