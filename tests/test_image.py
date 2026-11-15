@@ -278,6 +278,8 @@ class ModuleCheckTests(unittest.TestCase):
             ("cc", "cc -o /tmp/agentix-check"),
             ("chrome-headless-shell", "--dump-dom"),
             (",", "nix-locate"),
+            ("codex", "codex --version"),
+            ("pi", "pi --version"),
         ):
             (check,) = [check for check in checks if marker in check]
             self.assertTrue(check.startswith(f"if jq -e --arg name {command} "), check)

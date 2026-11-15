@@ -32,7 +32,9 @@ class Rule(NamedTuple):
     word of `prompt_after` ("" means right after `start`); it continues as
     CONTINUE_PROMPT, so a cut-off task is not given again. A command whose
     prompt cannot be found, or that has a word of `refuse`, is not resumed
-    by the rule.
+    by the rule. With `subcommand`, `then` is a subcommand that takes the
+    prompt but not the other words, so they go before it and only the
+    prompt after it.
     """
 
     start: tuple[str, ...]
@@ -40,13 +42,20 @@ class Rule(NamedTuple):
     then: tuple[str, ...]
     prompt_after: tuple[str, ...]
     refuse: tuple[str, ...] = ()
+    subcommand: bool = False
 
 
-# Checked against claude 2.1.322: --session-id takes a UUID, and --resume
-# without --fork-session keeps it, so every resume continues one session.
-# codex exec cannot be given a session ID, and pi was not checked: both
-# continue the latest session in the workdir. Neither is in the image yet,
-# so their rules are untried.
+# Each rule was checked against the harness's --help and, for codex and pi,
+# by starting and continuing a run against a stand-in model server.
+# claude 2.1.322: --session-id takes a UUID, and --resume without
+# --fork-session keeps it, so every resume continues one session.
+# pi 1.5.2: --session-id opens the workdir's session with that ID, or
+# creates it, so pi does the same with one flag.
+# codex 0.167.1: `codex exec` cannot be given a session ID, so it continues
+# the latest session in the workdir with `codex exec resume --last`. That
+# subcommand refuses most options of `codex exec` (-s, -C, --add-dir ...),
+# which therefore go before it. -i takes several files and would take
+# `resume` as one; --ephemeral and pi's --no-session keep no session.
 RULES: dict[str, Rule] = {
     "claude": Rule(
         start=("claude",),
@@ -60,14 +69,24 @@ RULES: dict[str, Rule] = {
         first=(),
         then=("resume", "--last"),
         prompt_after=("",),
-        refuse=("resume",),
+        refuse=("resume", "fork", "review", "-i", "--image", "--ephemeral"),
+        subcommand=True,
     ),
     "pi": Rule(
         start=("pi",),
-        first=(),
-        then=("--continue",),
+        first=("--session-id", "{session}"),
+        then=("--session-id", "{session}"),
         prompt_after=("-p", "--print"),
-        refuse=("-c", "--continue", "-r", "--resume", "--session"),
+        refuse=(
+            "-c",
+            "--continue",
+            "-r",
+            "--resume",
+            "--session",
+            "--session-id",
+            "--fork",
+            "--no-session",
+        ),
     ),
 }
 # What a resumed agent is told instead of its task.
@@ -167,8 +186,11 @@ def plan(argv: Sequence[str], resume: object) -> tuple[list[str], list[str], str
         head = [argv[0], *rule.start[1:]]
         fill = [word.replace("{session}", session) for word in rule.first]
         then = [word.replace("{session}", session) for word in rule.then]
-        continued = [*rest[:prompt], CONTINUE_PROMPT, *rest[prompt + 1 :]]
-        return [*head, *fill, *rest], [*head, *then, *continued], f"the {name} rule"
+        if rule.subcommand:
+            continued = [*rest[:prompt], *rest[prompt + 1 :], *then, CONTINUE_PROMPT]
+        else:
+            continued = [*then, *rest[:prompt], CONTINUE_PROMPT, *rest[prompt + 1 :]]
+        return [*head, *fill, *rest], [*head, *continued], f"the {name} rule"
     known = ", ".join(" ".join(rule.start) for rule in RULES.values())
     raise InvalidRequest(
         f"No resume rule for `{shlex.join(argv)}`, so it would not be resumed. "

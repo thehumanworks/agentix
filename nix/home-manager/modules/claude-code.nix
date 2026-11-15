@@ -8,18 +8,7 @@
 
 let
   cfg = config.agentix.claude;
-  inherit (config.agentix.op) tokenFile;
-
-  # op loads the token from the file, so the commands Claude runs do not need
-  # it in their environment. A different exported token is an override and
-  # stays.
-  dropOpToken = lib.optionalString (tokenFile != null) ''
-    token_file=''${AGENTIX_OP_TOKEN_FILE:-${tokenFile}}
-    if [[ -r $token_file ]] &&
-      [[ -z ''${OP_SERVICE_ACCOUNT_TOKEN:-} || $OP_SERVICE_ACCOUNT_TOKEN == "$(<"$token_file")" ]]; then
-      launch+=(${lib.getExe' pkgs.coreutils "env"} -u OP_SERVICE_ACCOUNT_TOKEN)
-    fi
-  '';
+  opRun = import ./op-run.nix { inherit config lib pkgs; };
 in
 {
   imports = [ ./1password.nix ];
@@ -128,22 +117,18 @@ in
       # Install one claude command, which always resolves the token at runtime.
       # The version is kept so Home Manager picks the plugin layout for it.
       package =
-        (pkgs.writeShellApplication {
+        (opRun {
           name = "claude";
-          text = ''
-            # Modal sandboxes start with /tmp as 0777, and a mode set during the
-            # image build does not survive into them. Claude refuses to put its
-            # cross-session messaging socket in a world-writable directory that
-            # lacks the sticky bit, so restore the standard 1777 when we own /tmp.
+          program = lib.getExe pkgs.claude-code;
+          secrets.CLAUDE_CODE_OAUTH_TOKEN = "op://agentix/claude/oauth/token";
+          # Modal sandboxes start with /tmp as 0777, and a mode set during the
+          # image build does not survive into them. Claude refuses to put its
+          # cross-session messaging socket in a world-writable directory that
+          # lacks the sticky bit, so restore the standard 1777 when we own /tmp.
+          preamble = ''
             if [[ -O /tmp && ! -k /tmp ]]; then
               chmod +t /tmp || true
             fi
-
-            export CLAUDE_CODE_OAUTH_TOKEN="op://agentix/claude/oauth/token"
-            launch=(${lib.getExe config.agentix.op.package} run --no-masking --)
-            ${dropOpToken}
-            # Preserve terminal streams so Claude starts its interactive UI.
-            exec "''${launch[@]}" ${lib.getExe pkgs.claude-code} "$@"
           '';
         }).overrideAttrs
           { inherit (pkgs.claude-code) version; };
