@@ -240,7 +240,8 @@ async def execute_bytes(
 ) -> tuple[int, bytes, bytes]:
     """Run a command with `stdin` as its input; its exit code and raw output."""
     async with session.sandbox(sandbox_id) as handle:
-        process = await handle.exec.aio(*args, text=False)
+        # Wrapped as in `execute`, so that an idle stop sees it.
+        process = await handle.exec.aio(*wrap(args), text=False)
 
         async def feed() -> None:
             # In pieces, each sent before the next is buffered.

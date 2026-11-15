@@ -13,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
-from agentix import sync
+from agentix import idle, sync
 from agentix.__main__ import main
 from agentix.errors import InvalidRequest, NotFound, OperationFailed
 
@@ -388,6 +388,43 @@ class MatchTests(SyncTestCase):
         self.assertEqual((self.box / "a.txt").read_text(), "fallback\n")
 
 
+class IdleStopTests(SyncTestCase):
+    """Sync through the wrapper that execute_bytes puts around each command."""
+
+    def setUp(self):
+        super().setUp()
+        self.run_dir = self.tmp / "run"
+        self.run_dir.mkdir()
+        self.wrapper = idle.EXEC_WRAPPER.replace(idle.RUN_DIR, str(self.run_dir))
+        self.calls = 0
+
+    async def wrapped(self, args, stdin):
+        # What execute_bytes sends to Modal, with the sandbox's /run here.
+        sent = idle.wrap(args)
+        self.assertEqual(sent[4:], list(args))
+        self.calls += 1
+        return await sync.run_here([*sent[:2], self.wrapper, *sent[3:]], stdin)
+
+    def marks(self):
+        return list(self.run_dir.glob("used.*"))
+
+    def edit_and_sync(self):
+        (self.host / "a.txt").write_text("one\nTWO\nthree\n")
+        self.sync(runner=self.wrapped)
+        self.assertEqual((self.box / "a.txt").read_text(), "one\nTWO\nthree\n")
+        self.assertGreater(self.calls, 0)
+
+    def test_with_an_idle_stop_each_sync_command_leaves_a_mark(self):
+        (self.run_dir / "idle-stop").touch()
+        self.edit_and_sync()
+        self.assertEqual(len(self.marks()), self.calls)
+
+    def test_without_an_idle_stop_sync_is_unchanged(self):
+        self.edit_and_sync()
+        self.assertEqual(self.marks(), [])
+        self.assertEqual(self.status(self.box), " M a.txt\n")
+
+
 class TransportTests(unittest.TestCase):
     def test_execute_bytes_feeds_input_and_returns_bytes(self):
         from agentix import sandbox
@@ -405,7 +442,7 @@ class TransportTests(unittest.TestCase):
         data = os.urandom((1 << 20) + 5)
         result = asyncio.run(sandbox.execute_bytes(session, "sb-1", ["x"], data))
         self.assertEqual(result, (3, b"\x00out", b"err"))
-        handle.exec.aio.assert_awaited_once_with("x", text=False)
+        handle.exec.aio.assert_awaited_once_with(*idle.wrap(["x"]), text=False)
         written = b"".join(call.args[0] for call in process.stdin.write.call_args_list)
         self.assertEqual(written, data)
         process.stdin.write_eof.assert_called_once()
