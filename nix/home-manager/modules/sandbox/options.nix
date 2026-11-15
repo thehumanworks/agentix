@@ -1,6 +1,6 @@
 # What the modules in this directory share: the switch they follow by default,
 # and the paths that the agentix command on the host uses too.
-{ lib, ... }:
+{ config, lib, ... }:
 
 let
   shared = lib.importTOML ../../../sandbox.toml;
@@ -67,6 +67,19 @@ in
       opTokenFile = sharedPath "opTokenFile" "The root-only file in which a sandbox stores the 1Password token.";
       workdirFile = sharedPath "workdirFile" "The file that names the `--workdir` a sandbox was started with.";
       readyFile = sharedPath "readyFile" "The file a sandbox writes last when it starts.";
+    };
+
+    brief = lib.mkOption {
+      type = lib.types.lines;
+      default = builtins.replaceStrings [ "@workdir@" ] [ config.agentix.sandbox.paths.workdir ] (
+        builtins.readFile ./agent-context.md
+      );
+      defaultText = lib.literalExpression "./agent-context.md, with this image's working directory";
+      description = ''
+        What every agent harness loads into each session: Claude as
+        ~/.claude/CLAUDE.md, Codex as ~/.codex/AGENTS.md, and pi as
+        ~/.pi/agent/AGENTS.md. It describes the sandbox and its tools.
+      '';
     };
 
     manifestFile = lib.mkOption {

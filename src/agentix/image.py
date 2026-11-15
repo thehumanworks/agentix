@@ -247,6 +247,7 @@ def _checks() -> list[str]:
         # The harness wrappers answer --version without 1Password.
         _if_listed("codex", "codex --version > /dev/null"),
         _if_listed("pi", "pi --version > /dev/null"),
+        _if_listed("agent-auth-sync", "agent-auth-sync --version > /dev/null"),
         'test "$(locale charmap)" = UTF-8',
         # A login shell started inside an SSH command keeps the Nix profile.
         # A plain SSH command gets the session variables from .bashrc. Both,

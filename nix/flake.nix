@@ -266,12 +266,14 @@
       homeManagerModules = import ./home-manager/exports.nix { inherit inputs lib; };
 
       # The sandbox profile as an OCI image for Docker, Podman, and other
-      # hosts: `nix build .#oci` on Linux. See oci/default.nix. And
-      # agentix-sync, on every system: `nix run .#agentix-sync -- info`.
+      # hosts: `nix build .#oci` on Linux. See oci/default.nix. And, on
+      # every system, agentix-sync (`nix run .#agentix-sync -- info`) and
+      # agent-auth-sync (`nix run .#agent-auth-sync -- status`).
       packages = forAllSystems (
         system:
         {
           agentix-sync = pkgsFor.${system}.callPackage ./packages/agentix-sync.nix { };
+          agent-auth-sync = pkgsFor.${system}.callPackage ./packages/agent-auth-sync { };
         }
         // lib.optionalAttrs (sandboxHomes ? ${system}) {
           oci = import ./oci {

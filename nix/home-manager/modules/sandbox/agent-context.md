@@ -41,7 +41,7 @@ when the sandbox ends, so push or hand back anything that must survive.
   change), `difft` (structural diff), `nom` (`nom build` shows Nix progress).
 - Installed for checks: `ruff`, `ty`, `shellcheck`, `shfmt`, `nixfmt`, `statix`,
   `deadnix`, `ast-grep`. Language servers for Python, TypeScript, Bash, and Nix
-  back the LSP tool.
+  are on PATH and back Claude's LSP tool.
 - `rex` is the terminal multiplexer. `rex skill show` explains how to drive it;
   the first command starts its server.
 - A project with an `.envrc` or `flake.nix`: run `direnv allow` once, then
@@ -56,6 +56,10 @@ when the sandbox ends, so push or hand back anything that must survive.
   through `op`; `git` over HTTPS uses them as credential helpers.
 - Credentials are removed from the environment of the commands you run. Do not
   print secret values or write them to files.
+- The agent harnesses `claude`, `codex`, and `pi` are installed and signed in.
+  Codex's `~/.codex/auth.json` and pi's `~/.pi/agent/auth.json` come from
+  1Password, and `agent-auth-sync` pushes refreshed tokens back; leave those
+  files to it. `agent-auth-sync status` shows whether they are in step.
 
 ## Changing this environment
 

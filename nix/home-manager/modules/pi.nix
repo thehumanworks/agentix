@@ -1,7 +1,9 @@
 # pi, the coding agent CLI (pi.dev, github.com/earendil-works/pi, formerly
-# badlogic/pi-mono), from nixpkgs' pi-coding-agent, as a `pi` wrapper that
-# gets its provider's API key from 1Password each time it starts; see
-# ./op-run.nix. The nixpkgs build turns off pi's update check and telemetry.
+# badlogic/pi-mono), from nixpkgs' pi-coding-agent, behind a `pi` wrapper;
+# see ./op-run.nix. pi signs in with the providers in ~/.pi/agent/auth.json,
+# which agent-auth-sync keeps in step with 1Password (./auth-sync.nix); the
+# wrapper starts its watcher. The nixpkgs build turns off pi's update check
+# and telemetry.
 {
   config,
   lib,
@@ -12,9 +14,13 @@
 let
   cfg = config.agentix.pi;
   opRun = import ./op-run.nix { inherit config lib pkgs; };
+  authSync = config.agentix.authSync;
 in
 {
-  imports = [ ./1password.nix ];
+  imports = [
+    ./1password.nix
+    ./auth-sync.nix
+  ];
 
   options.agentix.pi = {
     enable = lib.mkEnableOption "the pi coding agent and its `pi` wrapper" // {
@@ -23,13 +29,13 @@ in
 
     secrets = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
-      default.OPENAI_API_KEY = "op://agentix/openai/api/key";
+      default = { };
       example.ANTHROPIC_API_KEY = "op://agentix/anthropic/api/key";
       description = ''
         Environment variables that `pi` gets from 1Password, as op://
-        references that `op run` resolves when it starts. Each provider reads
-        its own variable (`pi --help` lists them), so this chooses the
-        providers pi can use.
+        references that `op run` resolves when it starts. None by default:
+        pi uses the providers in ~/.pi/agent/auth.json. Each provider reads
+        its own variable (`pi --help` lists them), so this can add providers.
       '';
     };
   };
@@ -49,6 +55,9 @@ in
           "--help"
           "-h"
         ];
+        beforeLaunch = lib.optionalString (authSync.enable && authSync.startWithAgents) ''
+          ${lib.getExe authSync.package} ensure || true
+        '';
       };
     };
   };
