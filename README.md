@@ -269,19 +269,28 @@ Delete these? Type yes to delete:
 ```
 
 It deletes only after you type `yes`, or with `--yes`. Without a terminal
-and without `--yes` it only lists. A stopped sandbox is listed when its name
-would be left with no snapshot and nothing of it is newer than AGE; its
-record then goes as with `purge`. `--keep-latest` keeps the newest snapshot
-of each name, so every name can still be restored. `--name=GLOB` limits it
-to the names that match, such as `--name='scratch-*'`.
+and without `--yes` it only lists. It prunes every kind of snapshot: exit
+snapshots (`down`, `timeout`, `exit`) and `manual` ones from `sandbox
+snapshot` alike; the KIND column says which. A stopped sandbox is listed
+when its name would be left with no snapshot and nothing of it is newer
+than AGE; its record then goes as with `purge`. `--keep-latest` keeps the
+newest recorded snapshot of each name, and so the name; if that snapshot is
+past Modal's 30 days it can no longer be restored from, and the listing
+marks such snapshots `expired`. `--name=GLOB` limits it to the names that
+match, such as `--name='scratch-*'`.
 
 Prune only acts on what the records hold, so it never deletes an image or
-snapshot that agentix did not record. A name whose sandbox runs, or whose
-exit snapshot Modal is still saving, is skipped whole and listed as skipped.
-A name that changes between the listing and the deletion, for example by a
-restore, is skipped too. Snapshots past Modal's 30 days are marked
-`expired`: Modal has deleted them already, and prune removes them from the
-record.
+snapshot that agentix did not record. Like `sandbox ls`, the listing asks
+Modal about sandboxes of the listed names that have ended and records the
+exit snapshots it finds, so even a dry listing can write records; it never
+deletes without confirmation. A name whose sandbox runs, or whose exit
+snapshot Modal is still saving, is skipped whole and listed as skipped.
+Just before deleting, each name is checked again: one that has a new
+sandbox since the listing, for example from a restore, or that Modal shows
+running, is skipped, and a record is only removed if it holds no sandbox or
+snapshot that was not in the listing. Expired snapshots are gone from Modal
+already; prune removes them from the record. If anything fails, prune says
+which names and exits with an error; run it again.
 
 ### Where the records live
 

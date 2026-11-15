@@ -134,11 +134,18 @@ async def claim(session: Session, record: Record) -> bool:
     return True
 
 
-async def remove(session: Session, name: str, deleted: Collection[str]) -> None:
+async def remove(
+    session: Session,
+    name: str,
+    deleted: Collection[str],
+    sandboxes: Collection[str] | None = None,
+) -> None:
     """Purge `name`, whose snapshots `deleted` were deleted.
 
     Refused if the record holds a snapshot that is not in `deleted` by now,
-    because nothing else would find that snapshot again.
+    because nothing else would find that snapshot again. With `sandboxes`,
+    also refused if the record holds a sandbox that is not among them: one
+    that started meanwhile, say by a restore, would be left with no record.
     """
     legacy = await session.legacy_records()
     if legacy is not None:
@@ -150,6 +157,12 @@ async def remove(session: Session, name: str, deleted: Collection[str]) -> None:
     if left := [s["id"] for s in record["snapshots"] if s["id"] not in deleted]:
         raise OperationFailed(
             f"{name} has new snapshots ({', '.join(left)}). Retry the purge."
+        )
+    if sandboxes is not None and (
+        started := [s["id"] for s in record["sandboxes"] if s["id"] not in sandboxes]
+    ):
+        raise OperationFailed(
+            f"{name} has new sandboxes ({', '.join(started)}). Retry the purge."
         )
     gone = {item["id"] for item in [*record["sandboxes"], *record["snapshots"]]}
     purged: Record = {

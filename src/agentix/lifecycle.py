@@ -539,11 +539,11 @@ async def prune(
     # Shown also when there is nothing to delete, so the caller can say so.
     if confirm is None or not confirm(plan) or not plan["items"]:
         return {**plan, "result": None}
+    # One name that fails must not stop the others half way.
+    targets = list(plan["targets"].items())
     outcomes = await asyncio.gather(
-        *(
-            _prune_name(session, name, target)
-            for name, target in plan["targets"].items()
-        )
+        *(_prune_name(session, name, target) for name, target in targets),
+        return_exceptions=True,
     )
     result: dict[str, Any] = {
         "deleted_snapshots": [],
@@ -551,7 +551,9 @@ async def prune(
         "failed": [],
         "skipped": [],
     }
-    for outcome in outcomes:
+    for (name, _), outcome in zip(targets, outcomes):
+        if isinstance(outcome, BaseException):
+            outcome = {"failed": [{"name": name, "id": "", "error": str(outcome)}]}
         for key in result:
             result[key] += outcome.get(key, [])
     return {**plan, "result": result}
@@ -641,6 +643,7 @@ async def _prune_plan(
         if old or remove:
             targets[name] = {
                 "sandbox_id": record["sandbox_id"],
+                "sandboxes": [item["id"] for item in record["sandboxes"]],
                 "snapshots": [snapshot["id"] for snapshot in old],
                 "remove": remove,
             }
@@ -657,16 +660,20 @@ async def _prune_plan(
 async def _prune_name(
     session: Session, name: str, target: dict[str, Any]
 ) -> dict[str, list]:
-    """Carry out the plan for one name, unless it changed since the listing."""
+    """Carry out the plan for one name, unless it changed since the listing.
+
+    Once snapshots are deleted, the record is brought in step whatever else
+    fails, so that it never lists a snapshot that is gone.
+    """
     latest = await store.find(session, name)
     if latest is None:
         return {"skipped": [{"name": name, "reason": "purged meanwhile"}]}
-    if latest["sandbox_id"] != target["sandbox_id"]:
-        return {
-            "skipped": [
-                {"name": name, "reason": "it has a new sandbox since the listing"}
-            ]
-        }
+    if latest["sandbox_id"] != target["sandbox_id"] or any(
+        item["id"] not in target["sandboxes"] for item in latest["sandboxes"]
+    ):
+        return {"skipped": [{"name": name, "reason": _CHANGED}]}
+    if running := await sandbox.running_named(session, name):
+        return {"skipped": [{"name": name, "reason": f"running as {running[0]}"}]}
     recorded = {snapshot["id"] for snapshot in latest["snapshots"]}
     snapshot_ids = [item for item in target["snapshots"] if item in recorded]
     results = await asyncio.gather(
@@ -686,15 +693,33 @@ async def _prune_name(
     outcome: dict[str, list] = {"deleted_snapshots": deleted, "failed": failed}
     if target["remove"] and not failed:
         try:
-            await store.remove(session, name, deleted)
+            # A restore may have started a sandbox since the check above.
+            if running := await sandbox.running_named(session, name):
+                raise OperationFailed(f"running as {running[0]}")
+            await store.remove(session, name, deleted, target["sandboxes"])
         except OperationFailed as error:
-            # A snapshot was added meanwhile: the name stays.
+            # A sandbox or snapshot was added meanwhile: the name stays.
             outcome["skipped"] = [{"name": name, "reason": str(error)}]
+        except Exception as error:
+            failed.append({"name": name, "id": "", "error": f"not removed ({error})"})
         else:
             outcome["removed_names"] = [name]
             return outcome
     if deleted:
-        await store.update(
-            session, name, lambda record: store.remove_snapshots(record, deleted)
-        )
+        try:
+            await store.update(
+                session, name, lambda record: store.remove_snapshots(record, deleted)
+            )
+        except Exception as error:
+            failed.append(
+                {
+                    "name": name,
+                    "id": "",
+                    "error": "its record still lists deleted snapshots "
+                    f"{', '.join(deleted)} ({error})",
+                }
+            )
     return outcome
+
+
+_CHANGED = "it has a new sandbox since the listing"

@@ -171,6 +171,17 @@ async def list_ids(session: Session) -> list[str]:
     ]
 
 
+async def running_named(session: Session, name: str) -> list[str]:
+    """IDs of the running sandboxes of the app that carry the name `name`."""
+    app = await session.app()
+    return [
+        handle.object_id
+        async for handle in modal.Sandbox.list.aio(
+            app_id=app.app_id, tags={NAME_TAG: name}
+        )
+    ]
+
+
 async def execute(session: Session, sandbox_id: str, args: Sequence[str]) -> ExecResult:
     """Run a command and return its output. A non-zero exit code is a result."""
     if not args:

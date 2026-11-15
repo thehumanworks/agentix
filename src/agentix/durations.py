@@ -6,8 +6,11 @@ import re
 from .errors import InvalidRequest
 
 _UNITS = {"w": 7 * 86400, "d": 86400, "h": 3600, "m": 60, "s": 1}
-_PART = re.compile(r"(\d+)([wdhms])")
-_WHOLE = re.compile(r"(?:\d+[wdhms])+")
+_PART = re.compile(r"(\d{1,12})([wdhms])")
+_WHOLE = re.compile(r"(?:\d{1,12}[wdhms])+")
+# Modal keeps a snapshot for 30 days, so nothing recorded is much older. The
+# cap keeps the date arithmetic in range.
+MAXIMUM = dt.timedelta(days=3650)
 
 
 def parse(text: object, flag: str = "--older-than") -> dt.timedelta:
@@ -26,6 +29,10 @@ def parse(text: object, flag: str = "--older-than") -> dt.timedelta:
     seconds = sum(int(n) * _UNITS[unit] for n, unit in _PART.findall(value))
     if seconds <= 0:
         raise InvalidRequest(f"Invalid {flag}: {text!r}. It must be more than 0.")
+    if seconds > MAXIMUM.total_seconds():
+        raise InvalidRequest(
+            f"Invalid {flag}: {text!r}. It can be at most {MAXIMUM.days}d."
+        )
     return dt.timedelta(seconds=seconds)
 
 

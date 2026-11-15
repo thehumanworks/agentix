@@ -171,7 +171,11 @@ def _purge(name: str, terminate: bool = False):
 
 
 def _prune(
-    older_than: Any = None, keep_latest: bool = False, name: str = "", yes: bool = False
+    *extra: Any,
+    older_than: Any = None,
+    keep_latest: Any = False,
+    name: Any = "",
+    yes: Any = False,
 ):
     """Delete snapshots older than --older-than, such as 14d, 12h, or 30m.
 
@@ -184,16 +188,33 @@ def _prune(
     """
     from . import durations
 
+    if extra:
+        # Fire would otherwise give them to the flags, in order.
+        raise InvalidRequest(
+            f"prune takes only flags, not {' '.join(map(str, extra))}. Pass "
+            "--older-than=AGE, and --keep-latest, --name=GLOB, or --yes."
+        )
     if older_than is None:
         raise InvalidRequest("Pass --older-than, such as --older-than=14d.")
     age = durations.parse(older_than)
+    # Fire passes --yes=no as the string "no", which is true.
+    for flag, value in (("--yes", yes), ("--keep-latest", keep_latest)):
+        if not isinstance(value, bool):
+            raise InvalidRequest(
+                f"{flag} takes no value: pass {flag} or leave it out, not {value!r}."
+            )
+    if not isinstance(name, str):
+        raise InvalidRequest(
+            f"Invalid --name: {name!r}. Give a name or a glob, such as "
+            "--name='scratch-*'."
+        )
 
     def confirm(plan: dict[str, Any]) -> bool:
         print(_prune_listing(plan))
         sys.stdout.flush()
         if not plan["items"]:
             return False
-        if yes:
+        if yes is True:
             return True
         if not sys.stdin.isatty():
             print(
@@ -220,12 +241,16 @@ def _prune(
     for item in result["skipped"]:
         print(f"Skipped {item['name']}: {item['reason']}")
     if result["failed"]:
-        listed = ", ".join(
-            f"{item['id']} ({item['error']})" for item in result["failed"]
+        listed = "; ".join(
+            f"{item['name']}: "
+            + (
+                f"{item['id']} was not deleted ({item['error']})"
+                if item["id"]
+                else item["error"]
+            )
+            for item in result["failed"]
         )
-        raise OperationFailed(
-            f"Could not delete {listed}. The records keep them; run prune again."
-        )
+        raise OperationFailed(f"Prune did not finish: {listed}. Run prune again.")
     return None
 
 

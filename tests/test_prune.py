@@ -5,11 +5,12 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import modal
-from support import ModalTestCase, fake_sandbox
+from support import ModalTestCase, _each, fake_sandbox
 from test_lifecycle import OPTIONS
 
 from agentix import durations, lifecycle, store
 from agentix.errors import InvalidRequest, OperationFailed
+from agentix.sandbox import NAME_TAG
 
 
 def days_ago(days: float) -> str:
@@ -18,6 +19,18 @@ def days_ago(days: float) -> str:
 
 
 class PruneTestCase(ModalTestCase):
+    def setUp(self):
+        super().setUp()
+        # Running sandboxes by the name they carry. sb-test runs without one.
+        self.named = {}
+
+        def listing(app_id=None, tags=None):
+            if tags:
+                return _each(self.named.get(tags[NAME_TAG], []))
+            return _each([self.sandbox, *(h for hs in self.named.values() for h in hs)])
+
+        self.listing.aio = unittest.mock.Mock(side_effect=listing)
+
     def put(self, name, sandbox_id, snaps=(), started=40, exit="saved"):
         """A stopped name whose sandbox started `started` days ago."""
         record = store.new_record(name, dict(OPTIONS))
@@ -94,6 +107,10 @@ class ConfirmationTests(PruneTestCase):
         self.assertEqual(self.snapshot_ids("old"), ["im-2"])
         self.assertIsNone(self.stored("gone"))
         self.assertIn("Deleted 2 snapshots and removed 1 stopped sandbox.", output)
+
+    def test_flags_with_separate_values(self):
+        self.prune("--older-than", "14d", "--name", "gone", "--yes")
+        self.assertEqual(self.deleted(), ["im-9"])
 
     def test_typed_yes_on_a_terminal_deletes(self):
         _, errors = self.prune("--older-than=14d", tty=True, answer="yes\n")
@@ -191,6 +208,121 @@ class SafetyTests(PruneTestCase):
             self.prune("--yes")
         self.volume_lookup.assert_not_called()
         self.image_delete.aio.assert_not_called()
+
+
+class FlagTests(PruneTestCase):
+    def setUp(self):
+        super().setUp()
+        self.put("old", "sb-old", snaps=[("im-1", 20)], started=25)
+
+    def test_yes_with_a_value_is_refused(self):
+        for flag in ("--yes=false", "--yes=no", "--yes=0", "--keep-latest=no"):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(InvalidRequest, "takes no value"):
+                    self.prune("--older-than=14d", flag, tty=True, answer="no\n")
+        self.image_delete.aio.assert_not_called()
+        self.assertEqual(self.snapshot_ids("old"), ["im-1"])
+
+    def test_positional_arguments_are_refused(self):
+        for args in (["14d", "x", "y", "z"], ["--older-than=14d", "z"]):
+            with self.subTest(args=args):
+                with self.assertRaisesRegex(InvalidRequest, "only flags"):
+                    self.prune(*args)
+        self.image_delete.aio.assert_not_called()
+        self.volume_lookup.assert_not_called()
+
+    def test_name_must_be_text(self):
+        for flag in ("--name", "--name=123"):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(InvalidRequest, "--name"):
+                    self.prune("--older-than=14d", flag, "--yes")
+        self.image_delete.aio.assert_not_called()
+
+    def test_huge_ages_are_refused_cleanly(self):
+        for value in ("3000000d", "3651d", "9" * 5000 + "d"):
+            with self.subTest(value=value[:10]):
+                with self.assertRaisesRegex(InvalidRequest, "--older-than"):
+                    self.prune(f"--older-than={value}", "--yes")
+        self.assertEqual(durations.parse("3650d"), durations.MAXIMUM)
+
+
+class RaceTests(PruneTestCase):
+    def setUp(self):
+        super().setUp()
+        self.put("old", "sb-old", snaps=[("im-1", 20)], started=25)
+
+    def restore_meanwhile(self, running):
+        """A restore lands once prune has checked Modal for the name."""
+        calls = []
+
+        def listing(app_id=None, tags=None):
+            if not tags:
+                return _each([self.sandbox])
+            calls.append(tags)
+            if len(calls) == 2:
+                record = self.stored("old")
+                store.add_sandbox(record, "sb-again", restored_from="im-1")
+                self.write_record(record, "00000000T000001-again.json")
+                return _each([fake_sandbox("sb-again")] if running else [])
+            return _each([])
+
+        self.listing.aio = unittest.mock.Mock(side_effect=listing)
+
+    def test_restore_recorded_before_the_purge_keeps_the_name(self):
+        self.restore_meanwhile(running=False)
+        output, _ = self.prune("--older-than=14d", "--yes")
+        self.assertIn("Skipped old: old has new sandboxes (sb-again)", output)
+        record = self.stored("old")
+        self.assertEqual(record["sandbox_id"], "sb-again")
+        self.assertEqual(record["snapshots"], [])
+        self.assertNotIn("sb-again", record["removed"])
+
+    def test_sandbox_running_under_the_name_keeps_the_name(self):
+        self.restore_meanwhile(running=True)
+        output, _ = self.prune("--older-than=14d", "--yes")
+        self.assertIn("Skipped old: running as sb-again", output)
+        self.assertEqual(self.stored("old")["sandbox_id"], "sb-again")
+
+    def test_running_before_any_delete_skips_the_name(self):
+        self.named["old"] = [fake_sandbox("sb-again")]
+        output, _ = self.prune("--older-than=14d", "--yes")
+        self.assertIn("Skipped old: running as sb-again", output)
+        self.image_delete.aio.assert_not_called()
+
+    def test_store_remove_refuses_an_unplanned_sandbox(self):
+        record = self.stored("old")
+        store.add_sandbox(record, "sb-again")
+        self.write_record(record, "00000000T000001-again.json")
+        with self.assertRaisesRegex(OperationFailed, "sb-again"):
+            self.run_core(store.remove, "old", ["im-1"], ["sb-old"])
+        self.assertIsNotNone(self.stored("old"))
+
+
+class FailureTests(PruneTestCase):
+    def test_one_failing_name_does_not_stop_the_others(self):
+        self.put("bad", "sb-bad", snaps=[("im-b", 20)], started=25)
+        self.put("good", "sb-good", snaps=[("im-g", 20), ("im-n", 1)], started=25)
+        find = store.find
+
+        async def failing(session, name):
+            if name == "bad":
+                raise ConnectionError("no network")
+            return await find(session, name)
+
+        with patch("agentix.lifecycle.store.find", side_effect=failing):
+            with self.assertRaisesRegex(OperationFailed, "bad: no network"):
+                self.prune("--older-than=14d", "--yes")
+        self.assertEqual(self.deleted(), ["im-g"])
+        self.assertEqual(self.snapshot_ids("good"), ["im-n"])
+        self.assertEqual(self.snapshot_ids("bad"), ["im-b"])
+
+    def test_record_update_that_fails_is_reported(self):
+        self.put("good", "sb-good", snaps=[("im-g", 20), ("im-n", 1)], started=25)
+        with patch(
+            "agentix.lifecycle.store.update", side_effect=ConnectionError("down")
+        ):
+            with self.assertRaisesRegex(OperationFailed, "still lists deleted.*im-g"):
+                self.prune("--older-than=14d", "--yes")
 
 
 class DurationTests(unittest.TestCase):
