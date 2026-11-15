@@ -33,7 +33,7 @@ _STEPS = {3: "check out {ref} in", 4: "run direnv allow in"}
 
 def parse(spec: str) -> tuple[str, str, str]:
     """The clone URL, the directory under the working directory, and the ref."""
-    match = _SPEC.fullmatch(spec) if isinstance(spec, str) else None
+    match = _SPEC.fullmatch(spec)
     name = match["name"].removesuffix(".git") if match else ""
     if name in ("", ".", "..") or (match["ref"] or "").startswith("-"):
         raise InvalidRequest(

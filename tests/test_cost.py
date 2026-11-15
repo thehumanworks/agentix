@@ -10,7 +10,6 @@ from support import ModalTestCase
 from test_lifecycle import OPTIONS
 
 from agentix import cost, store
-from agentix.errors import InvalidRequest
 from agentix.image import BUILD_CPU, BUILD_MEMORY_MIB
 from agentix.sandbox import NAME_TAG
 
@@ -536,10 +535,9 @@ class CommandTest(ModalTestCase):
         self.assertEqual(json.loads(self.run_cli("cost", "--json")), self.summary)
 
     def test_refuses_values_and_arguments(self):
-        with self.assertRaises(InvalidRequest):
-            self.run_cli("cost", "--json=no")
-        with self.assertRaises(InvalidRequest):
-            self.run_cli("cost", "march")
+        self.assertIn("does not take a value", self.usage_error("cost", "--json=no"))
+        self.assertIn("unexpected extra argument", self.usage_error("cost", "march"))
+        self.assertEqual(json.loads(self.run_cli("cost", "--json=True")), self.summary)
 
 
 class ListingTest(ModalTestCase):

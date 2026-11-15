@@ -447,12 +447,24 @@ class TransportTests(unittest.TestCase):
         self.assertEqual(written, data)
         process.stdin.write_eof.assert_called_once()
 
-    def test_flag_values_are_refused_before_modal(self):
+    def test_flags_go_before_or_after_the_name(self):
         with patch("agentix.__main__._backend") as backend:
-            with self.assertRaisesRegex(InvalidRequest, "--pull takes no value"):
-                main(["sandbox", "sync", "--pull", "box"])
-            with self.assertRaisesRegex(InvalidRequest, "--path"):
-                main(["sandbox", "sync", "box", "--path=12"])
+            main(["sandbox", "sync", "--pull", "box"])
+            main(["sandbox", "sync", "box", "--path=12"])
+        self.assertEqual(
+            [call.args[::2] for call in backend.return_value.sync.call_args_list],
+            [("box", ""), ("box", "12")],
+        )
+        self.assertEqual(
+            [call.args[3] for call in backend.return_value.sync.call_args_list],
+            [True, False],
+        )
+
+    def test_a_value_for_pull_is_refused_before_modal(self):
+        with patch("agentix.__main__._backend") as backend:
+            with self.assertRaises(SystemExit) as raised:
+                main(["sandbox", "sync", "box", "--pull=yes"])
+            self.assertEqual(raised.exception.code, 2)
             backend.assert_not_called()
 
 

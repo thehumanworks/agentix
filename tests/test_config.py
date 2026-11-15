@@ -235,8 +235,9 @@ class PrecedenceTest(ConfigTestCase):
         with self.assertRaisesRegex(ConfigError, "--timeout: timeout must be"):
             config.up_options(timeout="soon")
 
-    def test_string_flag_that_fire_read_as_a_number_stays_a_string(self):
-        self.assertEqual(config.up_options(image_name=7)["image_name"], "7")
+    def test_a_number_for_a_string_flag_is_refused(self):
+        with self.assertRaisesRegex(ConfigError, "--image-name: image_name must be"):
+            config.up_options(image_name=7)
 
     def test_broken_file_is_reported_even_when_flags_set_every_key(self):
         self.write_config("[sandbox.up]\nbogus = 1\n")
