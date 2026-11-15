@@ -59,6 +59,7 @@ def _create_sandbox(
     hostname: str = "",
     no_snapshot: bool | None = None,
     ephemeral: bool = False,
+    repo: str = "",
 ):
     """Start a sandbox under NAME, or under a new name such as brisk-otter.
 
@@ -70,6 +71,10 @@ def _create_sandbox(
     --no-snapshot is given. --ephemeral starts a sandbox with no name, no
     record, and no snapshot: `sandbox down ID` leaves nothing behind. With
     --tailscale, Tailscale SSH starts too, as with `sandbox ssh start`.
+    --repo=OWNER/NAME[@REF] clones that GitHub repository with the sandbox's
+    credentials into NAME in the image's working directory, checks out REF,
+    runs `direnv allow` if it has an .envrc, and starts commands and logins
+    there. It replaces --workdir.
     """
     from . import config, names, ssh_input
 
@@ -82,6 +87,7 @@ def _create_sandbox(
         cpu=cpu,
         tailscale=tailscale,
         no_snapshot=no_snapshot,
+        ignore_file=("workdir",) if repo else (),
     )
     # Refuse before anything is created.
     names.check_ephemeral(name, ephemeral)
@@ -102,6 +108,7 @@ def _create_sandbox(
         hostname=hostname,
         exit_snapshot=not (options["no_snapshot"] or ephemeral),
         ephemeral=ephemeral,
+        repo=repo,
     )
 
 

@@ -86,6 +86,7 @@ that has a name. The command line uses
 | `--memory=MIB` | `8192` | Memory reserved for the sandbox |
 | `--cpu=CORES` | Modal's default share | CPU cores reserved |
 | `--workdir=PATH` | `/workdir` | Absolute path where commands and SSH logins start |
+| `--repo=OWNER/NAME[@REF]` | none | Clone that GitHub repository into `/workdir/NAME` and start there; see below |
 | `--secret-name=NAME` | `1password` | Modal secret to attach; `''` attaches none |
 | `--image-name=NAME` | `determinate-nix:latest` | Published image to start from |
 | `--tailscale` | off | Also start Tailscale SSH and print its address |
@@ -100,6 +101,23 @@ its default from your config file instead; see
 `sandbox up` returns once the sandbox is ready for commands, about a second
 after Modal accepts it. It does not build the image. Sandboxes run in
 Modal's VM runtime and reserve TCP port 22 for the OpenSSH tunnel.
+
+`--repo=OWNER/NAME[@REF]` starts the sandbox inside a clone of
+`github.com/OWNER/NAME`: Git clones it in the sandbox with the sandbox's own
+GitHub credentials (the image's `gh` credential helper, through the attached
+secret), checks out REF (a branch, tag, or commit) if given, and runs
+`direnv allow` if the repository has an `.envrc`. `/workdir/NAME` then
+replaces `--workdir`, which is refused with `--repo` (a `workdir` in the
+config file is ignored), so `sandbox exec`, `sandbox shell`, and a later
+`sandbox restore` start there; a restore does not clone again. If the clone
+fails, for a wrong name or a repository the credentials cannot read, the
+sandbox is removed and Git's error is reported. A public repository clones
+without a secret.
+
+```sh
+uv run agentix sandbox up --name=dev --repo=thehumanworks/agentix@main
+uv run agentix sandbox shell dev   # lands in /workdir/agentix
+```
 
 ### Defaults for `sandbox up`
 
@@ -520,7 +538,7 @@ lock. See [Rex in sandboxes](nix/README.md#rex-in-sandboxes).
 | Profile | System | Status |
 | --- | --- | --- |
 | `modal` | x86_64 Linux | The image; built by `image build` and CI |
-| `modal-arm` | ARM64 Linux | Evaluated by CI, not built |
+| `modal-arm` | ARM64 Linux | Built once under emulation; CI's ARM job should build it, not yet seen green |
 | `linux` | x86_64 Linux | An example of `lib.mkLinuxHome` for a user `agent`; built by CI |
 | `mac` | Apple Silicon macOS | Evaluated by CI, not built; see [macOS later](nix/README.md#macos-later) |
 
@@ -602,17 +620,21 @@ the same checks.
 GitHub Actions run two workflows from `.github/workflows/`. Neither needs a
 secret or contacts Modal.
 
-- `ci.yml` runs on pull requests, pushes to `main`, and on demand, with two
+- `ci.yml` runs on pull requests, pushes to `main`, and on demand, with three
   jobs that take about a minute. `Python tests and lint` runs the tests,
   `ruff check`, and `ruff format --check`. `Nix flake check` runs
   `nix flake check --all-systems --no-build`, which evaluates the x86_64,
   ARM, and Mac outputs, then `nix flake check` on x86_64 Linux: formatting,
   statix, deadnix, the `modal` and `linux` profiles, the OCI image's root
-  and layer list, and each SSH engine module on and off. To require CI
-  before merging, require those two checks by name.
+  and layer list, and each SSH engine module on and off. `Nix flake check
+  (ARM)` runs the same `nix flake check` beside it on an `ubuntu-24.04-arm`
+  runner, which builds `modal-arm`, the ARM image's root and layer list, and
+  the SSH engine checks. That job has not yet been seen green on GitHub. To
+  require CI before merging, require those three checks by name.
 - `flake-update.yml` runs every Monday and on demand. It runs
-  `nix flake update` in `nix/` and the same Nix checks on the new lock, and
-  when they pass opens or updates a pull request from
+  `nix flake update` in `nix/` and the same Nix checks on the new lock,
+  building x86_64 only; ARM is built when CI runs on the pull request. When
+  they pass, it opens or updates a pull request from
   `automation/flake-update`. It does not move Rex, and it does not build the
   image: after merging, rebuild and verify as `AGENTS.md` requires. GitHub
   lets it open the pull request only when "Allow GitHub Actions to create
@@ -642,10 +664,12 @@ token and no secrets; neither workflow uses `pull_request_target`.
   on its own; `sandbox shell` and `sandbox ssh start` start them.
 - Every image build that misses the cache starts from an empty Nix store;
   there is no binary cache of agentix's own.
-- Only the x86_64 image runs on Modal. CI evaluates the `modal-arm` and
-  `mac` profiles and the ARM OCI image but builds none of them, so they are
-  unproven. On an Apple Silicon Mac, Docker runs the x86_64 OCI image under
-  emulation; see [OCI image](nix/README.md#oci-image).
+- Only the x86_64 image runs on Modal: `image build` builds no other.
+  `modal-arm` has been built under qemu emulation. CI's ARM job is expected
+  to build it and the ARM OCI image's root from its first run, but has not
+  yet been seen green, and nothing runs the ARM image; see [ARM Linux](nix/README.md#arm-linux). CI only
+  evaluates `mac`. On an Apple Silicon Mac, Docker runs the x86_64 OCI image
+  under emulation; see [OCI image](nix/README.md#oci-image).
 - The SSH scripts use commands from other modules: `jq` (tools) for both
   engines, `flock` (base commands) for OpenSSH, and `ssh-keygen` (OpenSSH)
   for the Tailscale host keys that `sandbox shell` checks. With the OpenSSH

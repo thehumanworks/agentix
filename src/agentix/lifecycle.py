@@ -15,7 +15,7 @@ from typing import Any
 
 import modal
 
-from . import names, sandbox, ssh, store
+from . import names, repo, sandbox, ssh, store
 from .errors import InvalidRequest, NotFound, OperationFailed
 from .session import Session
 from .ssh_input import check_tailscale_start
@@ -135,18 +135,27 @@ async def up(
     tailscale: bool = False,
     hostname: str = "",
     ephemeral: bool = False,
+    clone: str = "",
 ) -> dict[str, Any]:
     """Start a sandbox under `name`, or under a new name if none is given.
 
     A name that has a record already is refused, whether its sandbox runs or
     not: restore it, or purge it first. An `ephemeral` sandbox has no name, no
     record, and no exit snapshot, so stopping it leaves nothing behind.
+    `clone`, OWNER/NAME[@REF], is cloned into NAME in the image's workdir,
+    which becomes the sandbox's workdir; a sandbox whose clone fails is removed.
     """
     names.check_ephemeral(name, ephemeral)
     check_tailscale_start(tailscale, hostname, options["secret_name"])
+    if clone:
+        workdir = repo.parse(clone)[1]
+        if options["workdir"]:
+            raise InvalidRequest("--repo sets the workdir; leave out --workdir.")
+        options = {**options, "workdir": workdir}
     if ephemeral:
         options = {**options, "exit_snapshot": False}
         sandbox_id = await sandbox.create(session, **options)
+        await _clone(session, sandbox_id, clone)
         return await _started(session, sandbox_id, "", tailscale, hostname)
     if name:
         if await store.find(session, names.check_new_name(name)) is not None:
@@ -162,6 +171,7 @@ async def up(
     # start one name at once, only one gets this far. The record is written
     # once, with the sandbox in it, because each write takes over a second.
     sandbox_id = await sandbox.create(session, **options, name=name)
+    await _clone(session, sandbox_id, clone)
     record = store.new_record(name, options)
     store.add_sandbox(record, sandbox_id)
     try:
@@ -174,6 +184,20 @@ async def up(
         await sandbox.discard(session, sandbox_id)
         raise InvalidRequest(_taken(name))
     return await _started(session, sandbox_id, name, tailscale, hostname)
+
+
+async def _clone(session: Session, sandbox_id: str, spec: str) -> None:
+    """Clone `spec` in a new sandbox that no record holds yet, or remove it."""
+    if not spec:
+        return
+    try:
+        result = await sandbox.execute(session, sandbox_id, repo.command(spec))
+    except BaseException:
+        await sandbox.discard(session, sandbox_id)
+        raise
+    if result["exit_code"] != 0:
+        await sandbox.discard(session, sandbox_id)
+        raise repo.failed(spec, result["exit_code"], result["stderr"])
 
 
 async def down(session: Session, target: str) -> dict[str, Any]:
