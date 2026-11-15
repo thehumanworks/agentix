@@ -34,10 +34,13 @@ where its prompt is, and words that make the rule refuse it.
 | Rule | Starts as | Continues as |
 | --- | --- | --- |
 | claude | `claude --session-id UUID -p TASK ...` | `claude --resume UUID -p CONTINUE ...` |
-| codex | `codex exec TASK ...` | `codex exec resume --last CONTINUE ...` |
-| pi | `pi -p TASK ...` | `pi --continue -p CONTINUE ...` |
+| codex | `codex exec TASK OPTIONS` | `codex exec OPTIONS resume --last CONTINUE` |
+| pi | `pi --session-id UUID -p TASK ...` | `pi --session-id UUID -p CONTINUE ...` |
 
-The other flags, such as `--model`, are kept. The first word matches by its
+The other flags, such as `--model`, are kept. For codex they move before
+`resume`: `codex exec resume` refuses most options of `codex exec`, such as
+`-s` and `-C` (checked against codex 0.167.1), and takes them before the
+subcommand. The first word matches by its
 base name, so `/root/.nix-profile/bin/claude` is `claude`, and is kept as
 given. A command run through `sh -c`, `nix shell`, or anything else has no
 rule; pass `--resume='COMMAND'`.
@@ -59,14 +62,27 @@ session ID with `--session-id` and continues exactly that one with
 `--resume`, which keeps the ID (checked against claude 2.1.322's `--help`;
 `--fork-session` would make a new one). A claude command that names a
 session itself (`-c`, `-r`, `--resume`, `--session-id`, `--fork-session`) is
-refused by the rule. `codex exec` cannot be given a session ID when it
-starts, and pi was not checked, so those two still take the latest session:
-run one resumable codex or pi run per sandbox, and nothing else of that
-harness there while it runs.
+refused by the rule. pi 1.5.2's `--session-id ID` opens the workdir's
+session with that ID, or creates it, so the pi rule passes the same new ID
+when it starts and when it continues; a pi command with `-c`, `-r`,
+`--session`, `--session-id`, `--fork`, or `--no-session` is refused, and
+so is one with more than the prompt to say: pi takes several messages and
+`@file` arguments, and only the prompt is replaced by CONTINUE, so
+`pi -p @spec.md "do X"` and `pi -p A B` are refused rather than sent again.
+The rules know which options take a value (`--model m`), so a value is
+neither a message nor a refused word: `codex exec TASK -m review` is fine.
+`codex exec` cannot be given a session ID when it starts, so codex continues
+the latest session in the workdir (`--last` looks only at sessions started
+there): run one resumable codex run per workdir, and nothing else of codex
+there while it runs. The codex rule refuses `codex exec resume`, `fork`,
+`review`, `--ephemeral` (no session is kept), and `-i`/`--image`, which
+takes several files and would take `resume` for one.
 
-Codex and pi are not in the image yet (task more-harnesses), so their rules
-are untried: that task should run one timeout through each, and replace
-`--last` if codex can be told a session ID.
+Both rules were tried with the real CLIs against a stand-in model server:
+the start form, an unrelated run in the same directory, then the continue
+form. pi continued its own session; codex continued the unrelated one, as
+`--last` says. A real timeout with a real model has not been run through
+either.
 
 The resume command is worked out when the command starts and printed then,
 so the user sees what a timeout will lead to before it happens. It is
@@ -87,6 +103,12 @@ when the command exits, whatever its exit code:
 
 `command` is what runs now, with its session ID; `resume` is what continues
 it, with the same ID.
+
+The command's input is `/dev/null`. Nothing writes to it, and `codex exec`
+and `pi -p` read an open input until it ends, so with the input of the exec
+they would wait there until the timeout, each time they were resumed.
+`claude -p` with a prompt does not read it. A command that needs input reads
+a file instead.
 
 `/root` is in the exit snapshot (`/run` is not), so a marker in a snapshot
 means the command was still running when that sandbox ended. `sandbox_id`
@@ -161,9 +183,9 @@ the timeout is not lost.
   the timeout is not in the snapshot. Prompts that ask for steps with side
   effects should say to check first ("open a pull request unless one is
   open").
-- **Another conversation in the workdir.** For codex and pi, a second run or
-  an interactive session in the same workdir can be the one that is
-  continued; see above. claude runs are tied to their session ID.
+- **Another conversation in the workdir.** For codex, a second run or an
+  interactive session in the same workdir can be the one that is continued;
+  see above. claude and pi runs are tied to their session ID.
 - **Contact lost while the sandbox runs.** If an `exec` fails for another
   reason than the sandbox ending, the watcher prints the error and says the
   command may still be running; it does not restore anything.

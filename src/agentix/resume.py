@@ -32,7 +32,12 @@ class Rule(NamedTuple):
     word of `prompt_after` ("" means right after `start`); it continues as
     CONTINUE_PROMPT, so a cut-off task is not given again. A command whose
     prompt cannot be found, or that has a word of `refuse`, is not resumed
-    by the rule.
+    by the rule. With `subcommand`, `then` is a subcommand that takes the
+    prompt but not the other words, so they go before it and only the
+    prompt after it. `values` lists the options that take a value, which
+    `refuse` then does not look at. With `one_message`, a command with
+    another message than the prompt, or an @file, is not resumed either,
+    since those would give the task again.
     """
 
     start: tuple[str, ...]
@@ -40,13 +45,22 @@ class Rule(NamedTuple):
     then: tuple[str, ...]
     prompt_after: tuple[str, ...]
     refuse: tuple[str, ...] = ()
+    subcommand: bool = False
+    values: tuple[str, ...] = ()
+    one_message: bool = False
 
 
-# Checked against claude 2.1.322: --session-id takes a UUID, and --resume
-# without --fork-session keeps it, so every resume continues one session.
-# codex exec cannot be given a session ID, and pi was not checked: both
-# continue the latest session in the workdir. Neither is in the image yet,
-# so their rules are untried.
+# Each rule was checked against the harness's --help and, for codex and pi,
+# by starting and continuing a run against a stand-in model server.
+# claude 2.1.322: --session-id takes a UUID, and --resume without
+# --fork-session keeps it, so every resume continues one session.
+# pi 1.5.2: --session-id opens the workdir's session with that ID, or
+# creates it, so pi does the same with one flag.
+# codex 0.167.1: `codex exec` cannot be given a session ID, so it continues
+# the latest session in the workdir with `codex exec resume --last`. That
+# subcommand refuses most options of `codex exec` (-s, -C, --add-dir ...),
+# which therefore go before it. -i takes several files and would take
+# `resume` as one; --ephemeral and pi's --no-session keep no session.
 RULES: dict[str, Rule] = {
     "claude": Rule(
         start=("claude",),
@@ -60,14 +74,40 @@ RULES: dict[str, Rule] = {
         first=(),
         then=("resume", "--last"),
         prompt_after=("",),
-        refuse=("resume",),
+        refuse=("resume", "fork", "review", "-i", "--image", "--ephemeral"),
+        subcommand=True,
+        values=(
+            *("-c", "--config", "--enable", "--disable", "-m", "--model"),
+            *("--local-provider", "-p", "--profile", "-s", "--sandbox", "-C"),
+            *("--cd", "--add-dir", "--thread-source", "--cyber-access-program"),
+            *("--output-schema", "--color", "-o", "--output-last-message"),
+        ),
     ),
     "pi": Rule(
         start=("pi",),
-        first=(),
-        then=("--continue",),
+        first=("--session-id", "{session}"),
+        then=("--session-id", "{session}"),
         prompt_after=("-p", "--print"),
-        refuse=("-c", "--continue", "-r", "--resume", "--session"),
+        refuse=(
+            "-c",
+            "--continue",
+            "-r",
+            "--resume",
+            "--session",
+            "--session-id",
+            "--fork",
+            "--no-session",
+        ),
+        # From pi 1.5.2's --help. --export and --list-models end pi at once.
+        values=(
+            *("--provider", "--model", "--api-key", "--system-prompt"),
+            *("--append-system-prompt", "--mode", "--session", "--session-id"),
+            *("--fork", "--session-dir", "--name", "-n", "--models", "--tools"),
+            *("-t", "--exclude-tools", "-xt", "--thinking", "--extension", "-e"),
+            *("--skill", "--prompt-template", "--theme", "--use-theme"),
+            "--tui-mode",
+        ),
+        one_message=True,
     ),
 }
 # What a resumed agent is told instead of its task.
@@ -91,13 +131,15 @@ RESTORE_ATTEMPTS = 3
 
 # $1 is RUNS_DIR, $2 the run ID, $3 the marker, then the command. The marker
 # is removed when the command exits, whatever its exit code, so one that is
-# left means the sandbox ended while the command ran.
+# left means the sandbox ended while the command ran. Nothing ever writes to
+# the command's input, and `codex exec` and `pi -p` read an open stdin until
+# it ends, so the command reads /dev/null instead.
 WRAPPER = """set -u
 mkdir -p "$1" && printf '%s\\n' "$3" > "$1/$2.tmp" && mv "$1/$2.tmp" "$1/$2.json" \
   || { echo "agentix: cannot write the resume marker in $1" >&2; exit 125; }
 marker=$1/$2.json
 shift 3
-"$@"
+"$@" < /dev/null
 code=$?
 rm -f "$marker"
 exit "$code"
@@ -151,14 +193,26 @@ def plan(argv: Sequence[str], resume: object) -> tuple[list[str], list[str], str
             continue
         rest = list(argv[n:])
         prompt = _prompt(rest, rule.prompt_after)
-        clash = [word for word in rest if word.split("=")[0] in rule.refuse]
-        if prompt is None or clash:
+        words = _words(rest, rule.values)
+        clash = [word for _, word in words if word.split("=")[0] in rule.refuse]
+        extra = [
+            word
+            for i, word in words
+            if rule.one_message
+            and i != prompt
+            and (word == "--" or word.startswith("@") or not word.startswith("-"))
+        ]
+        if prompt is None or clash or extra:
             places = [word or " ".join(rule.start) for word in rule.prompt_after]
-            why = (
-                f"it already says which session to use ({clash[0]})"
-                if clash
-                else f"its prompt is not right after {' or '.join(places)}"
-            )
+            if clash:
+                why = f"it already says which session to use ({clash[0]})"
+            elif prompt is None:
+                why = f"its prompt is not right after {' or '.join(places)}"
+            else:
+                why = (
+                    f"it has more to say than its prompt ({extra[0]}), which "
+                    "would give the task again"
+                )
             raise InvalidRequest(
                 f"The {name} rule cannot resume `{shlex.join(argv)}`: {why}. Say "
                 "how it continues with --resume='COMMAND'."
@@ -167,13 +221,28 @@ def plan(argv: Sequence[str], resume: object) -> tuple[list[str], list[str], str
         head = [argv[0], *rule.start[1:]]
         fill = [word.replace("{session}", session) for word in rule.first]
         then = [word.replace("{session}", session) for word in rule.then]
-        continued = [*rest[:prompt], CONTINUE_PROMPT, *rest[prompt + 1 :]]
-        return [*head, *fill, *rest], [*head, *then, *continued], f"the {name} rule"
+        if rule.subcommand:
+            continued = [*rest[:prompt], *rest[prompt + 1 :], *then, CONTINUE_PROMPT]
+        else:
+            continued = [*then, *rest[:prompt], CONTINUE_PROMPT, *rest[prompt + 1 :]]
+        return [*head, *fill, *rest], [*head, *continued], f"the {name} rule"
     known = ", ".join(" ".join(rule.start) for rule in RULES.values())
     raise InvalidRequest(
         f"No resume rule for `{shlex.join(argv)}`, so it would not be resumed. "
         f"Rules: {known}. Say how it continues with --resume='COMMAND'."
     )
+
+
+def _words(rest: list[str], values: tuple[str, ...]) -> list[tuple[int, str]]:
+    """The words of `rest` with their index, leaving out options' values."""
+    words, skip = [], False
+    for i, word in enumerate(rest):
+        if skip:
+            skip = False
+            continue
+        words.append((i, word))
+        skip = word in values
+    return words
 
 
 def _prompt(rest: list[str], after: tuple[str, ...]) -> int | None:

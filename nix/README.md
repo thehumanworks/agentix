@@ -23,7 +23,7 @@ Each profile is one output of `flake.nix`.
 | `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs. `linux.nix` holds what every Linux machine gets, and `sandbox.nix` builds on it |
 | `home-manager/users/` | One file per person: the Git name and emails |
-| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor, comma and nix-index. `core.nix` declares the options several modules share |
+| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, Codex, pi, 1Password, the editor, comma and nix-index. `op-run.nix` builds the harness wrappers that get their credentials from 1Password. `core.nix` declares the options several modules share |
 | `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, the C compiler, the headless browser, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package, among them `agentix-sync.sh`, which the host's agentix command also runs |
 | `packages/` | Packages the flake builds on every system: `agentix-sync` (`nix run .#agentix-sync`) |
@@ -46,10 +46,12 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | --- | --- | --- |
 | `agentix.op.enable` | `1password.nix` | `op` on PATH |
 | `agentix.claude.enable` | `claude-code.nix` | Claude Code, its settings and plugins, and the `claude` wrapper |
+| `agentix.codex.enable` | `codex.nix` | The Codex CLI and the `codex` wrapper, which gets `agentix.codex.secrets` from 1Password |
 | `agentix.git.enable` | `git.nix` | Git, with `gh` and `gh-lf` as HTTPS credential helpers |
 | `agentix.languageServers.enable` | `language-servers.nix` | The language servers, on PATH and in Claude's LSP tool |
 | `agentix.nixIndex.enable` | `nix-index.nix` | comma (`, COMMAND`) and `nix-locate`, with the prebuilt index from nix-index-database, and the shell's command-not-found hook |
 | `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
+| `agentix.pi.enable` | `pi.nix` | The pi coding agent and the `pi` wrapper, which gets `agentix.pi.secrets` from 1Password |
 | `agentix.sync.enable` | `sync.nix` | `agentix-sync`, which `agentix sandbox sync` runs on both sides to copy uncommitted changes between checkouts with Git |
 | `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
 | `agentix.sandbox.baseCommands.enable` | `sandbox/base-commands.nix` | `tar`, `gzip`, `xz`, `less`, `which`, `flock`, `locale`, `infocmp`, and the other commands a Debian base would provide |
@@ -82,6 +84,14 @@ Settings that a person or another module provides:
   `sandbox.toml`.
 - `agentix.op.package`, `agentix.op.tokenFile`, and
   `agentix.claude.trustedDirectories`, which the sandbox modules set.
+- `agentix.codex.secrets` and `agentix.pi.secrets`: environment variables
+  that `codex` and `pi` get from 1Password, as op:// references that
+  `op run` resolves at start. Both default to `op://agentix/openai/api/key`,
+  as `CODEX_API_KEY` (what `codex exec` reads) and `OPENAI_API_KEY`. For pi
+  with Anthropic instead, set
+  `agentix.pi.secrets = { ANTHROPIC_API_KEY = "op://..."; }`; `pi --help`
+  lists each provider's variable. A wrapper started with only `--version` or
+  `--help` skips 1Password.
 
 To add a module here:
 
@@ -136,8 +146,8 @@ not resolve to it on the image's `PATH`, or if the paths differ from the ones
 ## Use from another flake
 
 The flake exports `homeManagerModules.default`, which imports every module,
-and one module per concern: `"1password"`, `claude-code`, `git`,
-`language-servers`, `nix-index`, `nixvim`, `sync`, `tools`, `sandbox-base-commands`,
+and one module per concern: `"1password"`, `claude-code`, `codex`, `git`,
+`language-servers`, `nix-index`, `nixvim`, `pi`, `sync`, `tools`, `sandbox-base-commands`,
 `sandbox-browser`, `sandbox-cc`, `sandbox-claude`, `sandbox-manifest`,
 `sandbox-op-token`, `sandbox-openssh`, `sandbox-rex`, `sandbox-tailscale`, and
 `sandbox-workdir`. Each brings the
@@ -198,7 +208,7 @@ Without the unfree setting, evaluation refuses `claude-code` and
 predicate instead. The
 `nixvim`, `nix-index`, and `sandbox-rex` modules import the Home Manager
 modules of Nixvim, nix-index-database, and Rex; do not import those again.
-The gh wrappers, the Claude login, and Tailscale read secrets from the
+The gh wrappers, the Claude login, Codex, pi, and Tailscale read secrets from the
 `agentix` vault in 1Password; turn off the modules you have no such items
 for.
 
@@ -276,10 +286,12 @@ command does not start. `nix flake check` fails if the `linux` example loads
 the token file, starts in the working directory, has the sandbox brief or
 `ts`, or lacks `claude`, `git`, `nvim`, `op`, `rex`, or `ssh`.
 
-The secrets that the `claude`, `gh`, and `gh-lf` wrappers read come from the
+The secrets that the `claude`, `codex`, `pi`, `gh`, and `gh-lf` wrappers read come from the
 `agentix` vault in 1Password, as in a sandbox. With no access to it, sign `op`
 in to an account that has the items, or turn those modules off:
-`agentix.claude.enable = false` removes Claude Code, and
+`agentix.claude.enable = false` removes Claude Code,
+`agentix.codex.enable = false` and `agentix.pi.enable = false` remove Codex
+and pi, and
 `agentix.git.enable = false` removes Git itself and its configuration along
 with the `gh` and `gh-lf` wrappers.
 
@@ -330,6 +342,17 @@ with the `gh` and `gh-lf` wrappers.
   330 MiB, the browser and its libraries about 500 MiB, difftastic 86 MiB,
   PostgreSQL 26 MiB, and the rest under 25 MiB together. Turn a module off
   to leave its share out.
+- Two more agent harnesses besides Claude Code, from nixpkgs: the Codex CLI
+  (`codex`, `modules/codex.nix`) and pi, the coding agent from pi.dev
+  (`pi`, nixpkgs' `pi-coding-agent`, `modules/pi.nix`). Each wrapper gets
+  its API key from 1Password when it starts. Codex's own command sandbox
+  works in a Modal sandbox, so its settings keep the default sandbox modes.
+  They took the unpacked image from 3.0 to 3.8 GiB: Codex about 410 MiB
+  plus about 110 MiB of the GStreamer libraries for its voice mode, and pi
+  about 240 MiB. On Linux the module strips Codex's binaries, which nixpkgs
+  leaves with their symbol tables, and drops its `logs_client` (about
+  195 MiB less; `codex doctor` reports the same). Turn
+  `agentix.codex.enable` or `agentix.pi.enable` off to leave either out.
 - Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
   Claude's LSP tool run the same builds. Claude has the Python, TypeScript,

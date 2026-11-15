@@ -52,14 +52,98 @@ class PlanTest(unittest.TestCase):
                 resume.plan(["claude", word, "-p", "x"], True)
 
     def test_rules_can_match_a_subcommand(self):
-        first, then, how = resume.plan(["codex", "exec", "do it", "--full-auto"], True)
-        self.assertEqual(first, ["codex", "exec", "do it", "--full-auto"])
-        self.assertEqual(then, ["codex", "exec", "resume", "--last", P, "--full-auto"])
+        first, then, how = resume.plan(["codex", "exec", "do it", "-m", "m"], True)
+        self.assertEqual(first, ["codex", "exec", "do it", "-m", "m"])
         self.assertEqual(how, "the codex rule")
+        # `codex exec resume` refuses most options of `codex exec`, so they go
+        # before the subcommand and only the prompt after it.
+        self.assertEqual(then, ["codex", "exec", "-m", "m", "resume", "--last", P])
         with self.assertRaises(InvalidRequest):
             resume.plan(["codex", "login"], True)
-        with self.assertRaises(InvalidRequest):
-            resume.plan(["codex", "exec", "resume", "x"], True)
+
+    def test_codex_keeps_options_in_order_before_resume(self):
+        _, then, _ = resume.plan(
+            ["codex", "exec", "x", "-s", "workspace-write", "-C", "/w", "--json"], True
+        )
+        self.assertEqual(
+            then,
+            [
+                *("codex", "exec", "-s", "workspace-write", "-C", "/w", "--json"),
+                *("resume", "--last", P),
+            ],
+        )
+
+    def test_codex_without_a_session_to_resume_is_refused(self):
+        for argv in (
+            ["codex", "exec", "resume", "x"],
+            ["codex", "exec", "review"],
+            ["codex", "exec", "fork"],
+            ["codex", "exec", "x", "--ephemeral"],
+            # -i takes several files, so it would take `resume` as one.
+            ["codex", "exec", "x", "-i", "a.png"],
+            ["codex", "exec", "x", "--image=a.png"],
+        ):
+            with self.assertRaisesRegex(InvalidRequest, "which session"):
+                resume.plan(argv, True)
+
+    def test_codex_prompt_must_follow_exec(self):
+        for argv in (["codex", "exec"], ["codex", "exec", "-m", "m", "x"]):
+            with self.assertRaisesRegex(InvalidRequest, "right after codex exec"):
+                resume.plan(argv, True)
+
+    def test_pi_gets_its_own_session_and_a_neutral_prompt(self):
+        first, then, how = resume.plan(["pi", "-p", "fix it", "--model", "m"], True)
+        self.assertEqual(
+            first, ["pi", "--session-id", "U", "-p", "fix it", "--model", "m"]
+        )
+        self.assertEqual(then, ["pi", "--session-id", "U", "-p", P, "--model", "m"])
+        self.assertEqual(how, "the pi rule")
+
+    def test_pi_that_names_or_drops_a_session_is_refused(self):
+        for word in (
+            "-c",
+            "--continue",
+            "-r",
+            "--session=a",
+            "--session-id=b",
+            "--fork",
+            "--no-session",
+        ):
+            with self.assertRaisesRegex(InvalidRequest, "which session"):
+                resume.plan(["pi", word, "-p", "x"], True)
+        with self.assertRaisesRegex(InvalidRequest, "prompt is not right after -p"):
+            resume.plan(["pi", "-p", "--model", "m", "x"], True)
+
+    def test_pi_with_more_messages_or_files_is_refused(self):
+        # Only the prompt continues as CONTINUE; the rest would give the task
+        # again.
+        for argv in (
+            ["pi", "-p", "a", "b"],
+            ["pi", "-p", "do X", "@spec.md"],
+            ["pi", "@spec.md", "-p", "do X"],
+            ["pi", "x", "-p", "y"],
+            ["pi", "-p", "x", "--", "y"],
+        ):
+            with self.assertRaisesRegex(InvalidRequest, "more to say"):
+                resume.plan(argv, True)
+
+    def test_pi_options_with_values_are_not_messages(self):
+        argv = ["pi", "--model", "m", "-p", "x", "--thinking", "high", "--no-tools"]
+        first, then, _ = resume.plan(argv, True)
+        self.assertEqual(first[1:3], ["--session-id", "U"])
+        self.assertEqual(
+            then,
+            [
+                *("pi", "--session-id", "U", "--model", "m", "-p", P),
+                *("--thinking", "high", "--no-tools"),
+            ],
+        )
+
+    def test_an_option_value_is_not_a_refused_word(self):
+        _, then, _ = resume.plan(["codex", "exec", "x", "-m", "review"], True)
+        self.assertEqual(then, ["codex", "exec", "-m", "review", "resume", "--last", P])
+        _, then, _ = resume.plan(["pi", "-p", "x", "--name", "--fork"], True)
+        self.assertEqual(then[-2:], ["--name", "--fork"])
 
     def test_a_command_without_a_rule_is_refused(self):
         for argv in (["bash", "-c", "claude -p x"], ["claudette"], ["make"]):
@@ -103,6 +187,21 @@ class WrapperTest(unittest.TestCase):
         self.assertEqual(result.returncode, 3)
         self.assertEqual(result.stdout, '{"a": 1}\nx y\n')
         self.assertFalse(marker.exists())
+
+    def test_the_command_reads_no_input(self):
+        # codex exec and pi -p read stdin while it is open; the exec that runs
+        # the wrapper never closes it, as this pipe does not.
+        with subprocess.Popen(["sleep", "30"], stdout=subprocess.PIPE) as never:
+            result = subprocess.run(
+                ["sh", "-c", resume.WRAPPER, "agentix-run", str(self.dir), "r1", "{}"]
+                + ["sh", "-c", "cat; echo done"],
+                stdin=never.stdout,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            never.kill()
+        self.assertEqual((result.returncode, result.stdout), (0, "done\n"))
 
     def test_a_killed_command_leaves_its_marker(self):
         # As at the timeout: the wrapper never gets to remove the marker.

@@ -20,6 +20,7 @@ let
 in
 {
   "1password" = ./modules/1password.nix;
+  codex = ./modules/codex.nix;
   inherit
     claude-code
     nix-index
@@ -28,6 +29,7 @@ in
     ;
   git = ./modules/git.nix;
   language-servers = ./modules/language-servers.nix;
+  pi = ./modules/pi.nix;
   sync = ./modules/sync.nix;
   tools = ./modules/tools.nix;
 
@@ -58,10 +60,12 @@ in
     ./modules/sandbox/workdir.nix
     ./modules/1password.nix
     claude-code
+    ./modules/codex.nix
     ./modules/git.nix
     ./modules/language-servers.nix
     nix-index
     nixvim
+    ./modules/pi.nix
     ./modules/sync.nix
     ./modules/tools.nix
   ];

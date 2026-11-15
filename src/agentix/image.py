@@ -244,6 +244,9 @@ def _checks() -> list[str]:
         "home-manager --version",
         "nvim --headless '+lua assert(vim.lsp.config.ty)' +qa",
         "op --version && git --version && uv --version && bun --version",
+        # The harness wrappers answer --version without 1Password.
+        _if_listed("codex", "codex --version > /dev/null"),
+        _if_listed("pi", "pi --version > /dev/null"),
         'test "$(locale charmap)" = UTF-8',
         # A login shell started inside an SSH command keeps the Nix profile.
         # A plain SSH command gets the session variables from .bashrc. Both,

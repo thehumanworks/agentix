@@ -356,19 +356,19 @@ uv run agentix sandbox resume dev
 How a command continues is a rule per harness, in
 [`src/agentix/resume.py`](src/agentix/resume.py). `claude -p TASK ...`
 starts with its own `--session-id` and continues as
-`claude --resume ID -p CONTINUE ...`; `codex exec TASK ...` continues as
-`codex exec resume --last CONTINUE ...`, and `pi -p TASK ...` as
-`pi --continue -p CONTINUE ...`. CONTINUE is a neutral prompt (carry on,
-check what is done first), not the task again, so that the task is not
-started twice. Still, a resumed agent may repeat a step whose result the
-snapshot lacks, such as a pull request opened just before the timeout:
-write tasks with side effects so they check first. codex and pi take the
-latest session in the workdir, so run one of them per sandbox; their rules
-are untried, as neither is in the image yet. A command with no rule, a
-claude command that names its own session, and one run through `sh -c` are
-refused unless `--resume='COMMAND'` says how it continues. Nothing is
-resumed that was not started with `--resume`. Only named sandboxes that
-keep exit snapshots can resume.
+`claude --resume ID -p CONTINUE ...`; `pi -p TASK ...` starts and continues
+with its own `--session-id ID`; `codex exec TASK OPTIONS` continues as
+`codex exec OPTIONS resume --last CONTINUE`. CONTINUE is a neutral prompt
+(carry on, check what is done first), not the task again, so that the task
+is not started twice. Still, a resumed agent may repeat a step whose result
+the snapshot lacks, such as a pull request opened just before the timeout:
+write tasks with side effects so they check first. `codex exec` cannot be
+given a session ID, so codex takes the latest session in the workdir: run
+one codex run per workdir. A command with no rule, one that names its own
+session, and one run through `sh -c` are refused unless `--resume='COMMAND'`
+says how it continues. Nothing is resumed that was not started with
+`--resume`. Only named sandboxes that keep exit snapshots can resume. See
+[docs/resume.md](docs/resume.md).
 
 `exec --resume` prints on standard error what a timeout will lead to, and
 at each resume the snapshot, the new sandbox, and the command that
@@ -576,19 +576,26 @@ locally and pass `-o SendEnv=OP_SERVICE_ACCOUNT_TOKEN`: the OpenSSH listener
 accepts it, and Tailscale SSH does when the tailnet's SSH rule has
 `"acceptEnv": ["OP_SERVICE_ACCOUNT_TOKEN"]`
 ([Tailscale SSH](https://tailscale.com/kb/1193/tailscale-ssh#acceptenv)).
-The `claude`, `gh`, `gh-lf`, and `ts` wrappers call
+The `claude`, `codex`, `pi`, `gh`, `gh-lf`, and `ts` wrappers call
 that `op`, and read these items from a 1Password vault named `agentix`:
 
 | Item | Used by |
 | --- | --- |
 | `op://agentix/claude/oauth/token` | `claude`, which starts Claude Code logged in |
+| `op://agentix/openai/api/key` | `codex`, as `CODEX_API_KEY`, and `pi`, as `OPENAI_API_KEY` |
 | `op://agentix/gh/dev/host`, `op://agentix/gh/dev/token` | `gh`, and Git's credential helper for github.com |
 | `op://agentix/gh/work/host`, `op://agentix/gh/work/token` | `gh-lf`, the same for a second GitHub host |
 | `op://agentix/tailscale/auth/key` | `ts`, when a sandbox enrolls in the tailnet |
 
-A missing item breaks only the command that reads it. Claude starts without
-the token in its environment, so the commands it runs do not inherit it, and
-a permission rule stops it reading the token file. Its commands still run as
+A missing item breaks only the command that reads it; `codex --version` and
+`pi --version` (and `--help`) skip 1Password. `agentix.codex.secrets` and
+`agentix.pi.secrets` name other items or variables, such as
+`ANTHROPIC_API_KEY` for pi; see [nix/README.md](nix/README.md). `codex exec`
+uses `CODEX_API_KEY`; an interactive `codex` uses the login that
+`codex login` keeps in `~/.codex`, which a named sandbox's snapshots keep.
+Claude, Codex, and pi start without the token in their environment, so the
+commands they run do not inherit it, and a permission rule stops Claude
+reading the token file. Its commands still run as
 root and can run `op`: this prevents accidental exposure and is not a
 security boundary. Anyone with a root session in the sandbox can use the
 token. A sandbox started with `--secret-name=''` has no token file.
@@ -636,6 +643,8 @@ Root's Home Manager generation, activated at build time, with:
   and more, used by Neovim and by Claude Code's LSP tool;
 - Claude Code with its settings and plugins, and `~/.claude/CLAUDE.md`, a
   brief that tells Claude how the sandbox works;
+- the Codex CLI (`codex`) and the pi coding agent (`pi`), from nixpkgs, with
+  their API key from 1Password;
 - Git with `gh` and `gh-lf`, the 1Password CLI, direnv with nix-direnv,
   Neovim (Nixvim), Rex and herdr, Tailscale, and OpenSSH;
 - Nix itself, with `nixpkgs` in the registry pinned to the image's revision,
