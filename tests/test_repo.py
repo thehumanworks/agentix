@@ -27,9 +27,6 @@ class ParseTests(unittest.TestCase):
         for spec in ("agentix", "a/b/c", "a/..", "a/.git", "a/b@", "a/b@-x", "a b/c"):
             with self.subTest(spec=spec), self.assertRaises(InvalidRequest):
                 repo.parse(spec)
-        for spec in (True, 123):
-            with self.subTest(spec=spec), self.assertRaises(InvalidRequest):
-                repo.parse(spec)
 
     def test_error_names_the_step_that_failed(self):
         clone = str(repo.failed("o/r@v1", 128, "fatal: not found"))
@@ -211,6 +208,6 @@ class RepoAndConfigTests(ModalTestCase):
         self.create.aio.assert_not_called()
 
     def test_bare_repo_flag_is_refused_before_anything_starts(self):
-        with self.assertRaisesRegex(InvalidRequest, "is not OWNER/NAME"):
-            self.run_cli("sandbox", "up", "--ephemeral", "--repo")
+        errors = self.usage_error("sandbox", "up", "--ephemeral", "--repo")
+        self.assertIn("'--repo' requires an argument", errors)
         self.create.aio.assert_not_called()

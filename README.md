@@ -73,15 +73,22 @@ uv run agentix sandbox shell dev --engine=openssh
 Each command is `uv run agentix ...`. `SANDBOX` is a sandbox name or a
 sandbox ID (`sb-...`); the snapshot commands take an ID only for a sandbox
 that has a name. The command line uses
-[python-fire](https://github.com/google/python-fire):
+[click](https://click.palletsprojects.com/):
 
-- Flags work with dashes or underscores, as `--secret-name` or
-  `--secret_name`; help prints the underscore form. A positional argument
-  can also be given as a flag, as `--sandbox-id=sb-...`.
-- Show help with `uv run agentix sandbox up -- --help`. For `sandbox shell`,
-  use `uv run agentix sandbox shell --help`, because what follows `--` there
-  is the command to run in the sandbox.
+- A mistyped command or flag, a value of the wrong type, or a flag that
+  needs a value and has none stops the command before it does anything,
+  with exit code 2 and a suggestion, as in
+  `No such option '--nmae'. (Did you mean one of: '--hostname', '--name'?)`.
+- A flag takes its value as `--flag=VALUE` or `--flag VALUE`. Boolean flags
+  are switches: `--tailscale` or `--no-tailscale`.
+- Show help with `--help` (or `-h` where no flag takes `-h`), as in
+  `uv run agentix sandbox up --help`.
 - A result prints as `key: value` lines, a list as one JSON object per line.
+- The spellings of the earlier python-fire command line still work:
+  `--secret_name` for `--secret-name`, `--notailscale`, `--tailscale=False`
+  (also `false`, `0`, `no`), a positional given as a flag, as
+  `--sandbox-id=sb-...`, the one-letter flags Fire gave, as `-m 1024`, and
+  `sandbox up -- --help`. See [docs/cli-library.md](docs/cli-library.md).
 
 ### Starting a sandbox
 
@@ -151,10 +158,10 @@ tailscale = true
 A flag on the command line wins over the file, and the file wins over the
 built-in default, also when the flag gives the built-in default: with
 `timeout = 7200` in the file, `--timeout=3600` starts a sandbox for an hour.
-Turn a boolean off with `--notailscale` or `--tailscale=False`, and
-`--no-snapshot=False`; a value such as `false` in lower case is refused.
-Fire reads `--workdir=None` as a flag not given, so the file's value
-applies; use `--workdir=` for an empty workdir, which is `/workdir`.
+Turn a boolean off with `--no-tailscale`, and keep the snapshot that the
+file turns off with `--snapshot`. `--workdir=None` (as for any of these
+flags) reads as the flag not given, so the file's value applies; use
+`--workdir=` for an empty workdir, which is `/workdir`.
 `--ephemeral` still saves no snapshot, whatever the file says. Only
 `sandbox up` reads the file; `sandbox restore` uses the options the name was
 created with.
@@ -337,8 +344,8 @@ from: a newer published image reaches a name only through `purge` and
 Modal ends a sandbox at its timeout without waiting for the commands in it.
 `sandbox exec NAME 'COMMAND' --resume` runs COMMAND so that, if the named
 sandbox reaches its timeout first, agentix restores the name from its exit
-snapshot and continues COMMAND there, up to 3 times. Put `--resume` after
-the command, or write `--resume=...`.
+snapshot and continues COMMAND there, up to 3 times. `--resume='OTHER'`
+(or `--resume-with='OTHER'`) names the command that continues it instead.
 
 ```sh
 uv run agentix sandbox exec dev 'claude -p "Fix the failing tests"' --resume
@@ -713,9 +720,10 @@ image.
 ```text
 .
 ├── AGENTS.md               rules for agents: when and how to rebuild and verify the image
-├── pyproject.toml          the agentix package (fire, modal), Python 3.14
+├── pyproject.toml          the agentix package (click, modal), Python 3.14
 ├── src/agentix/
-│   ├── __main__.py         the command line: parses input, prints results
+│   ├── __main__.py         the command line: one function per command, and its flags
+│   ├── cli.py              the click layer: old Fire spellings, help, printing results
 │   ├── local.py            runs each operation with one Modal session
 │   ├── lifecycle.py        up, down, ls, snapshot(s), restore, purge
 │   ├── resume.py           exec --resume and sandbox resume, with the resume rules
@@ -806,12 +814,6 @@ token and no secrets; neither workflow uses `pull_request_target`.
 ## Status and known limitations
 
 - Errors print as Python tracebacks; the message is the last line.
-- A mistyped flag does not stop the command. python-fire runs it with the
-  flags it recognised, then fails with `Cannot find key`. So
-  `sandbox up --nmae=dev` starts a sandbox under a generated name, and
-  `image build --force` runs an ordinary cached build. Check `sandbox ls`
-  after such an error. `sandbox shell` ignores the flag without a word,
-  because ssh has replaced it by then.
 - A name purged and taken again within about an hour can come back as
   `NAME-1` on the tailnet; see [Tailscale](#tailscale).
 - Exit snapshots are an experimental Modal feature, and every snapshot
