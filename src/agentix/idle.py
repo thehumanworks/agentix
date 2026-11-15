@@ -193,7 +193,7 @@ def seconds(text: object, flag: str = "--idle-stop") -> int:
     """The idle stop of `text`, such as 20m or 1h30m, in seconds; 0 for off."""
     if isinstance(text, str) and text.strip().lower() == OFF:
         return 0
-    if isinstance(text, bool) or not isinstance(text, str):
+    if not isinstance(text, str):
         raise InvalidRequest(
             f"Invalid {flag}: {text!r}. Give a duration such as 20m or 1h, or {OFF}."
         )

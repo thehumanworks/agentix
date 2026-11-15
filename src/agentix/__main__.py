@@ -619,6 +619,13 @@ def _cli():
                             help="Seconds. " + from_config("timeout", SANDBOX_TIMEOUT),
                         ),
                         opt(
+                            "--idle-stop",
+                            default=None,
+                            metavar="DURATION",
+                            help="Stop by itself after this long unused, such as "
+                            "20m; off for never. " + from_config("idle_stop", "off"),
+                        ),
+                        opt(
                             "--workdir",
                             "-w",
                             default=None,
@@ -682,6 +689,13 @@ def _cli():
                         opt("--snapshot", "-s"),
                         switch("--tailscale", "-t", off="--no-tailscale"),
                         hostname,
+                        opt(
+                            "--idle-stop",
+                            default=None,
+                            metavar="DURATION",
+                            help="A new idle stop, such as 20m, or off, for this and "
+                            "later restores. [default: the one NAME had]",
+                        ),
                     ),
                     "resume": command(_resume, arg("name")),
                     "purge": command(_purge, arg("name"), switch("--terminate", "-t")),

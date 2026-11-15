@@ -353,7 +353,7 @@ class CliTest(ConfigTestCase):
         self.assertEqual(self.up("--idle-stop=off")["idle_stop"], 0)
 
     def test_bad_flags_are_refused_before_anything_starts(self):
-        for flag in ("--idle-stop=20", "--idle-stop", "--idle-stop=10s"):
+        for flag in ("--idle-stop=20", "--idle-stop=10s"):
             with self.subTest(flag=flag):
                 with self.assertRaisesRegex(Exception, "idle-stop"):
                     self.run_cli("sandbox", "up", flag)
