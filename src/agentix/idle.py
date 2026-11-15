@@ -37,10 +37,23 @@ _SHORTEST_POLL = 5
 RUN_DIR = posixpath.dirname(READY_FILE)
 FLAG = f"{RUN_DIR}/idle-stop"
 MARKS = f"{RUN_DIR}/used."
+# OpenSSH's log, where sshd notes each login on a line that starts with
+# "Accepted METHOD for". A client cannot write the start of a line, so a
+# scanner cannot fake one. The path is the one scripts/openssh-ssh.sh
+# starts sshd with.
+SSHD_LOG = "/root/.local/state/agentix/openssh/sshd.log"
 # Runs as `sh -c EXEC_WRAPPER agentix-exec COMMAND...`: leaves a mark, then
-# becomes COMMAND, so its output, exit code, and PID are COMMAND's. `true`,
+# becomes COMMAND, so its output, exit code, and PID are COMMAND's. A first
+# word that starts with - is refused as Modal refused it before (bash's exec
+# would read it as an option, and dash's exec has no --). The shell adds PWD
+# to the environment, which Modal's commands lack, so it drops it. bash also
+# adds SHLVL=0 at every exec, which no unset prevents; that one stays. `true`,
 # not `:`: a failed redirection of a special builtin would end the shell.
 EXEC_WRAPPER = f"""[ -e {FLAG} ] && {{ true > "{MARKS}$$"; }} 2>/dev/null
+case $1 in
+  -*) echo "agentix-exec: $1: not found" >&2; exit 127 ;;
+esac
+unset PWD
 exec "$@"
 """
 
@@ -50,15 +63,19 @@ def wrap(args: Sequence[str]) -> list[str]:
     return ["sh", "-c", EXEC_WRAPPER, "agentix-exec", *args]
 
 
-# Runs as `sh -c WATCHER agentix-idle MODE SECONDS POLL PROBE MARKS [PROC]`.
+# Runs as `sh -c WATCHER agentix-idle MODE SECONDS POLL PROBE MARKS SSHLOG
+# [PROC]`.
 # MODE "watch" exits IDLE_EXIT_CODE once nothing has run for SECONDS, looking
 # every POLL seconds; "check" prints busy or idle once. PROBE is the argv,
 # joined by spaces, of Modal's readiness probe, which Modal runs now and then.
-# MARKS is the prefix of the files that EXEC_WRAPPER leaves; PROC is /proc, or
-# a stand-in for tests.
+# MARKS is the prefix of the files that EXEC_WRAPPER leaves; SSHLOG is
+# SSHD_LOG; PROC is /proc, or a stand-in for tests.
 #
-# A look is busy if a mark is there, so that a command shorter than POLL is
-# seen too, or if a process runs that counts. Every process counts, except:
+# A look is busy if a mark is there, or if OpenSSH logged a login since the
+# last look, so that a command or an SSH session (ssh HOST CMD, scp, sftp,
+# rsync, git) shorter than POLL is seen too; or if a process runs that
+# counts. Tailscale SSH logs nowhere the watcher reads, so only its sessions'
+# processes count. Every process counts, except:
 # PID 1 (Modal's agent) and kernel threads; the watcher and what it starts;
 # zombies; the SSH listeners, which run whether or not anyone is logged in
 # (sshd that PID 1 holds, and tailscaled, but not its `be-child` session
@@ -71,7 +88,7 @@ def wrap(args: Sequence[str]) -> list[str]:
 #
 # The clock is /proc/uptime, which a wall clock change does not move.
 WATCHER = r"""set -u
-mode=$1 limit=$2 interval=$3 probe="$4 " marks=$5 proc=${6:-/proc}
+mode=$1 limit=$2 interval=$3 probe="$4 " marks=$5 sshlog=$6 proc=${7:-/proc}
 self=$$
 
 marked() {
@@ -81,8 +98,22 @@ marked() {
   return 0
 }
 
+# How many logins OpenSSH has logged; 0 before it has a log.
+logins() {
+  count=$(grep -c '^Accepted [a-z-]* for ' "$sshlog" 2>/dev/null)
+  count=${count:-0}
+}
+
+logged_in() {
+  logins
+  [ "$count" = "$seen" ] && return 1
+  seen=$count
+  return 0
+}
+
 busy() {
   marked && return 0
+  logged_in && return 0
   for dir in "$proc"/[0-9]*; do
     pid=${dir##*/}
     [ "$pid" = 1 ] && continue
@@ -127,12 +158,15 @@ clock() {
   now=${up%.*}
 }
 
+logins
+seen=$count
 if [ "$mode" = check ]; then
   if busy; then echo busy; else echo idle; fi
   exit 0
 fi
 # Idle time counts from the first look that saw nothing, so the stop comes
-# between SECONDS and SECONDS + POLL after the last use ended, never sooner.
+# between SECONDS and SECONDS + 2 * POLL after the last use (a mark or a
+# login is seen at the look after it), never sooner.
 clock
 since=$now
 while :; do

@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import tempfile
@@ -37,12 +38,13 @@ class WatcherTests(unittest.TestCase):
         self.run_dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.run_dir)
         self.marks = f"{self.run_dir}/used."
+        self.sshd_log = self.run_dir / "sshd.log"
         self.proc = FakeProc(self.root)
 
     def run_watcher(self, mode="check", limit=60, interval=5, shell="sh"):
         return subprocess.run(
             [shell, "-c", idle.WATCHER, "agentix-idle", mode, str(limit)]
-            + [str(interval), PROBE, self.marks, str(self.root)],
+            + [str(interval), PROBE, self.marks, str(self.sshd_log), str(self.root)],
             capture_output=True,
             text=True,
             timeout=30,
@@ -103,6 +105,52 @@ class WatcherTests(unittest.TestCase):
         # The first look saw the mark, so idle time starts at the second.
         self.assertGreaterEqual(time.monotonic() - started, 3)
 
+    def watch_while(self, line, every=0.5, seconds=4.0, limit=2):
+        """Run the watcher while `line` is added to the sshd log now and then.
+
+        Returns how long the watcher ran, and its result.
+        """
+        self.sshd_log.write_text("Server listening on 0.0.0.0 port 22.\n")
+        process = subprocess.Popen(
+            ["sh", "-c", idle.WATCHER, "agentix-idle", "watch", str(limit), "1"]
+            + [PROBE, self.marks, str(self.sshd_log), str(self.root)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        started = time.monotonic()
+        while time.monotonic() - started < seconds:
+            with self.sshd_log.open("a") as log:
+                log.write(line + "\n")
+            time.sleep(every)
+        process.wait(timeout=30)
+        return time.monotonic() - started, process.returncode
+
+    def test_short_ssh_logins_between_looks_count(self):
+        # Each login is logged and over before the next look: only the log
+        # shows them.
+        ran, code = self.watch_while(
+            "Accepted publickey for root from 127.0.0.1 port 5 ssh2: ED25519 x"
+        )
+        self.assertEqual(code, idle.IDLE_EXIT_CODE)
+        self.assertGreaterEqual(ran, 4 + 2)
+
+    def test_connections_that_never_log_in_do_not_count(self):
+        ran, code = self.watch_while(
+            "Connection closed by 203.0.113.9 port 5 [preauth]", seconds=0.5
+        )
+        self.assertEqual(code, idle.IDLE_EXIT_CODE)
+        self.assertLess(ran, 6)
+
+    def test_logins_before_the_watcher_started_do_not_count(self):
+        self.sshd_log.write_text("Accepted publickey for root from 127.0.0.1\n")
+        self.assertEqual(self.check(), "idle")
+
+    def test_the_log_is_the_one_openssh_writes(self):
+        script = (Path(idle.__file__).parent / "scripts/openssh-ssh.sh").read_text()
+        runtime = script.split("runtime=", 1)[1].split("\n", 1)[0]
+        self.assertIn('-E "$runtime/sshd.log"', script)
+        self.assertEqual(f"{runtime}/sshd.log", idle.SSHD_LOG)
+
     def test_an_exec_command_is_busy(self):
         # `sandbox exec`, --resume, and detached runs: children of PID 1.
         self.proc.add(50, "sh", 1, "sh -c long-task")
@@ -138,7 +186,7 @@ class WatcherTests(unittest.TestCase):
         with self.assertRaises(subprocess.TimeoutExpired):
             subprocess.run(
                 ["sh", "-c", idle.WATCHER, "agentix-idle", "watch", "1", "1"]
-                + [PROBE, self.marks, str(self.root)],
+                + [PROBE, self.marks, str(self.sshd_log), str(self.root)],
                 capture_output=True,
                 timeout=4,
             )
@@ -147,7 +195,7 @@ class WatcherTests(unittest.TestCase):
         # Something else runs here, so only a crash would print nothing.
         result = subprocess.run(
             ["sh", "-c", idle.WATCHER, "agentix-idle", "check", "60", "5", PROBE]
-            + [self.marks],
+            + [self.marks, str(self.sshd_log)],
             capture_output=True,
             text=True,
             timeout=30,
@@ -180,6 +228,31 @@ class ExecWrapperTests(unittest.TestCase):
                 result = self.run_wrapped("sh", "-c", 'echo "$1"; exit 3', "x", "a b")
                 self.assertEqual((result.stdout, result.returncode), ("a b\n", 3))
                 self.assertEqual(result.stderr, "")
+
+    def test_a_command_that_looks_like_an_option_is_refused(self):
+        # As Modal refused it before the wrapper, whatever the shell.
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                result = self.run_wrapped("-l", shell=shell)
+                self.assertEqual(result.returncode, 127)
+                self.assertIn("-l: not found", result.stderr)
+                self.assertEqual(result.stdout, "")
+
+    def test_the_environment_is_passed_on_unchanged(self):
+        environment = {"PATH": os.environ["PATH"], "KEEP": "1"}
+        for shell in SHELLS:
+            with self.subTest(shell=shell):
+                result = subprocess.run(
+                    [shell, "-c", self.wrapper, "agentix-exec", "env"],
+                    capture_output=True,
+                    text=True,
+                    env=environment,
+                )
+                passed = dict(line.split("=", 1) for line in result.stdout.splitlines())
+                # bash sets it on every exec; see idle.EXEC_WRAPPER.
+                if passed.get("SHLVL") == "0":
+                    del passed["SHLVL"]
+                self.assertEqual(passed, environment)
 
     def test_no_mark_without_an_idle_stop(self):
         self.run_wrapped("true")

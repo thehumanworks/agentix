@@ -134,8 +134,11 @@ the sandbox does it, so the laptop that started it may be offline. Any
 process left running, such as a server, also counts as use. The duration is
 at least `1m`; `--idle-stop=off` turns off a config-file default.
 `sandbox restore NAME --idle-stop=1h` (or `off`) changes it for that and
-later restores. With a public OpenSSH port, a scanner's connection that
-never logs in counts as use for up to 120 s. `sandbox ls` shows the setting.
+later restores. Over OpenSSH even a short `ssh dev cmd`, scp or rsync
+counts; over Tailscale SSH a session counts only while it lasts, so one
+shorter than the watcher's poll (5 to 30 s) can be missed. With a public
+OpenSSH port, a scanner's connection that never logs in counts as use for
+up to 120 s. `sandbox ls` shows the setting.
 How it works:
 [docs/idle-stop.md](docs/idle-stop.md).
 

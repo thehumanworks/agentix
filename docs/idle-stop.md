@@ -21,8 +21,12 @@ A restored sandbox keeps the idle stop its name had. `sandbox restore NAME
 
 The sandbox is idle while none of these runs in it:
 
-- an SSH session: `sandbox shell`, plain `ssh`, scp or SFTP, over OpenSSH or
-  Tailscale SSH;
+- an SSH session: `sandbox shell`, plain `ssh`, scp, SFTP, rsync or git
+  over SSH. Over OpenSSH a session counts however short it is. Over
+  Tailscale SSH it counts only while it lasts, as the watcher sees it at one
+  of its looks: a session shorter than the poll (5 to 30 s), such as a
+  quick `ssh dev cmd`, can be missed, so drive a sandbox with many short
+  commands over OpenSSH or `sandbox exec` instead;
 - a command started through agentix: `sandbox exec`, `sandbox exec --resume`
   and `sandbox exec --detach`, and anything they start that is still running;
 - any other process left running, such as a server started in a session that
@@ -49,18 +53,34 @@ ending in `exec sleep infinity`. With one, it first makes the flag file
 `/run/agentix/idle-stop`, then ends in `exec sh -c WATCHER` (the script is
 in `src/agentix/idle.py` and is passed in the start command, so the image is
 unchanged and needs no rebuild). Every 5 to 30 seconds (a sixth of the idle
-stop) it looks, and a look is busy if either:
+stop) it looks, and a look is busy if any of these holds:
 
 - **a mark is there.** Every command agentix starts in a sandbox
   (`sandbox exec` with or without `--resume`, detached runs, the clone of
   `--repo`) runs through a small wrapper (`idle.EXEC_WRAPPER`, and the same
   line in the runner's wrapper) that, while the flag exists, writes
   `/run/agentix/used.PID` and then `exec`s the command, so its output, exit
-  code and PID are unchanged. The watcher removes the marks it sees. So a
+  code and PID are unchanged. Its environment is too, except that bash, the
+image's `sh`, adds `SHLVL=0` at every exec (the wrapper drops the `PWD` the
+shell adds). A first word that starts with `-` is refused with exit code 127,
+as Modal refused it before (bash's `exec` would read it as an option). The watcher removes the marks it sees. So a
   command of any length is seen, also one that ends before the next look.
   (A fork counter, such as `processes` in `/proc/stat`, was the other
   option; it also counts threads, so a daemon such as `tailscaled` that
   starts threads now and then would keep the sandbox up for good.)
+- **OpenSSH logged a login since the last look.** sshd writes its log to
+  `/root/.local/state/agentix/openssh/sshd.log` (`-E` in
+  `scripts/openssh-ssh.sh`), one line starting `Accepted METHOD for` per
+  login, for every kind of session: a shell, `ssh HOST CMD`, scp, SFTP,
+  rsync, git. The watcher counts those lines with `grep -c` at each look; a
+  new one is use, so a session of any length is seen. A client cannot write
+  the start of a log line, so a scanner cannot fake one; its connections
+  that never log in are not counted. This was chosen over a `~/.ssh/rc` that
+  leaves a mark: with an rc file sshd no longer runs `xauth` for X11
+  forwarding itself, anything the file prints corrupts scp and SFTP, it would
+  live in `/root` and so in every snapshot, and `PermitUserRC no` turns it
+  off. Tailscale SSH is served by `tailscaled` and logs nothing comparable,
+  so it is not covered.
 - **a process runs that counts.** It reads `/proc`. Each process counts as
   use except: PID 1 (Modal's agent), kernel threads, zombies, the watcher
   and what it starts, the SSH listeners (an `sshd` that PID 1 holds, and
@@ -72,9 +92,11 @@ stop) it looks, and a look is busy if either:
   process whose command line cannot be read counts, so a fault keeps the
   sandbox up rather than stopping it.
 
-Idle time counts from the first look that sees nothing, so the sandbox
-stops between the idle stop and one poll later after the last use ended,
-never sooner. Then it exits with code 75. The clock is `/proc/uptime`.
+Idle time counts from the first look that sees nothing. A mark or a login
+is seen at the look after it, so the sandbox stops between the idle stop
+and two polls later after the last use, never sooner (seen: 80 s after the
+last of a series of 0.1 s ssh and scp sessions, with a 1m idle stop and a
+10 s poll). Then it exits with code 75. The clock is `/proc/uptime`.
 
 This covers each kind of use without asking it to report in. Checked in a
 sandbox: a `sandbox exec` command, and so the wrappers of `--resume` and of

@@ -161,7 +161,7 @@ class SandboxInitScriptTests(unittest.TestCase):
         self.assertEqual(
             result.stdout,
             f"agentix-idle watch 120 20 test -e {self.ready_file} "
-            f"{self.root}/run/used.\n",
+            f"{self.root}/run/used. {idle.SSHD_LOG}\n",
         )
         # So the commands agentix starts leave marks.
         self.assertTrue(self.flag_file.exists())

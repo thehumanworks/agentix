@@ -10,7 +10,7 @@ import modal.experimental
 
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import InvalidRequest, OperationFailed
-from .idle import FLAG, IDLE_TAG, MARKS, WATCHER, poll_interval, wrap
+from .idle import FLAG, IDLE_TAG, MARKS, SSHD_LOG, WATCHER, poll_interval, wrap
 from .layout import OP_TOKEN_FILE, READY_FILE, WORKDIR_FILE
 from .session import Session
 
@@ -59,7 +59,8 @@ _INIT_IDLE = _INIT.replace(
     f": > {READY_FILE}\nexec sleep infinity\n",
     f""": > {FLAG}
 : > {READY_FILE}
-exec sh -c "$4" agentix-idle watch "$2" "$3" "test -e {READY_FILE}" {MARKS}
+exec sh -c "$4" agentix-idle watch "$2" "$3" "test -e {READY_FILE}" {MARKS} \\
+  {SSHD_LOG}
 """,
 )
 
