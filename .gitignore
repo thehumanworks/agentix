@@ -20,7 +20,9 @@ dist/
 htmlcov/
 coverage.xml
 
-# Local environment and secrets
+# Local environment and secrets. .env itself is tracked and holds only op://
+# references or dotenvx ciphertext; scripts/check_env.py enforces that. Every
+# other env file, .env.local and .env.keys included, stays out of Git.
 .env.*
 !.env.example
 !.env.*.example

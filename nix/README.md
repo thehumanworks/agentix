@@ -307,7 +307,7 @@ with the `gh` and `gh-lf` wrappers.
 ## What a sandbox gets
 
 - Tools for search, data, networking, archives, builds, Python, JavaScript,
-  shell, and Nix, listed in `modules/tools.nix`, including `psql`,
+  shell, and Nix, listed in `modules/tools.nix`, including `dotenvx`, `psql`,
   `hyperfine`, `watchexec`, `difft` (difftastic), and `nom`
   (nix-output-monitor).
 - The commands of a Debian system that agents and the scripts here use:
@@ -438,7 +438,10 @@ nix flake check
 
 `nix fmt` formats every Nix file with nixfmt. `nix flake check` verifies the
 formatting, runs statix and deadnix, and builds the profiles of the current
-system, the `linux` example included on x86_64. On Linux it also evaluates
+system, the `linux` example included on x86_64. `env-check` runs the
+repository's `scripts/check_env.py` and its tests with the pinned dotenvx; it
+is left out where only this directory is present, as in the image's copy.
+On Linux it also evaluates
 the sandbox profile with each SSH engine's module turned off in turn, and both
 off; see [SSH engines](#ssh-engines). On Linux, `wrapper-token`
 (`checks/wrapper-token.nix`) runs copies of the sandbox's `claude`, `codex`,
