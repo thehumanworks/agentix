@@ -425,8 +425,9 @@ image is the x86_64 one.
 CI checks both. `nix flake check --all-systems --no-build` evaluates them on
 x86_64, and the `Nix flake check (ARM)` job runs `nix flake check` on an
 `ubuntu-24.04-arm` runner, which builds the profile, the image's activated
-root and layer list, and the SSH engine checks. Nothing runs the ARM image
-yet.
+root and layer list, and the SSH engine checks. That job is new: it is
+expected to pass from its first run but has not yet been seen green. The ARM
+OCI image has not been built anywhere else, and nothing runs it yet.
 
 On x86_64 Linux, the profile builds under qemu-user emulation. This is how it
 was first built, in a Modal VM sandbox from the `NIX_BUILDER` image, in
