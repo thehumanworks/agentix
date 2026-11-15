@@ -147,11 +147,9 @@ def _execute(
     --resume='OTHER' names the command that continues it instead. A command
     with no rule is refused. See docs/resume.md.
     """
-    if detach is not False:
-        if detach is not True or resume is not False:
-            raise InvalidRequest(
-                "--detach takes no value and does not go with --resume."
-            )
+    if detach:
+        if resume is not False:
+            raise InvalidRequest("--detach does not go with --resume.")
         return _backend().start_run(sandbox_id, shlex.split(command))["run_id"]
     if resume is False:
         result = _backend().execute(sandbox_id, shlex.split(command))
@@ -234,8 +232,6 @@ def _runs(target: str = "", clean: bool = False):
     failed, or expired. --clean forgets the runs that have ended and deletes
     their log files in sandboxes that still run; runs that still run stay.
     """
-    if clean is not False and clean is not True:
-        raise InvalidRequest(f"--clean takes no value, not {clean!r}.")
     return _backend().runs(target, clean)
 
 
@@ -281,11 +277,10 @@ def _purge(name: str, terminate: bool = False):
 
 
 def _prune(
-    *extra: Any,
-    older_than: Any = None,
-    keep_latest: Any = False,
-    name: Any = "",
-    yes: Any = False,
+    older_than: str | None = None,
+    keep_latest: bool = False,
+    name: str = "",
+    yes: bool = False,
 ):
     """Delete snapshots older than --older-than, such as 14d, 12h, or 30m.
 
@@ -298,33 +293,16 @@ def _prune(
     """
     from . import durations
 
-    if extra:
-        # Fire would otherwise give them to the flags, in order.
-        raise InvalidRequest(
-            f"prune takes only flags, not {' '.join(map(str, extra))}. Pass "
-            "--older-than=AGE, and --keep-latest, --name=GLOB, or --yes."
-        )
     if older_than is None:
         raise InvalidRequest("Pass --older-than, such as --older-than=14d.")
     age = durations.parse(older_than)
-    # Fire passes --yes=no as the string "no", which is true.
-    for flag, value in (("--yes", yes), ("--keep-latest", keep_latest)):
-        if not isinstance(value, bool):
-            raise InvalidRequest(
-                f"{flag} takes no value: pass {flag} or leave it out, not {value!r}."
-            )
-    if not isinstance(name, str):
-        raise InvalidRequest(
-            f"Invalid --name: {name!r}. Give a name or a glob, such as "
-            "--name='scratch-*'."
-        )
 
     def confirm(plan: dict[str, Any]) -> bool:
         print(_prune_listing(plan))
         sys.stdout.flush()
         if not plan["items"]:
             return False
-        if yes is True:
+        if yes:
             return True
         if not sys.stdin.isatty():
             print(
@@ -406,7 +384,7 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" + ("" if number == 1 else "s")
 
 
-def _sync(name: str = "", pull: Any = False, path: Any = ""):
+def _sync(name: str = "", pull: bool = False, path: str = ""):
     """Copy this checkout's uncommitted changes into a sandbox, or back with --pull.
 
     NAME is the sandbox, a name or an ID; without one, the only sandbox that
@@ -418,14 +396,7 @@ def _sync(name: str = "", pull: Any = False, path: Any = ""):
     listed. The other side's working tree is saved first as a Git ref, and
     `agentix-sync undo` there puts it back.
     """
-    if not isinstance(pull, bool):
-        raise InvalidRequest(
-            f"--pull takes no value, not {pull!r}. Put it after the sandbox: "
-            "sandbox sync NAME --pull."
-        )
-    if not isinstance(path, str):
-        raise InvalidRequest(f"Invalid --path: {path!r}. Give a directory.")
-    return _backend().sync(str(name), os.getcwd(), path, pull)
+    return _backend().sync(name, os.getcwd(), path, pull)
 
 
 def _ssh_start(
@@ -517,21 +488,6 @@ def _shell(
     os.execvp("ssh", argv)
 
 
-def _shell_command(command: Sequence[str]) -> Callable[..., Any]:
-    """`sandbox shell` for Fire, with the command that followed `--`."""
-
-    def shell(
-        name: str = "",
-        engine: str = "tailscale",
-        hostname: str = "",
-        public_key: str = "",
-    ):
-        return _shell(name, engine, hostname, public_key, command)
-
-    shell.__doc__ = _shell.__doc__
-    return shell
-
-
 def _ssh_stop(sandbox_id: str, engine: str = "tailscale"):
     """Stop the selected SSH engine without terminating the sandbox."""
     return _backend().ssh("stop", sandbox_id, engine)
@@ -542,57 +498,212 @@ def _ssh_status(sandbox_id: str, engine: str = "tailscale"):
     return _backend().ssh("status", sandbox_id, engine)
 
 
-def main(argv: Sequence[str] | None = None):
-    from fire import Fire
+# The command line. Each command is a plain function above; this table only
+# names its arguments, with the short flags Fire gave them. Keep it thin.
 
-    args = list(sys.argv[1:] if argv is None else argv)
-    # Fire reads what follows `--` as flags of its own. After `sandbox shell`,
-    # it is the command to run in the sandbox.
-    command: list[str] = []
-    if args[:2] == ["sandbox", "shell"] and "--" in args:
-        split = args.index("--")
-        args, command = args[:split], args[split + 1 :]
-    Fire(
+
+def _cli():
+    from .cli import arg, command, group, opt, switch
+    from .defaults import SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
+
+    def from_config(key: str, default: Any) -> str:
+        return f"[default: {default!r}, or {key} in [sandbox.up] of the config file]"
+
+    image_name = opt("--image-name", "-i", default=IMAGE_NAME, show_default=True)
+    engine = opt("--engine", "-e", default="tailscale", show_default=True)
+    hostname = opt("--hostname", "-h")
+    public_key = opt("--public-key", "-p")
+    resume = switch("--resume", "-r", values="literal")
+    resume[0].value_alias = "--resume-with"
+
+    def execute(sandbox_id, command, resume, resume_with, detach):
+        return _execute(
+            sandbox_id, command, resume if resume_with is None else resume_with, detach
+        )
+
+    def shell(name, engine, hostname, public_key):
+        return _shell(name, engine, hostname, public_key, _SHELL_COMMAND)
+
+    return group(
+        "Build the image and run agentix sandboxes on Modal.",
         {
-            "image": {
-                "build": _build_image,
-            },
-            "flake": {
-                "update": _flake_update,
-            },
-            "config": {
-                "show": _config_show,
-            },
-            "runner": {
-                "deploy": _runner_deploy,
-            },
-            "sandbox": {
-                "up": _create_sandbox,
-                "down": _terminate_sandbox,
-                "exec": _execute,
-                "logs": _logs,
-                "wait": _wait,
-                "runs": _runs,
-                "ls": _list_sandboxes,
-                "snapshot": _snapshot,
-                "snapshots": _snapshots,
-                "restore": _restore,
-                "resume": _resume,
-                "purge": _purge,
-                "prune": _prune,
-                "sync": _sync,
-                "shell": _shell_command(command),
-                "ssh": {
-                    "start": _ssh_start,
-                    "stop": _ssh_stop,
-                    "status": _ssh_status,
+            "image": group(
+                "Build and publish the image.",
+                {
+                    "build": command(
+                        _build_image,
+                        switch("--force-build", "-f"),
+                        image_name,
+                        help="Build the image from the flake and publish it.",
+                    ),
                 },
-            },
+            ),
+            "flake": group(
+                "Update the flake's inputs.",
+                {
+                    "update": command(
+                        _flake_update,
+                        arg("inputs", nargs=-1),
+                        switch("--build", "-b"),
+                        image_name,
+                        call=lambda inputs, **flags: _flake_update(*inputs, **flags),
+                    ),
+                },
+            ),
+            "config": group(
+                "The defaults that `sandbox up` reads.",
+                {"show": command(_config_show)},
+            ),
+            "runner": group(
+                "The Modal app that runs detached commands.",
+                {"deploy": command(_runner_deploy)},
+            ),
+            "sandbox": group(
+                "Start, stop, reach, and save sandboxes.",
+                {
+                    "up": command(
+                        _create_sandbox,
+                        opt(
+                            "--image-name",
+                            "-i",
+                            default=None,
+                            help=from_config("image_name", IMAGE_NAME),
+                        ),
+                        opt(
+                            "--secret-name",
+                            "-s",
+                            default=None,
+                            help=from_config("secret_name", SECRET_NAME),
+                        ),
+                        opt(
+                            "--timeout",
+                            type=int,
+                            default=None,
+                            help="Seconds. " + from_config("timeout", SANDBOX_TIMEOUT),
+                        ),
+                        opt(
+                            "--workdir",
+                            "-w",
+                            default=None,
+                            help=from_config("workdir", ""),
+                        ),
+                        opt(
+                            "--memory",
+                            "-m",
+                            type=int,
+                            default=None,
+                            help="MiB. " + from_config("memory", SANDBOX_MEMORY_MIB),
+                        ),
+                        opt(
+                            "--cpu",
+                            "-c",
+                            type=float,
+                            default=None,
+                            help="Cores; 0 is Modal's default. "
+                            + from_config("cpu", 0),
+                        ),
+                        opt("--name"),
+                        switch(
+                            "--tailscale",
+                            off="--no-tailscale",
+                            default=None,
+                            help=from_config("tailscale", False),
+                        ),
+                        hostname,
+                        switch(
+                            "--no-snapshot",
+                            off="--snapshot",
+                            default=None,
+                            help=from_config("no_snapshot", False),
+                        ),
+                        switch("--ephemeral", "-e"),
+                        opt("--repo", "-r", metavar="OWNER/NAME[@REF]"),
+                    ),
+                    "down": command(_terminate_sandbox, arg("sandbox_id")),
+                    "exec": command(
+                        _execute,
+                        arg("sandbox_id"),
+                        arg("command"),
+                        resume,
+                        opt("--resume-with", default=None, metavar="COMMAND"),
+                        switch("--detach", "-d", values="literal"),
+                        call=execute,
+                    ),
+                    "logs": command(_logs, arg("run_id")),
+                    "wait": command(_wait, arg("run_id")),
+                    "runs": command(
+                        _runs,
+                        arg("target", "-t", required=False),
+                        switch("--clean", "-c", values="literal"),
+                    ),
+                    "ls": command(_list_sandboxes),
+                    "snapshot": command(_snapshot, arg("name")),
+                    "snapshots": command(_snapshots, arg("name")),
+                    "restore": command(
+                        _restore,
+                        arg("name"),
+                        opt("--snapshot", "-s"),
+                        switch("--tailscale", "-t", off="--no-tailscale"),
+                        hostname,
+                    ),
+                    "resume": command(_resume, arg("name")),
+                    "purge": command(_purge, arg("name"), switch("--terminate", "-t")),
+                    "prune": command(
+                        _prune,
+                        opt("--older-than", "-o", default=None, metavar="AGE"),
+                        switch("--keep-latest", "-k", values="literal"),
+                        opt("--name", "-n", metavar="GLOB"),
+                        switch("--yes", "-y", values="literal"),
+                    ),
+                    "sync": command(
+                        _sync,
+                        arg("name", "-n", required=False),
+                        switch("--pull", values="literal"),
+                        opt("--path", metavar="DIR"),
+                    ),
+                    "shell": command(
+                        _shell,
+                        arg("name", "-n", required=False),
+                        engine,
+                        hostname,
+                        public_key,
+                        call=shell,
+                    ),
+                    "ssh": group(
+                        "Start, stop, and show SSH in a sandbox.",
+                        {
+                            "start": command(
+                                _ssh_start,
+                                arg("sandbox_id"),
+                                engine,
+                                hostname,
+                                public_key,
+                            ),
+                            "stop": command(_ssh_stop, arg("sandbox_id"), engine),
+                            "status": command(_ssh_status, arg("sandbox_id"), engine),
+                        },
+                    ),
+                },
+            ),
         },
-        command=args,
     )
 
 
+# What followed `--` after `sandbox shell`: the command to run in the sandbox.
+_SHELL_COMMAND: list[str] = []
+
+
+def main(argv: Sequence[str] | None = None):
+    from .cli import run
+
+    global _SHELL_COMMAND
+    args = list(sys.argv[1:] if argv is None else argv)
+    _SHELL_COMMAND = []
+    if args[:2] == ["sandbox", "shell"] and "--" in args:
+        split = args.index("--")
+        args, _SHELL_COMMAND = args[:split], args[split + 1 :]
+    run(_cli(), args)
+
+
 if __name__ == "__main__":
-    os.environ["PAGER"] = "cat"
     main()

@@ -218,24 +218,24 @@ class FlagTests(PruneTestCase):
     def test_yes_with_a_value_is_refused(self):
         for flag in ("--yes=false", "--yes=no", "--yes=0", "--keep-latest=no"):
             with self.subTest(flag=flag):
-                with self.assertRaisesRegex(InvalidRequest, "takes no value"):
-                    self.prune("--older-than=14d", flag, tty=True, answer="no\n")
+                errors = self.usage_error("sandbox", "prune", "--older-than=14d", flag)
+                self.assertIn("does not take a value", errors)
         self.image_delete.aio.assert_not_called()
         self.assertEqual(self.snapshot_ids("old"), ["im-1"])
 
     def test_positional_arguments_are_refused(self):
         for args in (["14d", "x", "y", "z"], ["--older-than=14d", "z"]):
             with self.subTest(args=args):
-                with self.assertRaisesRegex(InvalidRequest, "only flags"):
-                    self.prune(*args)
+                errors = self.usage_error("sandbox", "prune", *args)
+                self.assertIn("unexpected extra argument", errors)
         self.image_delete.aio.assert_not_called()
         self.volume_lookup.assert_not_called()
 
-    def test_name_must_be_text(self):
-        for flag in ("--name", "--name=123"):
-            with self.subTest(flag=flag):
-                with self.assertRaisesRegex(InvalidRequest, "--name"):
-                    self.prune("--older-than=14d", flag, "--yes")
+    def test_name_needs_a_value_and_may_be_digits(self):
+        errors = self.usage_error("sandbox", "prune", "--older-than=14d", "--name")
+        self.assertIn("requires an argument", errors)
+        self.image_delete.aio.assert_not_called()
+        self.prune("--older-than=14d", "--name=123", "--yes")
         self.image_delete.aio.assert_not_called()
 
     def test_huge_ages_are_refused_cleanly(self):

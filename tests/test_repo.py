@@ -211,6 +211,6 @@ class RepoAndConfigTests(ModalTestCase):
         self.create.aio.assert_not_called()
 
     def test_bare_repo_flag_is_refused_before_anything_starts(self):
-        with self.assertRaisesRegex(InvalidRequest, "is not OWNER/NAME"):
-            self.run_cli("sandbox", "up", "--ephemeral", "--repo")
+        errors = self.usage_error("sandbox", "up", "--ephemeral", "--repo")
+        self.assertIn("'--repo' requires an argument", errors)
         self.create.aio.assert_not_called()

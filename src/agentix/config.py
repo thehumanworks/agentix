@@ -154,7 +154,7 @@ def resolve(
         if flags.get(name) is not None:
             value = flags[name]
             if key.types == (str,):
-                # Fire reads --image-name=7 as a number.
+                # A caller may pass a number for a string option.
                 value = str(value)
             flag = "--" + name.replace("_", "-")
             result[name] = (_check_type(key, value, flag), "flag")

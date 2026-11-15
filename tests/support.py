@@ -214,6 +214,14 @@ class ModalTestCase(unittest.TestCase):
             main(list(command))
         return output.getvalue()
 
+    def usage_error(self, *command):
+        """The message of a command line that is refused as a usage error (exit 2)."""
+        with contextlib.redirect_stderr(io.StringIO()) as errors:
+            with self.assertRaises(SystemExit) as raised:
+                self.run_cli(*command)
+        self.assertEqual(raised.exception.code, 2)
+        return errors.getvalue()
+
 
 async def _each(items):
     for item in items:
