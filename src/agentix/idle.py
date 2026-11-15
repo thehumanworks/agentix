@@ -38,9 +38,12 @@ RUN_DIR = posixpath.dirname(READY_FILE)
 FLAG = f"{RUN_DIR}/idle-stop"
 MARKS = f"{RUN_DIR}/used."
 # OpenSSH's log, where sshd notes each login on a line that starts with
-# "Accepted METHOD for". A client cannot write the start of a line, so a
-# scanner cannot fake one. The path is the one scripts/openssh-ssh.sh
-# starts sshd with.
+# "Accepted METHOD for". With -E sshd does not escape newlines, so a user
+# name in a failed login ("Invalid user ...") can forge such a line without
+# logging in. A forged line can only keep a sandbox up for one more idle
+# stop, never stop one, as a connection that never logs in keeps it up for
+# up to its 120 s login grace time. The path is the one
+# scripts/openssh-ssh.sh starts sshd with.
 SSHD_LOG = "/root/.local/state/agentix/openssh/sshd.log"
 # Runs as `sh -c EXEC_WRAPPER agentix-exec COMMAND...`: leaves a mark, then
 # becomes COMMAND, so its output, exit code, and PID are COMMAND's. A first
@@ -74,8 +77,9 @@ def wrap(args: Sequence[str]) -> list[str]:
 # A look is busy if a mark is there, or if OpenSSH logged a login since the
 # last look, so that a command or an SSH session (ssh HOST CMD, scp, sftp,
 # rsync, git) shorter than POLL is seen too; or if a process runs that
-# counts. Tailscale SSH logs nowhere the watcher reads, so only its sessions'
-# processes count. Every process counts, except:
+# counts. tailscaled logs SSH connections to its daemon.log, but not in a
+# stable format, so the watcher does not read it: only the processes of
+# Tailscale SSH sessions count. Every process counts, except:
 # PID 1 (Modal's agent) and kernel threads; the watcher and what it starts;
 # zombies; the SSH listeners, which run whether or not anyone is logged in
 # (sshd that PID 1 holds, and tailscaled, but not its `be-child` session
@@ -164,9 +168,10 @@ if [ "$mode" = check ]; then
   if busy; then echo busy; else echo idle; fi
   exit 0
 fi
-# Idle time counts from the first look that saw nothing, so the stop comes
-# between SECONDS and SECONDS + 2 * POLL after the last use (a mark or a
-# login is seen at the look after it), never sooner.
+# Idle time counts from the first look that saw nothing, and the stop comes
+# at the first look SECONDS after that: never sooner than SECONDS after the
+# last use, and at most three polls later (a mark or a login is seen at the
+# look after it, and SECONDS need not be a multiple of POLL).
 clock
 since=$now
 while :; do

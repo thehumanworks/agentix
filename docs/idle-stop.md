@@ -73,14 +73,20 @@ as Modal refused it before (bash's `exec` would read it as an option). The watch
   `scripts/openssh-ssh.sh`), one line starting `Accepted METHOD for` per
   login, for every kind of session: a shell, `ssh HOST CMD`, scp, SFTP,
   rsync, git. The watcher counts those lines with `grep -c` at each look; a
-  new one is use, so a session of any length is seen. A client cannot write
-  the start of a log line, so a scanner cannot fake one; its connections
-  that never log in are not counted. This was chosen over a `~/.ssh/rc` that
+  new one is use, so a session of any length is seen. With `-E` sshd does not
+  escape newlines, so a user name in a failed login (`Invalid user ...`) can
+  forge such a line without logging in. A forged line can only keep the
+  sandbox up for one more idle stop, never stop it, as a connection that
+  never logs in keeps it up for up to its 120 s login grace time. This needs
+  `grep`, which the image has from the tools module
+  (`nix/home-manager/modules/tools.nix`); without it, short SSH sessions
+  are only seen while they last. This was chosen over a `~/.ssh/rc` that
   leaves a mark: with an rc file sshd no longer runs `xauth` for X11
   forwarding itself, anything the file prints corrupts scp and SFTP, it would
   live in `/root` and so in every snapshot, and `PermitUserRC no` turns it
-  off. Tailscale SSH is served by `tailscaled` and logs nothing comparable,
-  so it is not covered.
+  off. Tailscale SSH is served by `tailscaled`, which logs SSH connections to
+  its `daemon.log`, but not in a stable format, so the watcher does not read
+  it and short Tailscale SSH sessions are not covered.
 - **a process runs that counts.** It reads `/proc`. Each process counts as
   use except: PID 1 (Modal's agent), kernel threads, zombies, the watcher
   and what it starts, the SSH listeners (an `sshd` that PID 1 holds, and
@@ -92,11 +98,12 @@ as Modal refused it before (bash's `exec` would read it as an option). The watch
   process whose command line cannot be read counts, so a fault keeps the
   sandbox up rather than stopping it.
 
-Idle time counts from the first look that sees nothing. A mark or a login
-is seen at the look after it, so the sandbox stops between the idle stop
-and two polls later after the last use, never sooner (seen: 80 s after the
-last of a series of 0.1 s ssh and scp sessions, with a 1m idle stop and a
-10 s poll). Then it exits with code 75. The clock is `/proc/uptime`.
+Idle time counts from the first look that sees nothing, and the sandbox
+stops at the first look the idle stop after that. So it stops never sooner
+than the idle stop after the last use, and at most three polls later: a
+mark or a login is seen at the look after it, and the idle stop need not
+be a multiple of the poll (seen: 80 s after the last of a series of 0.1 s
+ssh and scp sessions, with a 1m idle stop and a 10 s poll). Then it exits with code 75. The clock is `/proc/uptime`.
 
 This covers each kind of use without asking it to report in. Checked in a
 sandbox: a `sandbox exec` command, and so the wrappers of `--resume` and of
