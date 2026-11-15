@@ -36,6 +36,7 @@ class Local:
         hostname: str = "",
         exit_snapshot: bool = True,
         ephemeral: bool = False,
+        repo: str = "",
     ) -> dict[str, Any]:
         options: Options = {
             "image_name": image_name,
@@ -48,7 +49,7 @@ class Local:
         }
         return _run(
             lambda session: lifecycle.up(
-                session, options, name, tailscale, hostname, ephemeral
+                session, options, name, tailscale, hostname, ephemeral, repo
             )
         )
 
