@@ -42,8 +42,9 @@ required image behavior.
    the actual terminal or SSH flow when the change affects interactive behavior.
    A successful build, syntax check, or version command alone does not prove a
    behavioral fix. Do not print secret values in commands, logs, or reports.
-4. Remove only the verification sandbox you created with
-   `uv run agentix sandbox down SANDBOX_ID`, including after a failed check.
+4. Remove only the verification sandbox you created, and the snapshots it
+   leaves, with `uv run agentix sandbox purge SANDBOX_ID --terminate`,
+   including after a failed check.
    Existing sandboxes retain their old image. Do not terminate or replace them
    without user authorization. Applying Home Manager inside an existing sandbox
    does not update the published image.

@@ -1,3 +1,4 @@
+import json
 import shutil
 import subprocess
 import tempfile
@@ -58,6 +59,31 @@ class SandboxCreateTests(ModalTestCase):
         with self.assertRaisesRegex(OperationFailed, "did not become ready"):
             self.run_core(sandbox.create)
         self.sandbox.terminate.aio.assert_awaited_once()
+        # No record holds it, so its exit snapshot is deleted with it.
+        self.image_delete.aio.assert_awaited_once_with("im-exit")
+
+    def test_every_sandbox_saves_its_filesystem_when_it_ends(self):
+        self.run_core(sandbox.create)
+        options = self.create.aio.call_args.kwargs
+        self.assertEqual(
+            options["experimental_options"], {"enable_exit_snapshot": True}
+        )
+        self.assertIsNone(options["name"])
+        self.assertIsNone(options["tags"])
+
+    def test_name_is_given_to_modal_and_tagged(self):
+        self.run_core(sandbox.create, name="dev")
+        options = self.create.aio.call_args.kwargs
+        self.assertEqual(options["name"], "dev")
+        self.assertEqual(options["tags"], {sandbox.NAME_TAG: "dev"})
+
+    def test_snapshot_replaces_the_image(self):
+        self.run_core(sandbox.create, snapshot_id="im-saved")
+        self.snapshot_image.assert_called_once_with("im-saved")
+        self.image.assert_not_called()
+        self.assertIs(
+            self.create.aio.call_args.kwargs["image"], self.snapshot_image.return_value
+        )
 
     def test_default_passes_no_override_to_the_main_command(self):
         self.run_core(sandbox.create)
@@ -145,7 +171,10 @@ class SandboxUseTests(ModalTestCase):
     def test_list_returns_ids_of_the_app(self):
         self.assertEqual(self.run_core(sandbox.list_ids), ["sb-test"])
         self.listing.aio.assert_called_once_with(app_id="ap-test")
-        self.assertEqual(self.run_cli("sandbox", "ls").strip(), "sb-test")
+        self.assertEqual(
+            json.loads(self.run_cli("sandbox", "ls")),
+            {"name": "", "sandbox_id": "sb-test", "status": "running", "snapshots": 0},
+        )
 
     def test_execute_returns_output_and_exit_code(self):
         self.sandbox.process.stdout.read.aio.return_value = "out"

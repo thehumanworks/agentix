@@ -45,7 +45,21 @@ def _create_sandbox(
     workdir: str = "",
     memory: int = SANDBOX_MEMORY_MIB,
     cpu: float = 0,
+    name: str = "",
+    tailscale: bool = False,
+    hostname: str = "",
 ):
+    """Start a sandbox under NAME, or under a new name such as brisk-otter.
+
+    Its filesystem is saved when it ends, for `sandbox restore`. With
+    --tailscale, Tailscale SSH starts too, as with `sandbox ssh start`.
+    """
+    from . import names, ssh_input
+
+    # Refuse before anything is created.
+    if name:
+        names.check_name(name)
+    ssh_input.check_tailscale_start(tailscale, hostname, secret_name)
     return _backend().create_sandbox(
         image_name=image_name,
         secret_name=secret_name,
@@ -53,14 +67,19 @@ def _create_sandbox(
         workdir=workdir,
         memory=memory,
         cpu=cpu,
+        name=name,
+        tailscale=tailscale,
+        hostname=hostname,
     )
 
 
 def _terminate_sandbox(sandbox_id: str):
+    """Stop a sandbox, given its ID or name, and record its snapshot."""
     return _backend().terminate(sandbox_id)
 
 
 def _execute(sandbox_id: str, command: str):
+    """Run COMMAND in a sandbox, given its ID or name."""
     result = _backend().execute(sandbox_id, shlex.split(command))
     if result["exit_code"] != 0:
         raise RuntimeError(f"Failed to execute command: {result['stderr']}")
@@ -68,13 +87,44 @@ def _execute(sandbox_id: str, command: str):
 
 
 def _list_sandboxes():
+    """Named sandboxes, running or not, and running sandboxes without a name."""
     return _backend().list_sandboxes()
+
+
+def _snapshot(name: str):
+    """Save the filesystem of the running sandbox of NAME now."""
+    return _backend().snapshot(name)
+
+
+def _snapshots(name: str):
+    """The snapshots of NAME, oldest first, with the time each was taken."""
+    return _backend().snapshots(name)
+
+
+def _restore(
+    name: str, snapshot: str = "", tailscale: bool = False, hostname: str = ""
+):
+    """Start a new sandbox for NAME from its latest snapshot, or from --snapshot=ID.
+
+    The sandbox NAME has now must have ended; stop it with `sandbox down`.
+    """
+    return _backend().restore(name, snapshot, tailscale, hostname)
+
+
+def _purge(name: str, terminate: bool = False):
+    """Delete the snapshots and the record of NAME.
+
+    A running sandbox is refused, unless --terminate stops it first.
+    """
+    return _backend().purge(name, terminate)
 
 
 def _ssh_start(
     sandbox_id: str, engine: str = "tailscale", hostname: str = "", public_key: str = ""
 ):
-    """Start SSH. Tailscale names default to the lowercase sandbox ID.
+    """Start SSH in a sandbox, given its ID or name.
+
+    Tailscale names default to the lowercase sandbox ID.
 
     An explicit hostname also applies when Tailscale is already running.
     """
@@ -123,6 +173,10 @@ def main():
                 "down": _terminate_sandbox,
                 "exec": _execute,
                 "ls": _list_sandboxes,
+                "snapshot": _snapshot,
+                "snapshots": _snapshots,
+                "restore": _restore,
+                "purge": _purge,
                 "ssh": {
                     "start": _ssh_start,
                     "stop": _ssh_stop,
