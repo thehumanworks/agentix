@@ -129,12 +129,122 @@ def _terminate_sandbox(sandbox_id: str):
     return _backend().terminate(sandbox_id)
 
 
-def _execute(sandbox_id: str, command: str):
-    """Run COMMAND in a sandbox, given its ID or name."""
-    result = _backend().execute(sandbox_id, shlex.split(command))
-    if result["exit_code"] != 0:
-        raise RuntimeError(f"Failed to execute command: {result['stderr']}")
-    return result["stdout"]
+def _execute(
+    sandbox_id: str, command: str, resume: bool | str = False, detach: bool = False
+):
+    """Run COMMAND in a sandbox, given its ID or name.
+
+    With --detach, COMMAND runs in the background and the run ID is printed
+    at once; COMMAND goes on when this command or its terminal ends. Follow
+    it with `sandbox logs RUN_ID` and get its exit code with `sandbox wait
+    RUN_ID`. It needs the runner app: `agentix runner deploy`. See
+    docs/detached-runs.md.
+
+    With --resume, if a named sandbox reaches its timeout while COMMAND runs,
+    it is restored from its exit snapshot and COMMAND continues, as its resume
+    rule says (claude resumes its own session with a neutral prompt), up
+    to 3 times.
+    --resume='OTHER' names the command that continues it instead. A command
+    with no rule is refused. See docs/resume.md.
+    """
+    if detach is not False:
+        if detach is not True or resume is not False:
+            raise InvalidRequest(
+                "--detach takes no value and does not go with --resume."
+            )
+        return _backend().start_run(sandbox_id, shlex.split(command))["run_id"]
+    if resume is False:
+        result = _backend().execute(sandbox_id, shlex.split(command))
+        if result["exit_code"] != 0:
+            raise RuntimeError(f"Failed to execute command: {result['stderr']}")
+        return result["stdout"]
+    result = _backend().execute_resumable(
+        sandbox_id, shlex.split(command), resume, _notify, _output
+    )
+    _check_runs(result)
+
+
+def _resume(name: str):
+    """Restore NAME from its latest snapshot and continue what was cut off.
+
+    Commands started with `sandbox exec --resume` that were still running when
+    the sandbox ended continue as their resume rule says, watched as by
+    `exec --resume`. With none, this is `sandbox restore NAME`.
+    """
+    result = _backend().resume(name, _notify, _output)
+    _check_runs(result)
+    return result
+
+
+def _notify(message: str) -> None:
+    print(f"agentix: {message}", file=sys.stderr, flush=True)
+
+
+def _output(run: dict[str, Any], result: dict[str, Any]) -> None:
+    sys.stdout.write(result["stdout"])
+    sys.stdout.flush()
+    sys.stderr.write(result["stderr"])
+    # 128 is what Modal reports when the sandbox ends; the watcher says more.
+    if result["exit_code"] not in (0, 128):
+        _notify(
+            f"`{shlex.join(run['command'])}` exited with code {result['exit_code']}."
+        )
+
+
+def _check_runs(result: dict[str, Any]) -> None:
+    if any(run["exit_code"] != 0 for run in result.get("runs", [])):
+        raise RuntimeError(
+            "Not every command finished: "
+            + ", ".join(
+                f"`{shlex.join(run['command'])}` ({run['exit_code']})"
+                for run in result.get("runs", [])
+            )
+        )
+
+
+def _logs(run_id: str):
+    """Print the output of a detached run from its start, until it ends."""
+
+    def write(source: str, text: str) -> None:
+        stream = sys.stderr if source == "stderr" else sys.stdout
+        stream.write(text)
+        stream.flush()
+
+    _backend().follow_run(run_id, write)
+
+
+def _wait(run_id: str):
+    """Wait for a detached run to end, print its exit code, and exit with it.
+
+    A run whose sandbox ended first exits with 128 and says so.
+    """
+    result = _backend().wait_run(run_id)
+    code = result.get("exit_code")
+    if result.get("sandbox_ended") and code in (None, 128):
+        print(f"agentix: the sandbox of {run_id} ended first.", file=sys.stderr)
+    print(code if code is not None else "none")
+    sys.stdout.flush()
+    sys.exit(128 if code is None else code)
+
+
+def _runs(target: str = "", clean: bool = False):
+    """Detached runs of a sandbox (given its ID, or every sandbox of a name), or all.
+
+    Each run's state is running, exited (with its exit code), sandbox ended,
+    failed, or expired. --clean forgets the runs that have ended and deletes
+    their log files in sandboxes that still run; runs that still run stay.
+    """
+    if clean is not False and clean is not True:
+        raise InvalidRequest(f"--clean takes no value, not {clean!r}.")
+    return _backend().runs(target, clean)
+
+
+def _runner_deploy():
+    """Deploy the Modal app that runs `sandbox exec --detach` commands.
+
+    Deploying again is safe. The app costs nothing while no run is going.
+    """
+    return _backend().deploy_runner()
 
 
 def _list_sandboxes():
@@ -296,6 +406,28 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" + ("" if number == 1 else "s")
 
 
+def _sync(name: str = "", pull: Any = False, path: Any = ""):
+    """Copy this checkout's uncommitted changes into a sandbox, or back with --pull.
+
+    NAME is the sandbox, a name or an ID; without one, the only sandbox that
+    runs. Its checkout is the one `sandbox up --repo=OWNER/NAME` makes, in
+    the image's working directory, or --path=DIR. Untracked files,
+    deletions, and binary files move; ignored files do not. Only what the
+    other side lacks is sent. Changes are merged into the other side's
+    working tree; if any file conflicts, nothing changes and the files are
+    listed. The other side's working tree is saved first as a Git ref, and
+    `agentix-sync undo` there puts it back.
+    """
+    if not isinstance(pull, bool):
+        raise InvalidRequest(
+            f"--pull takes no value, not {pull!r}. Put it after the sandbox: "
+            "sandbox sync NAME --pull."
+        )
+    if not isinstance(path, str):
+        raise InvalidRequest(f"Invalid --path: {path!r}. Give a directory.")
+    return _backend().sync(str(name), os.getcwd(), path, pull)
+
+
 def _ssh_start(
     sandbox_id: str, engine: str = "tailscale", hostname: str = "", public_key: str = ""
 ):
@@ -431,16 +563,24 @@ def main(argv: Sequence[str] | None = None):
             "config": {
                 "show": _config_show,
             },
+            "runner": {
+                "deploy": _runner_deploy,
+            },
             "sandbox": {
                 "up": _create_sandbox,
                 "down": _terminate_sandbox,
                 "exec": _execute,
+                "logs": _logs,
+                "wait": _wait,
+                "runs": _runs,
                 "ls": _list_sandboxes,
                 "snapshot": _snapshot,
                 "snapshots": _snapshots,
                 "restore": _restore,
+                "resume": _resume,
                 "purge": _purge,
                 "prune": _prune,
+                "sync": _sync,
                 "shell": _shell_command(command),
                 "ssh": {
                     "start": _ssh_start,

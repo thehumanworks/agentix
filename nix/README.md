@@ -25,7 +25,8 @@ Each profile is one output of `flake.nix`.
 | `home-manager/users/` | One file per person: the Git name and emails |
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor, comma and nix-index. `core.nix` declares the options several modules share |
 | `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, the C compiler, the headless browser, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
-| `home-manager/modules/scripts/` | Shell scripts that modules package |
+| `home-manager/modules/scripts/` | Shell scripts that modules package, among them `agentix-sync.sh`, which the host's agentix command also runs |
+| `packages/` | Packages the flake builds on every system: `agentix-sync` (`nix run .#agentix-sync`) |
 | `oci/` | The sandbox profile as an OCI image, which the Modal image is made from; see [OCI image](#oci-image) |
 
 Each home in `flake.nix` combines every module, a profile, and a user file.
@@ -49,6 +50,7 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | `agentix.languageServers.enable` | `language-servers.nix` | The language servers, on PATH and in Claude's LSP tool |
 | `agentix.nixIndex.enable` | `nix-index.nix` | comma (`, COMMAND`) and `nix-locate`, with the prebuilt index from nix-index-database, and the shell's command-not-found hook |
 | `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
+| `agentix.sync.enable` | `sync.nix` | `agentix-sync`, which `agentix sandbox sync` runs on both sides to copy uncommitted changes between checkouts with Git |
 | `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
 | `agentix.sandbox.baseCommands.enable` | `sandbox/base-commands.nix` | `tar`, `gzip`, `xz`, `less`, `which`, `flock`, `locale`, `infocmp`, and the other commands a Debian base would provide |
 | `agentix.sandbox.browser.enable` | `sandbox/browser.nix` | `chrome-headless-shell`, Playwright's headless Chromium, run with `--no-sandbox` for root, and `PLAYWRIGHT_BROWSERS_PATH` for Playwright clients |
@@ -135,7 +137,7 @@ not resolve to it on the image's `PATH`, or if the paths differ from the ones
 
 The flake exports `homeManagerModules.default`, which imports every module,
 and one module per concern: `"1password"`, `claude-code`, `git`,
-`language-servers`, `nix-index`, `nixvim`, `tools`, `sandbox-base-commands`,
+`language-servers`, `nix-index`, `nixvim`, `sync`, `tools`, `sandbox-base-commands`,
 `sandbox-browser`, `sandbox-cc`, `sandbox-claude`, `sandbox-manifest`,
 `sandbox-op-token`, `sandbox-openssh`, `sandbox-rex`, `sandbox-tailscale`, and
 `sandbox-workdir`. Each brings the
@@ -354,6 +356,11 @@ with the `gh` and `gh-lf` wrappers.
   each in a module of its own. See [SSH engines](#ssh-engines).
 - Rex, the terminal multiplexer, with its terminfo entry and ssh guard. See
   [Rex in sandboxes](#rex-in-sandboxes).
+- `agentix-sync`, from `modules/sync.nix` and `packages/agentix-sync.nix`,
+  the side of `agentix sandbox sync` that runs here. The host's agentix
+  command runs the same script from `modules/scripts/agentix-sync.sh`, so
+  both sides have one copy of the code. Run by hand, `agentix-sync undo DIR`
+  puts back the working tree a sync replaced.
 - `~/.nix-profile/share/agentix/manifest.json`, which lists the commands the
   configuration provides and the paths it shares with the host. See
   [Shared paths and the manifest](#shared-paths-and-the-manifest).

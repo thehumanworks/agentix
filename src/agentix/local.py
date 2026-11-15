@@ -8,7 +8,9 @@ import datetime as dt
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from . import lifecycle, names, sandbox, ssh
+from . import lifecycle, names, runs, sandbox, ssh
+from . import resume as resume_module
+from . import sync as sync_module
 from .session import Session, describe
 from .store import Options
 
@@ -63,6 +65,43 @@ class Local:
             return dict(await sandbox.execute(session, sandbox_id, args))
 
         return _run(run)
+
+    def execute_resumable(
+        self,
+        target: str,
+        args: Sequence[str],
+        resume: object,
+        notify: resume_module.Notify,
+        output: resume_module.Output,
+    ) -> dict[str, Any]:
+        return _run(
+            lambda session: resume_module.start(
+                session, target, args, resume, notify, output
+            )
+        )
+
+    def resume(
+        self, target: str, notify: resume_module.Notify, output: resume_module.Output
+    ) -> dict[str, Any]:
+        return _run(
+            lambda session: resume_module.resume(session, target, notify, output)
+        )
+
+    def start_run(self, target: str, args: Sequence[str]) -> dict[str, Any]:
+        return _run(lambda session: runs.start(session, target, args))
+
+    def follow_run(self, run_id: str, write: Callable[[str, str], None]) -> None:
+        return _run(lambda _: runs.follow(run_id, write))
+
+    def wait_run(self, run_id: str) -> dict[str, Any]:
+        return _run(lambda _: runs.wait(run_id))
+
+    def runs(self, target: str, clean: bool) -> list[dict[str, Any]]:
+        operation = runs.clean if clean else runs.ls
+        return _run(lambda session: operation(session, target))
+
+    def deploy_runner(self) -> dict[str, str]:
+        return _run(lambda _: runs.deploy())
 
     def terminate(self, target: str) -> dict[str, Any]:
         return _run(lambda session: lifecycle.down(session, target))
@@ -131,3 +170,26 @@ class Local:
                 session, older_than, keep_latest, pattern, confirm
             )
         )
+
+    def sync(
+        self, target: str, local_dir: str, path: str, pull: bool
+    ) -> dict[str, Any]:
+        """Copy uncommitted changes between `local_dir` and the checkout at
+        `path` in a running sandbox; see `sync.sync`."""
+
+        async def run(session: Session):
+            sandbox_id, name = await lifecycle.running(session, target)
+
+            async def remote(args: Sequence[str], stdin: bytes):
+                return await sandbox.execute_bytes(session, sandbox_id, args, stdin)
+
+            here = sync_module.Side(
+                "this machine",
+                sync_module.run_here,
+                local_dir,
+                ["bash", str(sync_module.SCRIPT)],
+            )
+            there = sync_module.Side(f"sandbox {name or sandbox_id}", remote, path)
+            return await sync_module.sync(here, there, pull)
+
+        return _run(run)
