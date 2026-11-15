@@ -19,9 +19,10 @@ from .session import Session
 # A sandbox is normally ready in about a second.
 READY_TIMEOUT = 60
 
-# Modal saves the filesystem of every sandbox when it ends, however it ends, as
-# an Image that a new sandbox can start from. The option is experimental and
-# not in Modal's documentation yet; see Sandbox._experimental_get_exit_snapshot.
+# With this option, Modal saves the filesystem of a sandbox when it ends,
+# however it ends, as an Image that a new sandbox can start from, and keeps it
+# for 30 days. The option is experimental; see "Sandbox Exit Snapshots" in
+# Modal's guide and Sandbox._experimental_get_exit_snapshot.
 # /run is a tmpfs, so the files above, the 1Password token among them, are not
 # in the snapshot. A restored sandbox writes them again with its start command.
 _EXIT_SNAPSHOT = {"enable_exit_snapshot": True}
@@ -130,18 +131,33 @@ async def create(
     try:
         await handle.wait_until_ready.aio(timeout=READY_TIMEOUT)
     except Exception as error:
-        with contextlib.suppress(Exception):
-            await handle.terminate.aio()
-            # No record holds this sandbox, so nothing else would delete it.
-            image = await handle._experimental_get_exit_snapshot.aio(
-                timeout=SNAPSHOT_TIMEOUT
-            )
-            await delete_snapshot(image.object_id)
+        await _discard(handle)
         raise OperationFailed(
             f"The sandbox did not become ready, so it was removed: {error}"
         ) from error
     session.adopt(handle)
     return handle.object_id
+
+
+async def discard(session: Session, sandbox_id: str) -> None:
+    """End a sandbox that no record holds, and delete its exit snapshot.
+
+    Nothing else would find that snapshot. Failures are ignored, so that the
+    caller can report what made it discard the sandbox.
+    """
+    with contextlib.suppress(Exception):
+        async with session.sandbox(sandbox_id) as handle:
+            await _discard(handle)
+    session.forget(sandbox_id)
+
+
+async def _discard(handle: modal.Sandbox) -> None:
+    with contextlib.suppress(Exception):
+        await handle.terminate.aio()
+        image = await handle._experimental_get_exit_snapshot.aio(
+            timeout=SNAPSHOT_TIMEOUT
+        )
+        await delete_snapshot(image.object_id)
 
 
 async def list_ids(session: Session) -> list[str]:

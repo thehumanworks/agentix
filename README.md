@@ -175,6 +175,13 @@ running sandbox) are dated when they were taken, `timeout` at the timeout, and
 Modal does not report that a sandbox ended by itself, so `ls`, `snapshots`,
 `restore`, and `purge` check for that and record the snapshot.
 
+Modal deletes every snapshot 30 days after it was taken: those it saves when
+a sandbox ends, and those of `sandbox snapshot`. Modal cannot say whether a
+snapshot still exists, so `sandbox snapshots` gives each one `expires_at`,
+30 days after its date, and `expired` once that has passed. For kind `exit`
+the real date can be earlier. `sandbox restore` says when the snapshot it
+needs is gone.
+
 `sandbox restore` starts a new sandbox under the same name, from the latest
 snapshot or from `--snapshot=ID`, with the options the name was created with.
 It accepts `--tailscale` and `--hostname` as `sandbox up` does. The current
@@ -192,14 +199,29 @@ refuses while the sandbox runs; `--terminate` stops it first and also deletes
 the snapshot that this leaves. `sandbox up --name=NAME` refuses a name that
 exists already: restore it, or purge it first.
 
-The names and their snapshot IDs are kept in the Modal Dict
-`agentix-sandboxes`. That is the only record of the snapshots, because Modal
-cannot list them. Modal deletes a Dict entry that nothing reads or writes for
-7 days, and the snapshots of that name can then no longer be found or purged,
-so purge names you no longer need. `sandbox snapshot` keeps a snapshot for
-Modal's default of 30 days; Modal does not document how long it keeps the
-snapshots it saves when a sandbox ends. These exit snapshots are an
-experimental Modal feature.
+The names and their snapshot IDs are kept on the Modal Volume
+`agentix-sandboxes`, in `records/NAME/`. That is the only record of the
+snapshots, because Modal cannot list them. A Volume keeps its files until
+they are deleted; a Modal Dict, which agentix used before, drops an entry
+that nothing reads or writes for 7 days. The Dict `agentix-sandboxes-cache`
+keeps a copy of the records, so that `sandbox ls` reads no files; losing it
+loses nothing. Writing a record takes about 1.5 seconds, which `up`, `down`,
+`restore`, `snapshot`, and `purge` each spend once.
+
+Two commands that change one name at once both keep their change. Each write
+adds a file and deletes only the files it read, and the next read merges
+them. A purge leaves a small file, so that a command that read the name
+earlier cannot bring it back.
+
+Records that earlier versions kept in the Dict `agentix-sandboxes` are copied
+to the Volume when `sandbox ls` or a command on that name reads them, and
+again whenever an earlier version adds to them. The Dict entry stays, so an
+earlier version still finds the name, until `sandbox purge` removes both. Set
+`AGENTIX_STORE=NAME` to use the Volume `NAME`, the Dict `NAME-cache`, and the
+earlier records in the Dict `NAME` instead, for example to try a change
+without touching the real records.
+
+These exit snapshots are an experimental Modal feature.
 
 ## CI
 

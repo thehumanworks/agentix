@@ -26,10 +26,12 @@ class LifecycleTestCase(ModalTestCase):
     def put_record(self, name="dev", sandbox_id="sb-test", exit="pending", snaps=()):
         record = store.new_record(name, dict(OPTIONS))
         store.add_sandbox(record, sandbox_id)
+        # Before any sandbox that a test starts, as with real sandboxes.
+        record["sandboxes"][-1]["started_at"] = "2026-01-01T00:00:00+00:00"
         record["sandboxes"][-1]["exit"] = exit
         for snapshot_id, created_at in snaps:
             store.add_snapshot(record, snapshot_id, sandbox_id, "manual", created_at)
-        self.store.data[name] = record
+        self.write_record(record)
         return record
 
     def sandboxes(self, **handles):
@@ -46,14 +48,15 @@ class UpTests(LifecycleTestCase):
         self.assertEqual(options["name"], "dev")
         self.assertEqual(options["tags"], {NAME_TAG: "dev"})
         self.assertEqual(options["memory"], 16384)
-        record = self.store.data["dev"]
+        record = self.stored("dev")
         self.assertEqual(record["sandbox_id"], "sb-test")
         self.assertEqual(record["options"], OPTIONS)
         self.assertEqual(record["sandboxes"][0]["exit"], "pending")
 
     def test_cli_prints_the_id_and_a_generated_name(self):
         output = self.run_cli("sandbox", "up")
-        [name] = self.store.data
+        [path] = self.volume.files
+        name = path.split("/")[1]
         self.assertIn("sandbox_id: sb-test", output)
         self.assertIn(f"name:       {name}", output)
         self.assertEqual(self.create.aio.call_args.kwargs["name"], name)
@@ -72,20 +75,44 @@ class UpTests(LifecycleTestCase):
         with self.assertRaisesRegex(InvalidRequest, "restore dev"):
             self.run_core(lifecycle.up, OPTIONS, "dev")
         self.create.aio.assert_not_called()
-        self.assertEqual(self.store.data["dev"], record)
+        self.assertEqual(self.stored("dev"), store.merge(None, record))
 
-    def test_failed_start_frees_the_name(self):
+    def test_failed_start_leaves_no_record(self):
         self.create.aio.side_effect = RuntimeError("no capacity")
         with self.assertRaisesRegex(RuntimeError, "no capacity"):
             self.run_core(lifecycle.up, OPTIONS, "dev")
-        self.assertNotIn("dev", self.store.data)
+        self.assertIsNone(self.stored("dev"))
+
+    def test_record_is_written_once_with_the_sandbox(self):
+        self.run_core(lifecycle.up, OPTIONS, "dev")
+        self.volume.batch_upload.aio.assert_called_once()
+
+    def test_sandbox_that_cannot_be_recorded_is_removed_with_its_snapshot(self):
+        self.volume.batch_upload.aio.side_effect = ConnectionError("no volume")
+        with self.assertRaisesRegex(ConnectionError, "no volume"):
+            self.run_core(lifecycle.up, OPTIONS, "dev")
+        self.sandbox.terminate.aio.assert_awaited_once()
+        self.image_delete.aio.assert_awaited_once_with("im-exit")
+
+    def test_name_taken_while_the_sandbox_started_is_refused(self):
+        async def started_elsewhere(*args, **kwargs):
+            self.put_record("dev", "sb-other")
+            return self.sandbox
+
+        self.create.aio.side_effect = started_elsewhere
+        with self.assertRaisesRegex(InvalidRequest, "taken"):
+            self.run_core(lifecycle.up, OPTIONS, "dev")
+        self.sandbox.terminate.aio.assert_awaited_once()
+        self.image_delete.aio.assert_awaited_once_with("im-exit")
+        self.assertEqual(self.stored("dev")["sandbox_id"], "sb-other")
 
     def test_invalid_name_is_refused_before_modal_is_contacted(self):
         for name in ("sb-dev", "Dev"):
             with self.subTest(name=name), self.assertRaises(InvalidRequest):
                 self.run_cli("sandbox", "up", f"--name={name}")
         self.app_lookup.aio.assert_not_called()
-        self.store_lookup.assert_not_called()
+        self.volume_lookup.assert_not_called()
+        self.dict_lookup.assert_not_called()
 
     def test_tailscale_without_the_secret_is_refused_before_anything(self):
         for command in (
@@ -99,7 +126,8 @@ class UpTests(LifecycleTestCase):
                 lifecycle.up, {**OPTIONS, "secret_name": ""}, "dev", tailscale=True
             )
         self.create.aio.assert_not_called()
-        self.store_lookup.assert_not_called()
+        self.volume_lookup.assert_not_called()
+        self.dict_lookup.assert_not_called()
 
     def test_tailscale_starts_after_the_sandbox(self):
         self.sandbox.process.stdout.read.aio.return_value = TAILSCALE
@@ -135,7 +163,7 @@ class UpTests(LifecycleTestCase):
             OperationFailed, r"sb-test \(dev\) is running.*Enrollment failed"
         ):
             self.run_core(lifecycle.up, OPTIONS, "dev", tailscale=True)
-        self.assertEqual(self.store.data["dev"]["sandbox_id"], "sb-test")
+        self.assertEqual(self.stored("dev")["sandbox_id"], "sb-test")
         self.sandbox.terminate.aio.assert_not_called()
 
 
@@ -154,7 +182,7 @@ class DownTests(LifecycleTestCase):
             },
         )
         self.sandbox.terminate.aio.assert_awaited_once_with(wait=True)
-        record = self.store.data["dev"]
+        record = self.stored("dev")
         self.assertEqual(record["snapshots"][0]["kind"], "down")
         self.assertEqual(record["sandboxes"][0]["exit"], "saved")
 
@@ -164,12 +192,13 @@ class DownTests(LifecycleTestCase):
         self.sandbox.poll.aio.side_effect = [None, 137]
         output = self.run_cli("sandbox", "down", "sb-test")
         self.assertIn("im-exit", output)
-        self.assertEqual(self.store.data["dev"]["snapshots"][0]["id"], "im-exit")
+        self.assertEqual(self.stored("dev")["snapshots"][0]["id"], "im-exit")
 
     def test_unnamed_sandbox_reports_as_before(self):
         result = self.run_core(lifecycle.down, "sb-test")
         self.assertEqual(result, {"id": "sb-test", "status": "terminated"})
-        self.store_lookup.assert_not_called()
+        self.volume_lookup.assert_not_called()
+        self.dict_lookup.assert_not_called()
 
     def test_snapshot_still_saving_is_recorded_later(self):
         self.put_record()
@@ -178,7 +207,7 @@ class DownTests(LifecycleTestCase):
             modal.exception.TimeoutError("still saving")
         )
         self.assertEqual(self.run_core(lifecycle.down, "dev")["snapshot"], "")
-        self.assertEqual(store.pending(self.store.data["dev"])[0]["id"], "sb-test")
+        self.assertEqual(store.pending(self.stored("dev"))[0]["id"], "sb-test")
 
 
 class ListTests(LifecycleTestCase):
@@ -222,7 +251,7 @@ class ListTests(LifecycleTestCase):
         rows = self.run_core(lifecycle.ls)
         self.assertEqual(rows[0]["snapshots"], 1)
         ended._experimental_get_exit_snapshot.aio.assert_awaited_once_with(timeout=0)
-        self.assertEqual(self.store.data["old"]["snapshots"][0]["kind"], "timeout")
+        self.assertEqual(self.stored("old")["snapshots"][0]["kind"], "timeout")
 
     def test_one_failing_check_does_not_break_the_list(self):
         self.put_record("old", "sb-old")
@@ -239,12 +268,15 @@ class SnapshotTests(LifecycleTestCase):
         rows = [json.loads(line) for line in output.splitlines()]
         self.assertEqual([row["id"] for row in rows], ["im-1", "im-2", "im-exit"])
         self.assertEqual(rows[-1]["kind"], "exit")
+        # Modal keeps a snapshot for 30 days.
+        self.assertEqual(rows[0]["expires_at"], "2026-01-31T00:00:00+00:00")
+        self.assertEqual([row["expired"] for row in rows], [True, True, False])
 
     def test_manual_snapshot_is_recorded(self):
         self.put_record()
         result = self.run_core(lifecycle.take_snapshot, "dev")
         self.assertEqual((result["id"], result["kind"]), ("im-manual", "manual"))
-        self.assertEqual(self.store.data["dev"]["snapshots"][0]["id"], "im-manual")
+        self.assertEqual(self.stored("dev")["snapshots"][0]["id"], "im-manual")
 
     def test_unknown_name_is_reported(self):
         with self.assertRaisesRegex(NotFound, "No sandbox is named nope"):
@@ -273,7 +305,7 @@ class RestoreTests(LifecycleTestCase):
             (16384, 2, "/srv/app", "dev"),
         )
         self.assertEqual(self.create.aio.call_args.args[-1], "/srv/app")
-        record = self.store.data["dev"]
+        record = self.stored("dev")
         self.assertEqual(record["sandbox_id"], "sb-new")
         self.assertEqual(
             [item["id"] for item in record["sandboxes"]], ["sb-old", "sb-new"]
@@ -315,7 +347,7 @@ class RestoreTests(LifecycleTestCase):
         self.create.aio.side_effect = modal.exception.NotFoundError(
             "Could not find image with ID im-new"
         )
-        with self.assertRaisesRegex(NotFound, "expired or was deleted"):
+        with self.assertRaisesRegex(NotFound, "im-new of dev no longer exists"):
             self.run_core(lifecycle.restore, "dev")
 
     def test_name_without_snapshots_is_reported(self):
@@ -330,7 +362,7 @@ class PurgeTests(LifecycleTestCase):
         with self.assertRaisesRegex(InvalidRequest, "--terminate"):
             self.run_cli("sandbox", "purge", "dev")
         self.image_delete.aio.assert_not_called()
-        self.assertIn("dev", self.store.data)
+        self.assertIsNotNone(self.stored("dev"))
 
     def test_terminate_deletes_the_exit_snapshot_too(self):
         self.put_record(snaps=[("im-1", "2026-01-01")])
@@ -349,7 +381,7 @@ class PurgeTests(LifecycleTestCase):
             sorted(call.args[0] for call in self.image_delete.aio.call_args_list),
             ["im-1", "im-exit"],
         )
-        self.assertNotIn("dev", self.store.data)
+        self.assertIsNone(self.stored("dev"))
 
     def test_snapshots_not_deleted_stay_recorded(self):
         self.put_record(
@@ -364,7 +396,7 @@ class PurgeTests(LifecycleTestCase):
         with self.assertRaisesRegex(OperationFailed, "im-2"):
             self.run_core(lifecycle.purge, "dev")
         self.assertEqual(
-            [snapshot["id"] for snapshot in self.store.data["dev"]["snapshots"]],
+            [snapshot["id"] for snapshot in self.stored("dev")["snapshots"]],
             ["im-2"],
         )
 
@@ -384,7 +416,8 @@ class NameResolutionTests(LifecycleTestCase):
 
     def test_ids_need_no_record(self):
         self.run_cli("sandbox", "exec", "sb-test", "true")
-        self.store_lookup.assert_not_called()
+        self.volume_lookup.assert_not_called()
+        self.dict_lookup.assert_not_called()
 
     def test_unknown_name_is_reported(self):
         with self.assertRaisesRegex(NotFound, "nope"):

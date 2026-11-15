@@ -1,8 +1,8 @@
 """Modal state that is slow to build and safe to reuse.
 
 Most of the time of a short operation goes to setup: the connection to Modal,
-the app lookup, the lookup of the name store, and, for each sandbox, a lookup
-plus a separate connection to its command router. A `Session` builds each of
+the app lookup, the lookups of the record Volume and Dicts, and, for each
+sandbox, a lookup plus a separate connection to its command router. A `Session` builds each of
 these once and shares it between all later operations.
 """
 
@@ -13,7 +13,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Hashable
 
 import modal
 
-from .defaults import APP_NAME, STORE_NAME
+from .defaults import APP_NAME, CACHE_NAME, LEGACY_STORE_NAME, STORE_NAME
 from .errors import AgentixError, InvalidRequest, NotFound, OperationFailed
 
 
@@ -21,7 +21,7 @@ class Session:
     def __init__(self, max_sandboxes: int = 128):
         """Keep at most `max_sandboxes` sandbox handles open."""
         self._app: dict[str, asyncio.Future[modal.App]] = {}
-        self._store: dict[str, asyncio.Future[modal.Dict]] = {}
+        self._stores: dict[str, asyncio.Future] = {}
         self._sandboxes: OrderedDict[str, asyncio.Future[modal.Sandbox]] = OrderedDict()
         self._max_sandboxes = max_sandboxes
         self._background: set[asyncio.Task] = set()
@@ -33,9 +33,17 @@ class Session:
             lambda: modal.App.lookup.aio(name=APP_NAME, create_if_missing=True),
         )
 
-    async def store(self) -> modal.Dict:
-        """The Dict that records named sandboxes. See `store.py`."""
-        return await _shared(self._store, STORE_NAME, _open_store)
+    async def record_volume(self) -> modal.Volume:
+        """The Volume that keeps the records of named sandboxes. See `recordfiles.py`."""
+        return await _shared(self._stores, "volume", _open_volume)
+
+    async def record_cache(self) -> modal.Dict:
+        """The Dict that caches those records."""
+        return await _shared(self._stores, "cache", _open_cache)
+
+    async def legacy_records(self) -> modal.Dict | None:
+        """The Dict that earlier versions kept the records in, or None if none."""
+        return await _shared(self._stores, "legacy", _open_legacy)
 
     @contextlib.asynccontextmanager
     async def sandbox(self, sandbox_id: str) -> AsyncIterator[modal.Sandbox]:
@@ -110,9 +118,27 @@ async def _shared[K: Hashable, V](
         raise
 
 
-async def _open_store() -> modal.Dict:
-    handle = modal.Dict.from_name(STORE_NAME, create_if_missing=True)
+async def _open_volume() -> modal.Volume:
+    # Version 2, which Modal recommends for new Volumes. A Volume of that name
+    # created otherwise is refused rather than used.
+    handle = modal.Volume.from_name(STORE_NAME, create_if_missing=True, version=2)
     await handle.hydrate.aio()
+    return handle
+
+
+async def _open_cache() -> modal.Dict:
+    handle = modal.Dict.from_name(CACHE_NAME, create_if_missing=True)
+    await handle.hydrate.aio()
+    return handle
+
+
+async def _open_legacy() -> modal.Dict | None:
+    # Not created: a workspace that never had one has nothing to bring over.
+    handle = modal.Dict.from_name(LEGACY_STORE_NAME)
+    try:
+        await handle.hydrate.aio()
+    except modal.exception.NotFoundError:
+        return None
     return handle
 
 
