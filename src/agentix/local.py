@@ -39,6 +39,7 @@ class Local:
         exit_snapshot: bool = True,
         ephemeral: bool = False,
         repo: str = "",
+        idle_stop: int = 0,
     ) -> dict[str, Any]:
         options: Options = {
             "image_name": image_name,
@@ -48,6 +49,7 @@ class Local:
             "memory": memory,
             "cpu": cpu,
             "exit_snapshot": exit_snapshot,
+            "idle_stop": idle_stop,
         }
         return _run(
             lambda session: lifecycle.up(

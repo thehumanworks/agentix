@@ -251,6 +251,7 @@ async def resume(
 _ENDED = {
     "timeout": "reached its timeout",
     "down": "was stopped with agentix sandbox down",
+    "idle": "stopped itself after its idle stop",
     "exit": "ended",
     "manual": "was saved with agentix sandbox snapshot",
 }

@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Literal, NotRequired, TypedDict
 
 import modal
@@ -10,11 +10,14 @@ import modal.experimental
 
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import InvalidRequest, OperationFailed
+from .idle import IDLE_TAG, WATCHER, poll_interval
 from .layout import OP_TOKEN_FILE, READY_FILE, WORKDIR_FILE
 from .session import Session
 
 # The start command writes the token file, the --workdir override, and, last,
-# the ready file, which `create` waits for. The paths are in layout.py.
+# the ready file, which `create` waits for. The paths are in layout.py. Then it
+# sleeps, or, with an idle stop, runs the watcher of idle.py, which ends the
+# sandbox once nothing has run for that long.
 
 # A sandbox is normally ready in about a second.
 READY_TIMEOUT = 60
@@ -48,6 +51,9 @@ if [ -n "$1" ]; then
   printf '%s\\n' "$1" > {WORKDIR_FILE}
 fi
 : > {READY_FILE}
+if [ -n "${{2:-}}" ]; then
+  exec sh -c "$4" agentix-idle watch "$2" "$3" "test -e {READY_FILE}"
+fi
 exec sleep infinity
 """
 
@@ -87,6 +93,7 @@ async def create(
     name: str = "",
     snapshot_id: str = "",
     exit_snapshot: bool = True,
+    idle_stop: int = 0,
 ) -> str:
     """Start a sandbox in the image's working directory, or in `workdir` if given.
 
@@ -94,6 +101,8 @@ async def create(
     keeps Modal's default. `snapshot_id` starts the sandbox from that snapshot
     instead of `image_name`. Modal refuses a `name` that a running sandbox has.
     `exit_snapshot` makes Modal save the filesystem when the sandbox ends.
+    `idle_stop`, in seconds, ends the sandbox once nothing has run in it for
+    that long; zero never does.
 
     Returns the sandbox ID when the sandbox runs and its files are in place,
     so a command sent immediately afterwards finds them.
@@ -103,15 +112,21 @@ async def create(
         if snapshot_id
         else modal.Image.from_name(image_name)
     )
+    tags = {NAME_TAG: name} if name else {}
+    if idle_stop:
+        tags[IDLE_TAG] = str(idle_stop)
     handle = await modal.Sandbox.create.aio(
         "sh",
         "-c",
         _INIT,
         "agentix-init",
         workdir,
+        str(idle_stop) if idle_stop else "",
+        str(poll_interval(idle_stop)) if idle_stop else "",
+        WATCHER if idle_stop else "",
         app=await session.app(),
         name=name or None,
-        tags={NAME_TAG: name} if name else None,
+        tags=tags or None,
         image=image,
         env={"IS_SANDBOX": "1"},
         secrets=[
@@ -169,6 +184,26 @@ async def list_ids(session: Session) -> list[str]:
     return [
         handle.object_id async for handle in modal.Sandbox.list.aio(app_id=app.app_id)
     ]
+
+
+async def idle_stops(session: Session, sandbox_ids: Collection[str]) -> dict[str, int]:
+    """The idle stop, in seconds, of each running sandbox of `sandbox_ids`.
+
+    It is read from the sandbox's tags, for sandboxes that have no record.
+    """
+    app = await session.app()
+    handles = [
+        handle
+        async for handle in modal.Sandbox.list.aio(app_id=app.app_id)
+        if handle.object_id in sandbox_ids
+    ]
+    tags = await asyncio.gather(*(handle.get_tags.aio() for handle in handles))
+    return {
+        handle.object_id: int(value)
+        if (value := found.get(IDLE_TAG, "")).isdigit()
+        else 0
+        for handle, found in zip(handles, tags)
+    }
 
 
 async def running_named(session: Session, name: str) -> list[str]:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from support import ModalTestCase
 
-from agentix import sandbox
+from agentix import idle, sandbox
 from agentix.defaults import SANDBOX_MEMORY_MIB
 from agentix.errors import InvalidRequest, OperationFailed
 from agentix.sandbox import OP_TOKEN_FILE, READY_FILE, WORKDIR_FILE
@@ -45,7 +45,7 @@ class SandboxCreateTests(ModalTestCase):
         self.assertIn("umask 077", command[2])
         self.assertIn(f'"$OP_SERVICE_ACCOUNT_TOKEN" > {OP_TOKEN_FILE}', command[2])
         self.assertIn(f"> {WORKDIR_FILE}", command[2])
-        self.assertEqual(command[-1], "/srv/project")
+        self.assertEqual(command[3:], ("agentix-init", "/srv/project", "", "", ""))
         self.sandbox.exec.aio.assert_not_called()
 
     def test_returns_only_when_the_main_command_has_written_its_files(self):
@@ -77,6 +77,21 @@ class SandboxCreateTests(ModalTestCase):
         self.assertEqual(options["name"], "dev")
         self.assertEqual(options["tags"], {sandbox.NAME_TAG: "dev"})
 
+    def test_idle_stop_hands_the_main_command_to_the_watcher(self):
+        self.run_core(sandbox.create, name="dev", idle_stop=1200)
+        args = self.create.aio.call_args.args
+        self.assertEqual(args[4:], ("", "1200", "30", idle.WATCHER))
+        self.assertEqual(
+            self.create.aio.call_args.kwargs["tags"],
+            {sandbox.NAME_TAG: "dev", idle.IDLE_TAG: "1200"},
+        )
+
+    def test_idle_stop_tags_a_sandbox_without_a_name(self):
+        self.run_core(sandbox.create, idle_stop=600)
+        self.assertEqual(
+            self.create.aio.call_args.kwargs["tags"], {idle.IDLE_TAG: "600"}
+        )
+
     def test_snapshot_replaces_the_image(self):
         self.run_core(sandbox.create, snapshot_id="im-saved")
         self.snapshot_image.assert_called_once_with("im-saved")
@@ -87,7 +102,7 @@ class SandboxCreateTests(ModalTestCase):
 
     def test_default_passes_no_override_to_the_main_command(self):
         self.run_core(sandbox.create)
-        self.assertEqual(self.create.aio.call_args.args[-1], "")
+        self.assertEqual(self.create.aio.call_args.args[4], "")
 
     def test_secret_must_hold_the_token(self):
         self.run_core(sandbox.create)
@@ -117,12 +132,12 @@ class SandboxInitScriptTests(unittest.TestCase):
             .replace("exec sleep infinity", "exit 0")
         )
 
-    def run_script(self, workdir="", token=None):
+    def run_script(self, workdir="", token=None, idle_args=()):
         environment = {"PATH": "/usr/bin:/bin"}
         if token is not None:
             environment["OP_SERVICE_ACCOUNT_TOKEN"] = token
         return subprocess.run(
-            ["sh", "-c", self.script, "agentix-init", workdir],
+            ["sh", "-c", self.script, "agentix-init", workdir, *idle_args],
             env=environment,
             capture_output=True,
             text=True,
@@ -131,6 +146,19 @@ class SandboxInitScriptTests(unittest.TestCase):
 
     def test_script_ends_in_the_command_that_keeps_the_sandbox_alive(self):
         self.assertTrue(sandbox._INIT.rstrip().endswith("exec sleep infinity"))
+
+    def test_idle_stop_execs_the_watcher_after_the_files(self):
+        watcher = 'test -e "${4#test -e }" || exit 9; echo "$0 $*"; exit 75'
+        result = self.run_script(idle_args=("120", "20", watcher))
+        self.assertEqual(result.returncode, 75)
+        self.assertEqual(
+            result.stdout, f"agentix-idle watch 120 20 test -e {self.ready_file}\n"
+        )
+
+    def test_no_idle_stop_keeps_the_sandbox_alive(self):
+        result = self.run_script(idle_args=("", "", ""))
+        self.assertEqual(result.returncode, 0)
+        self.assertTrue(self.ready_file.exists())
 
     def test_token_is_stored_in_a_root_only_file(self):
         self.assertEqual(self.run_script(token="secret-value").returncode, 0)
@@ -173,7 +201,13 @@ class SandboxUseTests(ModalTestCase):
         self.listing.aio.assert_called_once_with(app_id="ap-test")
         self.assertEqual(
             json.loads(self.run_cli("sandbox", "ls")),
-            {"name": "", "sandbox_id": "sb-test", "status": "running", "snapshots": 0},
+            {
+                "name": "",
+                "sandbox_id": "sb-test",
+                "status": "running",
+                "snapshots": 0,
+                "idle_stop": "off",
+            },
         )
 
     def test_execute_returns_output_and_exit_code(self):

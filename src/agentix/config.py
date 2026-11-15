@@ -12,11 +12,12 @@ Keep this module free of heavy imports: the command line reads it on every
 import math
 import os
 import tomllib
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import idle
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import InvalidRequest
 
@@ -34,6 +35,9 @@ class Key:
     types: tuple[type, ...]
     type_name: str
     default: Any
+    # Checks the value further, given the value and where it came from, and
+    # raises InvalidRequest if it is wrong.
+    check: Callable[[Any, str], object] | None = None
 
 
 # The keys of [sandbox.up], each named as its `sandbox up` flag (in the
@@ -50,6 +54,7 @@ UP_KEYS: dict[str, Key] = {
         Key("workdir", (str,), "string", ""),
         Key("tailscale", (bool,), "boolean", False),
         Key("no_snapshot", (bool,), "boolean", False),
+        Key("idle_stop", (str,), "duration", idle.OFF, idle.seconds),
     )
 }
 
@@ -80,6 +85,11 @@ def _check_type(key: Key, value: Any, where: str) -> Any:
             f"{where}: {key.name} must be {_article(key.type_name)} {key.type_name}, "
             f"not {type(value).__name__} {value!r}."
         )
+    if key.check is not None:
+        try:
+            key.check(value, where)
+        except InvalidRequest as error:
+            raise ConfigError(str(error)) from None
     if key.type_name == "number":
         value = float(value)
         if not math.isfinite(value):

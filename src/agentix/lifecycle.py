@@ -15,7 +15,7 @@ from typing import Any
 
 import modal
 
-from . import names, repo, sandbox, ssh, store
+from . import idle, names, repo, sandbox, ssh, store
 from .errors import InvalidRequest, NotFound, OperationFailed
 from .session import Session
 from .ssh_input import check_tailscale_start
@@ -258,14 +258,28 @@ async def ls(session: Session) -> list[dict[str, Any]]:
             if record["sandbox_id"]
             else "none",
             "snapshots": len(record["snapshots"]),
+            "idle_stop": idle.describe(record["options"].get("idle_stop", 0)),
         }
         for record in sorted(records, key=lambda record: record["name"])
     ]
     named = {record["sandbox_id"] for record in records}
+    unnamed = [sandbox_id for sandbox_id in running_ids if sandbox_id not in named]
+    # Only their tags say; a listing that cannot ask them still lists them.
+    stops: dict[str, int] = {}
+    if unnamed:
+        with contextlib.suppress(Exception):
+            stops = await sandbox.idle_stops(session, unnamed)
     rows += [
-        {"name": "", "sandbox_id": sandbox_id, "status": "running", "snapshots": 0}
-        for sandbox_id in running_ids
-        if sandbox_id not in named
+        {
+            "name": "",
+            "sandbox_id": sandbox_id,
+            "status": "running",
+            "snapshots": 0,
+            "idle_stop": idle.describe(stops[sandbox_id])
+            if sandbox_id in stops
+            else "",
+        }
+        for sandbox_id in unnamed
     ]
     return rows
 

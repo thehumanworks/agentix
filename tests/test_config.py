@@ -60,6 +60,7 @@ class LoadTest(ConfigTestCase):
             'workdir = "/src"\n'
             "tailscale = true\n"
             "no_snapshot = true\n"
+            'idle_stop = "20m"\n'
         )
         self.assertEqual(
             config.load(),
@@ -72,8 +73,22 @@ class LoadTest(ConfigTestCase):
                 "workdir": "/src",
                 "tailscale": True,
                 "no_snapshot": True,
+                "idle_stop": "20m",
             },
         )
+
+    def test_idle_stop_must_be_a_duration_or_off(self):
+        for text, message in (
+            ("idle_stop = 20", "must be a duration"),
+            ('idle_stop = "20"', "number with a unit"),
+            ('idle_stop = "30s"', "at least 1m"),
+        ):
+            with self.subTest(text=text):
+                self.write_config(f"[sandbox.up]\n{text}\n")
+                with self.assertRaisesRegex(ConfigError, message):
+                    config.load()
+        self.write_config('[sandbox.up]\nidle_stop = "off"\n')
+        self.assertEqual(config.load(), {"idle_stop": "off"})
 
     def test_empty_file_and_empty_tables_are_fine(self):
         for text in ("", "[sandbox]\n", "[sandbox.up]\n"):
@@ -325,6 +340,32 @@ class CliTest(ConfigTestCase):
         self.assertEqual(rows["memory"]["source"], "default")
         self.assertEqual(rows["tailscale"]["type"], "boolean")
 
+    def test_idle_stop_is_off_by_default(self):
+        self.assertEqual(self.up()["idle_stop"], 0)
+
+    def test_flag_is_passed_in_seconds(self):
+        self.assertEqual(self.up("--idle-stop=20m")["idle_stop"], 1200)
+
+    def test_file_sets_it_and_off_turns_it_off(self):
+        self.write_config('[sandbox.up]\nidle_stop = "1h"\n')
+        self.assertEqual(self.up()["idle_stop"], 3600)
+        self.assertEqual(self.up("--idle-stop=off")["idle_stop"], 0)
+
+    def test_bad_flags_are_refused_before_anything_starts(self):
+        for flag in ("--idle-stop=20", "--idle-stop", "--idle-stop=10s"):
+            with self.subTest(flag=flag):
+                with self.assertRaisesRegex(Exception, "idle-stop"):
+                    self.run_cli("sandbox", "up", flag)
+        self.backend.create_sandbox.assert_not_called()
+
+    def test_config_show_lists_it(self):
+        rows = {
+            row["key"]: row
+            for row in map(json.loads, self.run_cli("config", "show").splitlines())
+        }
+        self.assertEqual(rows["idle_stop"]["value"], "off")
+        self.assertEqual(rows["idle_stop"]["type"], "duration")
+
 
 class EndToEndTest(ConfigTestCase):
     def test_file_values_reach_modal(self):
@@ -334,6 +375,14 @@ class EndToEndTest(ConfigTestCase):
         self.assertEqual(kwargs["timeout"], 600)
         self.assertEqual(kwargs["memory"], 1024)
         self.assertEqual(kwargs["cpu"], 2.0)
+
+    def test_idle_stop_from_the_file_reaches_the_record_and_the_watcher(self):
+        self.write_config('[sandbox.up]\nidle_stop = "2m"\n')
+        self.run_cli("sandbox", "up", "--name=dev")
+        args = self.create.aio.call_args.args
+        self.assertEqual(args[5:7], ("120", "20"))
+        self.assertIn("busy()", args[7])
+        self.assertEqual(self.stored("dev")["options"]["idle_stop"], 120)
 
 
 if __name__ == "__main__":

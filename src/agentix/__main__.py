@@ -60,6 +60,7 @@ def _create_sandbox(
     no_snapshot: bool | None = None,
     ephemeral: bool = False,
     repo: str = "",
+    idle_stop: str | None = None,
 ):
     """Start a sandbox under NAME, or under a new name such as brisk-otter.
 
@@ -75,8 +76,12 @@ def _create_sandbox(
     credentials into NAME in the image's working directory, checks out REF,
     runs `direnv allow` if it has an .envrc, and starts commands and logins
     there. It replaces --workdir.
+    --idle-stop=DURATION, such as 20m, stops the sandbox by itself, with its
+    exit snapshot, once no SSH session and no command started through
+    agentix has run in it for that long; --idle-stop=off turns off a
+    config-file default. See docs/idle-stop.md.
     """
-    from . import config, names, ssh_input
+    from . import config, idle, names, ssh_input
 
     options = config.up_options(
         image_name=image_name,
@@ -87,6 +92,7 @@ def _create_sandbox(
         cpu=cpu,
         tailscale=tailscale,
         no_snapshot=no_snapshot,
+        idle_stop=idle_stop,
         ignore_file=("workdir",) if repo else (),
     )
     # Refuse before anything is created.
@@ -109,6 +115,7 @@ def _create_sandbox(
         exit_snapshot=not (options["no_snapshot"] or ephemeral),
         ephemeral=ephemeral,
         repo=repo,
+        idle_stop=idle.seconds(options["idle_stop"]),
     )
 
 

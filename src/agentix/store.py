@@ -23,6 +23,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from . import recordfiles
 from .errors import NotFound, OperationFailed
+from .idle import IDLE_EXIT_CODE
 from .session import Session
 
 # Modal ends a sandbox at its timeout with this exit code.
@@ -43,6 +44,9 @@ class Options(TypedDict):
     # False after `sandbox up --no-snapshot`: Modal saves nothing when a
     # sandbox of the name ends. Older records lack it.
     exit_snapshot: NotRequired[bool]
+    # Seconds with nothing running after which the sandbox stops itself, as
+    # set with `sandbox up --idle-stop`; 0 or missing for never.
+    idle_stop: NotRequired[int]
 
 
 class SandboxRecord(TypedDict):
@@ -59,9 +63,10 @@ class SnapshotRecord(TypedDict):
     created_at: str
     sandbox_id: str
     # "manual" from `sandbox snapshot`; "down" when agentix ended the sandbox;
-    # "timeout" when it reached its timeout; "exit" when it ended otherwise,
-    # and `created_at` is when agentix first saw it had ended.
-    kind: Literal["manual", "down", "timeout", "exit"]
+    # "timeout" when it reached its timeout; "idle" when it stopped itself
+    # after its idle stop; "exit" when it ended otherwise. For "idle" and
+    # "exit", `created_at` is when agentix first saw it had ended.
+    kind: Literal["manual", "down", "timeout", "idle", "exit"]
 
 
 class Record(TypedDict):
@@ -247,7 +252,7 @@ def add_snapshot(
     record: Record,
     snapshot_id: str,
     sandbox_id: str,
-    kind: Literal["manual", "down", "timeout", "exit"],
+    kind: Literal["manual", "down", "timeout", "idle", "exit"],
     created_at: str = "",
 ) -> SnapshotRecord:
     snapshot: SnapshotRecord = {
@@ -319,6 +324,8 @@ def record_exit(
         started = dt.datetime.fromisoformat(sandbox["started_at"])
         deadline = started + dt.timedelta(seconds=record["options"]["timeout"])
         kind, created_at = "timeout", min(deadline.isoformat(timespec="seconds"), now())
+    elif exit_code == IDLE_EXIT_CODE and record["options"].get("idle_stop"):
+        kind, created_at = "idle", now()
     else:
         kind, created_at = "exit", now()
     add_snapshot(record, snapshot_id, sandbox["id"], kind, created_at)
