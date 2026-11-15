@@ -247,6 +247,18 @@ def _checks() -> list[str]:
         # The harness wrappers answer --version without 1Password.
         _if_listed("codex", "codex --version > /dev/null"),
         _if_listed("pi", "pi --version > /dev/null"),
+        # pi starts with its packages without the network: each npm: source
+        # in its settings is where `pi install` would have put it.
+        _if_listed(
+            "pi",
+            'for name in $(jq -r \'.packages[] | strings | select(startswith("npm:")) '
+            '| ltrimstr("npm:")\' /root/.pi/agent/settings.json); do '
+            'test -s "/root/.pi/agent/npm/node_modules/$name/package.json" '
+            '|| { echo "pi package not installed: $name"; exit 1; }; done',
+        ),
+        # The logins come from 1Password when codex and pi start, never from
+        # the image.
+        "test ! -e /root/.codex/auth.json && test ! -e /root/.pi/agent/auth.json",
         _if_listed("agent-auth-sync", "agent-auth-sync --version > /dev/null"),
         'test "$(locale charmap)" = UTF-8',
         # A login shell started inside an SSH command keeps the Nix profile.

@@ -1,0 +1,12 @@
+{
+  "name": "pi-extensions",
+  "private": true,
+  "dependencies": {
+    "@nothumanwork/pi-background-compaction": "0.1.1",
+    "@nothumanwork/pi-fast": "0.1.1",
+    "@nothumanwork/pi-idle-compaction": "0.1.0",
+    "@nothumanwork/pi-tps": "0.1.0",
+    "@nothumanwork/pi-worktree": "0.1.0",
+    "pi-open-tui": "0.4.6"
+  }
+}

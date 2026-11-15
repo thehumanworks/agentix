@@ -26,6 +26,7 @@ Each profile is one output of `flake.nix`.
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, Codex, pi, 1Password, the editor, comma and nix-index. `op-run.nix` builds the harness wrappers that get their credentials from 1Password. `core.nix` declares the options several modules share |
 | `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, the C compiler, the headless browser, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package, among them `agentix-sync.sh`, which the host's agentix command also runs |
+| `home-manager/modules/pi-packages/` | The npm package and lock file of the pi packages that `pi.nix` installs |
 | `packages/` | Packages the flake builds on every system: `agentix-sync` (`nix run .#agentix-sync`) |
 | `oci/` | The sandbox profile as an OCI image, which the Modal image is made from; see [OCI image](#oci-image) |
 
@@ -361,6 +362,30 @@ with the `gh` and `gh-lf` wrappers.
   leaves with their symbol tables, and drops its `logs_client` (about
   195 MiB less; `codex doctor` reports the same). Turn
   `agentix.codex.enable` or `agentix.pi.enable` off to leave either out.
+- pi's settings, in `~/.pi/agent/settings.json`, which pi can write to
+  (Home Manager's `mutableSettings`; the declared values win when Home
+  Manager activates): the default model `openai/gpt-6-astra`, the scoped
+  models that Ctrl+P cycles through, `openai/gpt-6-astra` and
+  `openai/gpt-6.1-sol`, and six pi packages: `npm:pi-open-tui`,
+  `npm:@nothumanwork/pi-tps`, `npm:@nothumanwork/pi-background-compaction`,
+  `npm:@nothumanwork/pi-idle-compaction`, `npm:@nothumanwork/pi-fast`, and
+  `npm:@nothumanwork/pi-worktree`. `~/.pi/agent/models.json`, read-only,
+  raises both models' context window from the catalog's 272000 to 400000
+  tokens. The packages are built from
+  `modules/pi-packages/package-lock.json` by their npm hashes and laid out
+  in `~/.pi/agent/npm`, where `pi install` puts them, as links into the
+  store, so pi starts with them without the network and the image holds them
+  once (about 80 MiB, most of it the provider SDKs that
+  `@earendil-works/pi-durable` depends on). That directory stays writable:
+  `pi install` and `pi update --extensions` work when npm can reach the
+  registry, and replace the links with copies. Activation
+  (`modules/scripts/pi-packages.sh`) replaces only its own links: packages
+  that `pi install` or `pi update` put there stay, and so do their entries
+  in `package.json`; a `package.json` that is not valid is written again,
+  with a warning. To move the packages on, change the versions in
+  `modules/pi-packages/package.json`, run
+  `npm install --package-lock-only --legacy-peer-deps` there, and rebuild
+  the image.
 - Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
   Claude's LSP tool run the same builds. Claude has the Python, TypeScript,
@@ -415,7 +440,10 @@ nix flake check
 formatting, runs statix and deadnix, and builds the profiles of the current
 system, the `linux` example included on x86_64. On Linux it also evaluates
 the sandbox profile with each SSH engine's module turned off in turn, and both
-off; see [SSH engines](#ssh-engines). On Linux it also builds the OCI image's
+off; see [SSH engines](#ssh-engines). On Linux, `wrapper-token`
+(`checks/wrapper-token.nix`) runs copies of the sandbox's `claude`, `codex`,
+and `pi` wrappers with a stand-in `op` and fails if the harness would see the
+1Password token that `op` loads from the token file. It also builds the OCI image's
 activated root and layer list,
 which takes seconds once the profile is built, but not the image stream itself.
 Add `--all-systems --no-build` to evaluate the Mac and ARM profiles and the ARM
