@@ -20,9 +20,47 @@ in
     enable = lib.mkEnableOption ''
       the modules for root in a Modal sandbox: the base commands, the
       1Password token file, Claude's sandbox brief, the SSH working directory,
-      the manifest, Rex, and Tailscale. Each has its own
+      the manifest, Rex, OpenSSH, and Tailscale. Each has its own
       `agentix.sandbox.<name>.enable`, which defaults to this value
     '';
+
+    accounts = lib.mkOption {
+      type = lib.types.attrsOf (
+        lib.types.submodule {
+          options = {
+            uid = lib.mkOption {
+              type = lib.types.ints.positive;
+              description = "The user ID, which is also the ID of the account's group.";
+            };
+            description = lib.mkOption {
+              type = lib.types.str;
+              description = "The comment field of the account in /etc/passwd.";
+            };
+            home = lib.mkOption {
+              type = lib.types.str;
+              default = "/var/empty";
+              description = "The home directory, which the image creates, owned by root.";
+            };
+          };
+        }
+      );
+      default = { };
+      example = lib.literalExpression ''
+        {
+          sshd = {
+            uid = 74;
+            description = "SSH privilege separation";
+          };
+        }
+      '';
+      description = ''
+        System accounts that the enabled modules need, each with a group of
+        the same name and ID, no password, and no login shell. Home Manager
+        cannot create accounts: the OCI image in nix/oci writes these to
+        /etc/passwd, /etc/group, and /etc/shadow, after root and before
+        nobody, and creates their home directories.
+      '';
+    };
 
     paths = {
       workdir = sharedPath "workdir" "The working directory of the image, where SSH logins start.";

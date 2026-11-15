@@ -77,6 +77,8 @@
           system,
           profile,
           user,
+          # Settings on top of the profile, for the checks below.
+          modules ? [ ],
         }:
         home-manager.lib.homeManagerConfiguration {
           pkgs = pkgsFor.${system};
@@ -85,7 +87,101 @@
             self.homeManagerModules.default
             profile
             user
-          ];
+          ]
+          ++ modules;
+        };
+
+      # The sandbox home of each Linux system, which the OCI image holds.
+      sandboxHomes = {
+        x86_64-linux = "modal";
+        aarch64-linux = "modal-arm";
+      };
+
+      # Each SSH engine has a module of its own. These checks evaluate the
+      # sandbox profile with each engine's module on and off, and fail when a
+      # module that is off still installs its package, lists its commands in
+      # the manifest, or adds its accounts to the image, or when one that is on
+      # does not. The profile itself must have both engines. Evaluating the
+      # generation and the OCI image is enough; nothing of them is built.
+      sshEngineChecks =
+        system:
+        let
+          pkgs = pkgsFor.${system};
+          name = sandboxHomes.${system};
+          engines = {
+            tailscale = {
+              package = pkgs.tailscale;
+              commands = [
+                "tailscale"
+                "ts"
+              ];
+              accounts = [ ];
+            };
+            openssh = {
+              package = pkgs.openssh;
+              commands = [
+                "scp"
+                "sftp"
+                "ssh"
+                "ssh-keygen"
+                "sshd"
+              ];
+              accounts = [ "sshd" ];
+            };
+          };
+          check =
+            variant: on: home:
+            let
+              inherit (home.config.agentix) commands sandbox;
+              installed = map (package: package.outPath) home.config.home.packages;
+              expect =
+                engine: what: found:
+                let
+                  enabled = lib.elem engine on;
+                in
+                lib.assertMsg (found == enabled) (
+                  "${variant}: with the ${engine} module "
+                  + (if enabled then "on, ${what} is missing" else "off, ${what} is still there")
+                );
+              results = lib.concatLists (
+                lib.mapAttrsToList (
+                  engine: spec:
+                  [ (expect engine spec.package.name (lib.elem spec.package.outPath installed)) ]
+                  ++ map (command: expect engine "the command ${command}" (lib.elem command commands)) spec.commands
+                  ++ map (
+                    account: expect engine "the account ${account}" (sandbox.accounts ? ${account})
+                  ) spec.accounts
+                ) engines
+              );
+            in
+            assert lib.all lib.id results;
+            pkgs.writeText "agentix-ssh-${variant}" (
+              builtins.unsafeDiscardStringContext ''
+                ${home.activationPackage.drvPath}
+                ${(import ./oci { inherit pkgs home; }).drvPath}
+              ''
+            );
+          variant =
+            on:
+            mkHome (
+              homes.${name}
+              // {
+                modules = [
+                  {
+                    agentix.sandbox = lib.mapAttrs (engine: _: { enable = lib.elem engine on; }) engines;
+                  }
+                ];
+              }
+            );
+        in
+        {
+          ssh-engines = check "profile" [
+            "openssh"
+            "tailscale"
+          ] self.homeConfigurations.${name};
+          ssh-openssh-only = check "openssh-only" [ "openssh" ] (variant [ "openssh" ]);
+          ssh-tailscale-only = check "tailscale-only" [ "tailscale" ] (variant [ "tailscale" ]);
+          ssh-none = check "none" [ ] (variant [ ]);
         };
     in
     {
@@ -96,18 +192,12 @@
 
       # The sandbox profile as an OCI image for Docker, Podman, and other
       # hosts: `nix build .#oci` on Linux. See oci/default.nix.
-      packages =
-        lib.mapAttrs
-          (system: name: {
-            oci = import ./oci {
-              pkgs = pkgsFor.${system};
-              home = self.homeConfigurations.${name};
-            };
-          })
-          {
-            x86_64-linux = "modal";
-            aarch64-linux = "modal-arm";
-          };
+      packages = lib.mapAttrs (system: name: {
+        oci = import ./oci {
+          pkgs = pkgsFor.${system};
+          home = self.homeConfigurations.${name};
+        };
+      }) sandboxHomes;
 
       # `nix fmt` formats every Nix file under this directory. The root is tied
       # to flake.nix: outside a Git checkout treefmt otherwise picks its own
@@ -142,6 +232,7 @@
         ) (lib.filterAttrs (_: home: home.system == system) homes)
         # Builds the image's activated root and layer list, not its layers.
         // self.packages.${system} or { }
+        // lib.optionalAttrs (sandboxHomes ? ${system}) (sshEngineChecks system)
       );
     };
 }

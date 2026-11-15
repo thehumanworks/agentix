@@ -32,6 +32,7 @@ in
   sandbox-base-commands = ./modules/sandbox/base-commands.nix;
   sandbox-manifest = ./modules/sandbox/manifest.nix;
   sandbox-op-token = ./modules/sandbox/op-token.nix;
+  sandbox-openssh = ./modules/sandbox/openssh.nix;
   sandbox-tailscale = ./modules/sandbox/tailscale.nix;
   sandbox-workdir = ./modules/sandbox/workdir.nix;
 
@@ -40,6 +41,7 @@ in
     ./modules/sandbox/claude.nix
     ./modules/sandbox/manifest.nix
     ./modules/sandbox/op-token.nix
+    ./modules/sandbox/openssh.nix
     sandbox-rex
     ./modules/sandbox/tailscale.nix
     ./modules/sandbox/workdir.nix

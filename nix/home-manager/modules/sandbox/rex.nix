@@ -34,7 +34,8 @@
     # Home Manager writes ~/.ssh/config only when this is on. The guard there
     # keeps ssh from a Rex terminal from sending TERM=xterm-rex to hosts that
     # lack the entry. With both the entry and the guard in place, Rex terminals
-    # use xterm-rex; otherwise they fall back to xterm-256color.
+    # use xterm-rex; otherwise they fall back to xterm-256color. This installs
+    # no ssh client; ./openssh.nix does, and without it the guard is unused.
     programs.ssh = {
       enable = true;
       enableDefaultConfig = false;

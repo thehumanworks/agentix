@@ -20,7 +20,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
 | `home-manager/users/` | One file per person: the Git name and emails |
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
-| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
+| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
 | `oci/` | The sandbox profile as an OCI image, which the Modal image is made from; see [OCI image](#oci-image) |
 
@@ -48,8 +48,9 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | `agentix.sandbox.claude.enable` | `sandbox/claude.nix` | Claude's sandbox brief and trusted directories |
 | `agentix.sandbox.manifest.enable` | `sandbox/manifest.nix` | The manifest of commands and shared paths |
 | `agentix.sandbox.opToken.enable` | `sandbox/op-token.nix` | An `op` that loads the token file a sandbox stores |
+| `agentix.sandbox.openssh.enable` | `sandbox/openssh.nix` | `sshd` and `ssh-keygen` for `sandbox ssh start --engine=openssh`, the `ssh`, `scp`, and `sftp` clients, and the image's `sshd` account |
 | `agentix.sandbox.rex.enable` | `sandbox/rex.nix` | Rex, its terminfo entry, and its ssh guard |
-| `agentix.sandbox.tailscale.enable` | `sandbox/tailscale.nix` | Tailscale and the `ts` wrapper |
+| `agentix.sandbox.tailscale.enable` | `sandbox/tailscale.nix` | Tailscale, for `sandbox ssh start --engine=tailscale`, and the `ts` wrapper |
 | `agentix.sandbox.workdir.enable` | `sandbox/workdir.nix` | The start of SSH sessions in the working directory |
 
 Settings that a person or another module provides:
@@ -64,6 +65,9 @@ Settings that a person or another module provides:
 - `agentix.commands`: the commands the modules put on PATH. The manifest lists
   them and the image build checks each. `tools.nix` takes the main command of
   each of its packages, so a tool added there is checked too.
+- `agentix.sandbox.accounts`: system accounts that a module needs, such as
+  `sshd`. Home Manager cannot add accounts, so the OCI image writes them to
+  `/etc/passwd`, `/etc/group`, and `/etc/shadow`.
 - `agentix.sandbox.paths` and `agentix.sandbox.manifestFile`: read-only, from
   `sandbox.toml`.
 - `agentix.op.package`, `agentix.op.tokenFile`, and
@@ -80,8 +84,9 @@ To add a module here:
 3. If it uses a flake input, write it as `{ inputs }: { config, lib, ... }: ...`
    and list it with `withInputs` in `exports.nix`. Otherwise list the path.
    Add it to `default` there and give it a name of its own.
-4. List any unfree package it installs in `agentix.unfreePackages`, and the
-   commands that agents rely on in `agentix.commands`.
+4. List any unfree package it installs in `agentix.unfreePackages`, the
+   commands that agents rely on in `agentix.commands`, and any system account
+   it needs in `agentix.sandbox.accounts`.
 5. Stage the new file (flakes only see files known to Git) and run
    `nix flake check`.
 
@@ -122,8 +127,9 @@ not resolve to it on the image's `PATH`, or if the paths differ from the ones
 The flake exports `homeManagerModules.default`, which imports every module,
 and one module per concern: `"1password"`, `claude-code`, `git`,
 `language-servers`, `nixvim`, `tools`, `sandbox-base-commands`,
-`sandbox-claude`, `sandbox-op-token`,
-`sandbox-rex`, and `sandbox-tailscale`. Each brings the modules it depends on.
+`sandbox-claude`, `sandbox-manifest`, `sandbox-op-token`, `sandbox-openssh`,
+`sandbox-rex`, `sandbox-tailscale`, and `sandbox-workdir`. Each brings the
+modules it depends on.
 The modules use this flake's pinned inputs, not those of the flake that imports
 them.
 
@@ -215,6 +221,8 @@ modules you have no such items for.
   commands it runs do not inherit it and get secrets through `op`. A rule also
   stops Claude reading the token file. The commands still run as root, so this
   prevents accidental exposure and is not a security boundary.
+- OpenSSH and Tailscale, for the two SSH engines of `agentix sandbox ssh`,
+  each in a module of its own. See [SSH engines](#ssh-engines).
 - Rex, the terminal multiplexer, with its terminfo entry and ssh guard. See
   [Rex in sandboxes](#rex-in-sandboxes).
 - `~/.nix-profile/share/agentix/manifest.json`, which lists the commands the
@@ -233,7 +241,8 @@ nix flake check
 
 `nix fmt` formats every Nix file with nixfmt. `nix flake check` verifies the
 formatting, runs statix and deadnix, and builds the profiles of the current
-system. On Linux it also builds the OCI image's activated root and layer list,
+system. On Linux it also evaluates the sandbox profile with each SSH engine's
+module turned off in turn, and both off; see [SSH engines](#ssh-engines). On Linux it also builds the OCI image's activated root and layer list,
 which takes seconds once the profile is built, but not the image stream itself.
 Add `--all-systems --no-build` to evaluate the Mac and ARM profiles and the ARM
 image too; without `--no-build`, Nix stops at the first check it cannot build
@@ -354,7 +363,9 @@ The image holds:
   registers every store path in the image, so `nix run`, `nix profile`,
   `home-manager switch`, and `nix store gc` work and keep the image intact.
 - This flake in `/root/.config/home-manager`, as on Modal.
-- `/etc` files for root and an `sshd` account, `/bin/sh`, `/usr/bin/env`, the
+- `/etc` files for root, `nobody`, and the accounts in
+  `agentix.sandbox.accounts`, which is `sshd` while the OpenSSH module is on,
+  `/bin/sh`, `/usr/bin/env`, the
   dynamic loader at its usual path for binaries built elsewhere, and
   `/workdir`. `/etc/bashrc` puts the Nix profile on `PATH` for
   `ssh HOST COMMAND`, as the Nix installer's hook does on other distributions.
@@ -445,6 +456,39 @@ CI installs the same release. Moving it builds the image's root again, but
 the image's own Nix follows `flake.lock`.
 
 See the [Home Manager manual](https://nix-community.github.io/home-manager/nix-flakes.html).
+
+## SSH engines
+
+`agentix sandbox ssh start` reaches a sandbox through one of two engines,
+and each has a module: `--engine=tailscale`, the default, needs
+`agentix.sandbox.tailscale`, and `--engine=openssh` needs
+`agentix.sandbox.openssh`. Both follow `agentix.sandbox.enable`, so the
+sandbox profile has both, and either can be turned off without the other:
+
+| Tailscale | OpenSSH | The image has |
+| --- | --- | --- |
+| on | on | Both engines, `ts`, `tailscale`, `sshd`, `ssh-keygen`, the `ssh` client, and the `sshd` account |
+| on | off | Tailscale SSH and `ts`, but no `sshd`, `ssh-keygen`, or `ssh` on `PATH`, and no `sshd` account |
+| off | on | OpenSSH, but no `ts` or `tailscale` |
+| off | off | No SSH engine; `sandbox exec` still works |
+
+Tailscale SSH's server is part of `tailscaled` and needs nothing from
+OpenSSH, `sftp` included. `ts ssh` runs the OpenSSH client, which the `ts`
+wrapper carries on its own `PATH`, so it works with the OpenSSH module off.
+An `scp -O` to the sandbox, which runs `scp` there instead of SFTP, needs the
+OpenSSH module.
+
+With the OpenSSH module off, `sandbox ssh start --engine=openssh` fails with
+"This sandbox's image has no OpenSSH: agentix.sandbox.openssh is off in its
+Home Manager profile." before it asks for a key or writes anything, and
+`status` and `stop` report a stopped listener. With the Tailscale module
+off, the image has no `ts`, so `sandbox ssh start` with the Tailscale engine
+and `sandbox up --tailscale` fail.
+
+The image build checks OpenSSH only when the manifest lists `sshd`, and
+Rex's ssh guard only when it lists `ssh`. `nix flake check` fails if the
+sandbox profile stops listing them, or if a module that is off still
+installs its package, lists its commands, or adds its account.
 
 ## Tailscale in Linux sandboxes
 

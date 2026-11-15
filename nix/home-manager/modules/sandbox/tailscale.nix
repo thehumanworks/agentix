@@ -24,9 +24,11 @@
     "tailscale"
   ];
 
+  # Tailscale SSH's server is part of tailscaled and needs nothing from
+  # OpenSSH, sftp included. sshd, ssh-keygen, and the ssh client on PATH come
+  # from ./openssh.nix, which has a switch of its own.
   config.home.packages = lib.mkIf config.agentix.sandbox.tailscale.enable [
     pkgs.tailscale
-    pkgs.openssh
     (pkgs.writeShellApplication {
       name = "ts";
       runtimeInputs = [
@@ -35,6 +37,9 @@
         pkgs.coreutils
         pkgs.util-linux
         pkgs.jq
+        # `ts ssh` runs `tailscale ssh`, which runs the OpenSSH client with
+        # tailscale as its ProxyCommand. This puts the client on the PATH of
+        # ts alone, so `ts ssh` works with agentix.sandbox.openssh off.
         pkgs.openssh
       ];
       text = builtins.readFile ../scripts/ts.sh;

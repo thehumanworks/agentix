@@ -8,6 +8,18 @@ runtime=/root/.local/state/agentix/openssh
 config=$runtime/sshd_config
 pidfile=$runtime/sshd.pid
 
+# The image has sshd and ssh-keygen when its Home Manager profile has the
+# OpenSSH module on. Say so before asking for a key or writing any state.
+# Without them nothing can be listening, so stop and status still answer.
+if [[ $action == start ]]; then
+  for command in sshd ssh-keygen; do
+    if ! command -v "$command" >/dev/null; then
+      echo "This sandbox's image has no OpenSSH: agentix.sandbox.openssh is off in its Home Manager profile." >&2
+      exit 1
+    fi
+  done
+fi
+
 mkdir -p "$runtime"
 chmod 700 "$runtime"
 exec 9>"$runtime/lock"
@@ -32,6 +44,9 @@ case "$action" in
       if [[ ! -f $runtime/host_key ]]; then
         ssh-keygen -q -t ed25519 -N '' -f "$runtime/host_key"
       fi
+      # The image has the account and /var/empty; see
+      # nix/home-manager/modules/sandbox/openssh.nix. Images built on Debian
+      # could lack the account.
       mkdir -p /run/sshd /var/empty
       if ! id sshd >/dev/null 2>&1; then
         /usr/sbin/useradd --system --no-create-home --home-dir /run/sshd \
@@ -90,7 +105,7 @@ esac
 state=stopped
 if running; then state=running; fi
 fingerprint=""
-if [[ -f $runtime/host_key.pub ]]; then
+if [[ -f $runtime/host_key.pub ]] && command -v ssh-keygen >/dev/null; then
   fingerprint=$(ssh-keygen -l -f "$runtime/host_key.pub" | cut -d ' ' -f 2)
 fi
 jq -cn --arg status "$state" --arg host_key_fingerprint "$fingerprint" \

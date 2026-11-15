@@ -111,6 +111,10 @@ uv run agentix sandbox ssh status sb-REPLACE --engine=openssh
 uv run agentix sandbox ssh stop sb-REPLACE --engine=openssh
 ```
 
+The image has OpenSSH while the Home Manager module `agentix.sandbox.openssh`
+is on, as it is by default; each engine has a module of its own, so either
+can be turned off. See [SSH engines](nix/README.md#ssh-engines).
+
 New sandboxes reserve TCP port 22 for this tunnel. Sandboxes created before
 this change need to be replaced to use OpenSSH; Tailscale still works on them.
 There is no SSH listener until you start one. SSH encrypts the connection and

@@ -1,9 +1,12 @@
 import io
+import json
 import re
 import shutil
+import subprocess
 import tarfile
 import tempfile
 import tomllib
+import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -229,3 +232,42 @@ class SharedEnvironmentTests(ModalTestCase):
         self.assertIn("Env = lib.mapAttrsToList", oci)
         self.assertIn("shared.env", oci)
         self.assertIn("/root/.nix-profile/bin", layout.IMAGE_ENV["PATH"])
+
+
+@unittest.skipUnless(shutil.which("jq"), "jq reads the manifest in these checks")
+class ModuleCheckTests(unittest.TestCase):
+    """Checks of a module that a profile may turn off follow the manifest."""
+
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.manifest = Path(directory.name) / "manifest.json"
+        patcher = patch("agentix.image.MANIFEST_FILE", str(self.manifest))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_check(self, commands, check):
+        self.manifest.write_text(json.dumps({"commands": commands}))
+        return subprocess.run(
+            ["bash", "-c", image._if_listed("sshd", check)],
+            capture_output=True,
+            text=True,
+        )
+
+    def test_the_check_runs_when_the_manifest_lists_the_command(self):
+        result = self.run_check(["ssh", "sshd"], "echo ran; exit 3")
+        self.assertEqual((result.returncode, result.stdout), (3, "ran\n"))
+
+    def test_the_check_is_skipped_when_the_module_is_off(self):
+        result = self.run_check(["ts", "tailscale"], "echo ran; exit 3")
+        self.assertEqual((result.returncode, result.stdout), (0, ""))
+
+    def test_openssh_checks_run_only_with_openssh(self):
+        checks = image._checks()
+        self.assertNotIn("id sshd > /dev/null", checks)
+        # sshd -t fails without the sshd account or /var/empty.
+        (sshd,) = [check for check in checks if "-t -f /dev/null" in check]
+        self.assertTrue(sshd.startswith("if jq -e --arg name sshd "))
+        # Rex's ssh guard is checked with the client that OpenSSH installs.
+        (guard,) = [check for check in checks if "ssh -G" in check]
+        self.assertTrue(guard.startswith("if jq -e --arg name ssh "))

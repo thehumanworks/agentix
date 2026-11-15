@@ -19,6 +19,15 @@ let
   homePath = home.config.home.path;
   # From nix/sandbox.toml, which the agentix command reads too.
   inherit (home.config.agentix.sandbox) paths manifestFile;
+  # The system accounts of the enabled modules, such as sshd for OpenSSH.
+  accounts = lib.mapAttrsToList (
+    name: account:
+    account
+    // {
+      inherit name;
+      id = toString account.uid;
+    }
+  ) home.config.agentix.sandbox.accounts;
   shared = lib.importTOML ../sandbox.toml;
   # Where other distributions keep the dynamic loader.
   loaderDir = if pkgs.stdenv.hostPlatform.isx86_64 then "lib64" else "lib";
@@ -79,25 +88,26 @@ let
   # the ones in /etc stay writable; links into the store stay links.
   rootfs =
     let
-      # The sshd account lets `agentix sandbox ssh start --engine=openssh`
-      # skip useradd, which the image does not have. `*` keeps root unlocked
-      # for public-key SSH logins, as on Debian.
-      passwd = pkgs.writeText "passwd" ''
-        root:x:0:0:root:/root:/bin/bash
-        sshd:x:74:74:SSH privilege separation:/var/empty:/bin/false
-        nobody:x:65534:65534:Nobody:/var/empty:/bin/false
-      '';
-      group = pkgs.writeText "group" ''
-        root:x:0:
-        tty:x:5:
-        sshd:x:74:
-        nogroup:x:65534:
-      '';
-      shadow = pkgs.writeText "shadow" ''
-        root:*:1::::::
-        sshd:*:1::::::
-        nobody:*:1::::::
-      '';
+      # The image has no useradd, so it writes the accounts that the enabled
+      # modules need, such as sshd, after root and before nobody. `*` keeps
+      # root unlocked for public-key SSH logins, as on Debian.
+      etcFile = name: lines: pkgs.writeText name (lib.concatLines lines);
+      passwd = etcFile "passwd" (
+        [ "root:x:0:0:root:/root:/bin/bash" ]
+        ++ map (a: "${a.name}:x:${a.id}:${a.id}:${a.description}:${a.home}:/bin/false") accounts
+        ++ [ "nobody:x:65534:65534:Nobody:/var/empty:/bin/false" ]
+      );
+      group = etcFile "group" (
+        [
+          "root:x:0:"
+          "tty:x:5:"
+        ]
+        ++ map (a: "${a.name}:x:${a.id}:") accounts
+        ++ [ "nogroup:x:65534:" ]
+      );
+      shadow = etcFile "shadow" (
+        [ "root:*:1::::::" ] ++ map (a: "${a.name}:*:1::::::") accounts ++ [ "nobody:*:1::::::" ]
+      );
       nsswitch = pkgs.writeText "nsswitch.conf" ''
         passwd: files
         group: files
@@ -214,8 +224,10 @@ pkgs.dockerTools.streamLayeredImage {
     cp -rP ${rootfs}/. /
     chmod -R u+w /bin /etc /usr /${loaderDir}
     chmod 600 /etc/shadow
+    # /var/empty, nobody's home, is also where sshd drops privileges.
     mkdir -p /root /tmp /var/tmp /var/empty /run ${paths.workdir} /opt/agentix \
-      /nix/var/nix/profiles/per-user/root /nix/var/nix/gcroots/agentix
+      /nix/var/nix/profiles/per-user/root /nix/var/nix/gcroots/agentix \
+      ${lib.escapeShellArgs (lib.unique (map (a: a.home) accounts))}
     chmod 700 /root
     chmod 1777 /tmp /var/tmp
 

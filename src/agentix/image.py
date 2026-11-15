@@ -191,6 +191,17 @@ def _finish(rootfs: modal.Image, force_build: bool) -> modal.Image:
 _HTTPS_CHECK = "https://cache.nixos.org/nix-cache-info"
 
 
+def _if_listed(command: str, check: str) -> str:
+    """CHECK, run when the manifest lists COMMAND, whose module may be off.
+
+    `nix flake check` fails if the modal profile stops listing it.
+    """
+    return (
+        f"if jq -e --arg name {shlex.quote(command)} '.commands | index($name)' "
+        f"{MANIFEST_FILE} > /dev/null; then {check}; fi"
+    )
+
+
 def _checks() -> list[str]:
     """Commands that fail the build when the image does not work on Modal.
 
@@ -222,7 +233,14 @@ def _checks() -> list[str]:
         'for name in $commands; do test "$(command -v "$name")" = '
         '"/root/.nix-profile/bin/$name" '
         '|| { echo "not in the Nix profile: $name"; exit 1; }; done',
-        "id sshd > /dev/null",
+        # With the OpenSSH module on, sshd accepts a configuration, which it
+        # refuses without the sshd account or its directory, /var/empty. The
+        # host key stays in this layer, which is not published.
+        _if_listed(
+            "sshd",
+            "ssh-keygen -q -t ed25519 -N '' -f /tmp/agentix-check-key && "
+            '"$(command -v sshd)" -t -f /dev/null -h /tmp/agentix-check-key',
+        ),
         "home-manager --version",
         "nvim --headless '+lua assert(vim.lsp.config.ty)' +qa",
         "op --version && git --version && uv --version && bun --version",
@@ -240,11 +258,15 @@ def _checks() -> list[str]:
         "/root/.claude/plugins/known_marketplaces.json > /dev/null",
         "nix registry list | grep '^user  *flake:nixpkgs ' > /dev/null",
         # The patched rex binary starts, its terminfo entry resolves, and
-        # the ssh guard is in ~/.ssh/config. None of these starts a server.
+        # the ssh guard is in ~/.ssh/config, for the client that the OpenSSH
+        # module installs. None of these starts a server.
         "rex version > /dev/null",
         "infocmp xterm-rex > /dev/null",
-        "env TERM=xterm-rex ssh -G example.invalid "
-        "| grep -qx 'setenv TERM=xterm-256color'",
+        _if_listed(
+            "ssh",
+            "env TERM=xterm-rex ssh -G example.invalid "
+            "| grep -qx 'setenv TERM=xterm-256color'",
+        ),
         # Each sandbox's rex server makes its own state, including its host
         # ID; none may be baked into the image.
         "test ! -e /root/.local/state/rex",

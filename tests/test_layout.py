@@ -96,6 +96,73 @@ class OpenSSHScriptTests(unittest.TestCase):
         )
 
 
+# What openssh-ssh.sh says when the image has no OpenSSH. The host relays it.
+NO_OPENSSH = (
+    "This sandbox's image has no OpenSSH: "
+    "agentix.sandbox.openssh is off in its Home Manager profile."
+)
+
+
+@unittest.skipUnless(shutil.which("jq"), "jq is required for the sandbox script tests")
+class OpenSSHWithoutModuleTests(unittest.TestCase):
+    """The OpenSSH script in an image whose profile turns its module off."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        self.runtime = self.root / "state"
+        # Every command the script runs before it needs sshd, and neither
+        # sshd nor ssh-keygen. util-linux's flock is not on every host.
+        commands = self.root / "bin"
+        commands.mkdir()
+        for name in ("cat", "chmod", "jq", "mkdir"):
+            (commands / name).symlink_to(shutil.which(name))
+        flock = commands / "flock"
+        flock.write_text("#!/bin/sh\n")
+        flock.chmod(0o755)
+        self.path = str(commands)
+        state = "runtime=/root/.local/state/agentix/openssh"
+        text = ssh._script("openssh")
+        self.assertIn(state, text)
+        self.script = self.root / "openssh-ssh.sh"
+        self.script.write_text(text.replace(state, f"runtime={self.runtime}"))
+        self.bash = shutil.which("bash")
+
+    def run_script(self, *arguments):
+        return subprocess.run(
+            [self.bash, str(self.script), *arguments],
+            env={"PATH": self.path},
+            capture_output=True,
+            text=True,
+        )
+
+    def test_start_says_that_openssh_is_off_and_writes_nothing(self):
+        for arguments in (("start", "ssh-ed25519 public-data"), ("start",)):
+            with self.subTest(arguments=arguments):
+                result = self.run_script(*arguments)
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stderr.strip(), NO_OPENSSH)
+                self.assertFalse(self.runtime.exists())
+
+    def test_the_message_is_one_the_host_tells_apart(self):
+        self.assertNotEqual(NO_OPENSSH, ssh._KEY_REQUIRED)
+        script = (ssh._SCRIPTS / "openssh-ssh.sh").read_text()
+        self.assertIn(f'echo "{NO_OPENSSH}" >&2', script)
+
+    def test_status_and_stop_report_a_stopped_listener(self):
+        # A host key from when the profile had OpenSSH, and no ssh-keygen.
+        self.runtime.mkdir()
+        (self.runtime / "host_key.pub").write_text("ssh-ed25519 old-key\n")
+        for action in ("status", "stop"):
+            with self.subTest(action=action):
+                result = self.run_script(action)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    {"status": "stopped", "host_key_fingerprint": ""},
+                )
+
+
 class WorkdirProfileTests(unittest.TestCase):
     """Run the login script as Home Manager renders it, with its paths in a directory."""
 
