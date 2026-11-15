@@ -281,6 +281,36 @@ class OldSurfaceTest(CliTestCase):
         )
         self.assertEqual(up, self.defaults("_create_sandbox"))
 
+    def test_none_is_not_given_for_every_flag_that_takes_a_value(self):
+        up = self.call(
+            [
+                "sandbox",
+                "up",
+                "--name=None",
+                "--hostname",
+                "None",
+                "--repo=None",
+                "--tailscale=None",
+                "--no-snapshot=None",
+                "--ephemeral=None",
+            ],
+            "_create_sandbox",
+        )
+        self.assertEqual(up, self.defaults("_create_sandbox"))
+        shell = self.call(["sandbox", "shell", "--name=None", "-e=None"], "_shell")
+        self.assertEqual((shell["name"], shell["engine"]), ("", "tailscale"))
+        stop = self.call(
+            ["sandbox", "ssh", "stop", "dev", "--engine=None"], "_ssh_stop"
+        )
+        self.assertEqual(stop["engine"], "tailscale")
+        build = self.call(
+            ["image", "build", "-i=None", "--force-build=None"], "_build_image"
+        )
+        self.assertEqual(build, self.defaults("_build_image"))
+        code, output = self.exit_code("sandbox", "down", "--sandbox-id=None")
+        self.assertEqual(code, 2)
+        self.assertIn("Missing argument 'SANDBOX_ID'", output)
+
     def test_empty_values_and_old_negations(self):
         up = self.call(
             [

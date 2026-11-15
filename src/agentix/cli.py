@@ -33,15 +33,20 @@ BOOLEAN_WORDS = {
 
 
 class NoneIsNotGiven(click.ParamType):
-    """A value where the literal None means "not given", as it did with Fire."""
+    """A value where the literal None means "not given", as it did with Fire.
 
-    def __init__(self, inner: click.ParamType):
+    It then gives `default`: None for an option the config file can set, the
+    option's own default otherwise.
+    """
+
+    def __init__(self, inner: click.ParamType, default: Any = None):
         self.inner = inner
         self.name = inner.name
+        self.default = default
 
     def convert(self, value, param, ctx):
         if value == "None":
-            return None
+            return self.default
         return self.inner.convert(value, param, ctx)
 
 
@@ -57,7 +62,9 @@ def arg(name: str, *short: str, required: bool = True, nargs: int = 1) -> list:
     argument = click.Argument([name], required=False, metavar=shown)
     argument.positional_required = required
     flag = click.Option(
-        ["--" + name.replace("_", "-"), *short, name + "__flag"], hidden=True
+        ["--" + name.replace("_", "-"), *short, name + "__flag"],
+        type=NoneIsNotGiven(click.STRING),
+        hidden=True,
     )
     return [argument, flag]
 
@@ -65,12 +72,10 @@ def arg(name: str, *short: str, required: bool = True, nargs: int = 1) -> list:
 def opt(name: str, *short: str, type: Any = str, default: Any = "", **attrs) -> list:
     """An option that takes a value, as --NAME=VALUE or --NAME VALUE.
 
-    A default of None marks an option that the config file can set: None
-    means "not given", and so does the literal value None, as with Fire.
+    A default of None marks an option that the config file can set. The
+    literal value None means "not given", as with Fire.
     """
-    kind = click.types.convert_type(type)
-    if default is None:
-        kind = NoneIsNotGiven(kind)
+    kind = NoneIsNotGiven(click.types.convert_type(type), default)
     return [click.Option([name, *short], type=kind, default=default, **attrs)]
 
 
@@ -86,8 +91,8 @@ def switch(
 
     Fire took `--NAME=True` and `--NAME=False` (and `--NAME True`), so these
     still work. With `values="words"` it also takes true/false, 1/0 and
-    yes/no in any case; with `values="literal"` only True and False, and
-    click refuses any other value.
+    yes/no in any case, and None, which is the flag not given; with
+    `values="literal"` only True and False, and click refuses any other value.
     """
     decls = [f"{name}/{off}" if off else name, *short]
     option = click.Option(decls, is_flag=True, default=default, **attrs)
@@ -274,6 +279,8 @@ def legacy_args(root: click.Group, args: Sequence[str]) -> list[str]:
             out.append(f"{alias}={value}")
             continue
         mode = getattr(option, "legacy_values", "")
+        if eq and mode == "words" and value == "None":
+            continue  # Fire's --tailscale=None: the flag not given
         if eq and mode != "words" and value not in ("True", "False"):
             out.append(name + eq + value)  # for click to refuse
             continue

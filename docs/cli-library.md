@@ -24,10 +24,11 @@ reach Modal still spend about 400 ms (warm) importing it.
 `tests/test_cli_surface.py` runs every spelling of the old surface (every
 command, positional, and flag, each as `--a-b=V`, `--a-b V`, `--a_b`, the
 Fire short flag as `-x V` and `-x=V`, a positional as `--name=V`, booleans
-as `--x`, `--x=True`, `--x False`, `-x False`, `--nox`, and `=None` on the
-options the config file sets) and checks the call each command's function
-gets. The same 396 spellings were run through the Fire command line of main
-(fac5c20, with `cost`) and gave the same calls, all 396.
+as `--x`, `--x=True`, `--x False`, `-x False`, `--nox`, and `=None`) and
+checks the call each command's function gets. The same 444 spellings were
+run through the Fire command line of main (fac5c20, with `cost`) and gave
+the same calls, all 444; for the 53 `=None` spellings Fire passed None and
+click passes the flag's default, which the functions read the same way.
 
 Behaviour changes:
 
@@ -275,7 +276,11 @@ Spellings that change, and why:
 
 - `--workdir=None` (and `=None` on any config-backed option) was planned to
   be refused; on review it was kept as "not given", as Fire and the README
-  had it.
+  had it. The same holds for every flag that takes a value (`--name=None`
+  is no name), for a positional given as a flag (`--sandbox-id=None` is a
+  missing SANDBOX_ID), and for booleans that took values (`--tailscale=None`).
+  The switches that refused values with Fire (`--yes`, `--detach`, ...)
+  still refuse `=None`.
 - Filling a flag by position (`sandbox up img 3`,
   `sandbox restore dev im-x`): undocumented and the cause of `_prune`'s
   `*extra`; now exit 2, "unexpected extra argument".
