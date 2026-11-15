@@ -97,6 +97,10 @@ in
       shellcheck
       shfmt
 
+      # Checks and encrypts .env files against a project's Envfile; this
+      # repository's pre-commit hook and CI run it (scripts/check_env.py).
+      dotenvx
+
       # Nix formatting and linting; the flake's checks run the same tools.
       # nom shows a build's progress: `nom build`, or `nix build ... |& nom`.
       nixfmt

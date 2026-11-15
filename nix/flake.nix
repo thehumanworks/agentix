@@ -54,6 +54,10 @@
     let
       inherit (nixpkgs) lib;
 
+      # The whole repository, which holds this flake in nix/. Only the
+      # env-check check reads it.
+      repo = self.sourceInfo.outPath;
+
       # One entry per machine type. The profile holds everything that differs;
       # the user file says who commits.
       homes = {
@@ -323,6 +327,31 @@
             inherit pkgs;
             home = self.homeConfigurations.${sandboxHomes.${system}};
           };
+        }
+        // lib.optionalAttrs (builtins.pathExists "${repo}/Envfile") {
+          # The repository's committed env files hold no plaintext and match
+          # its Envfile, and the check's tests pass with the pinned dotenvx.
+          # Skipped where only nix/ is present, as in the image's copy.
+          env-check =
+            pkgs.runCommand "agentix-env-check"
+              {
+                nativeBuildInputs = [
+                  pkgs.dotenvx
+                  pkgs.git
+                  (pkgs.python3.withPackages (ps: [ ps.pytest ]))
+                ];
+              }
+              ''
+                cp -r ${repo} repo
+                chmod -R u+w repo
+                cd repo
+                export HOME=$TMPDIR
+                git init -q
+                git add -A
+                python3 scripts/check_env.py
+                python3 -m pytest -q -p no:cacheprovider tests/test_env_check.py
+                touch $out
+              '';
         }
       );
     };

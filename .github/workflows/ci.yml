@@ -58,6 +58,13 @@ jobs:
       # rejects it. The checkout above is the only earlier step, so ./ loads
       # this commit's action.
       - uses: ./.github/actions/nix # zizmor: ignore[self-repository]
+      # .env is tracked: every committed env file must hold only op://
+      # references or dotenvx ciphertext, and match the Envfile. dotenvx comes
+      # from the flake's nixpkgs pin. The env-check flake check below runs the
+      # same script and its tests.
+      - name: Committed env files hold no plaintext
+        working-directory: .
+        run: nix shell --inputs-from ./nix nixpkgs#dotenvx --command python3 scripts/check_env.py
       # The x86_64, ARM, and Mac profiles and both OCI images, without building.
       - name: Evaluate every system
         run: nix flake check --all-systems --no-build
