@@ -55,6 +55,7 @@ In flight:
 - detached-runs: `sandbox exec --detach`, `sandbox logs RUN`, `sandbox wait RUN`
   (exits with the run's code), `sandbox runs [TARGET] [--clean]`,
   `runner deploy`.
+- sync-workdir: `sandbox sync [NAME] --pull`.
 
 Every flag also works today as `--a_b` and `--a-b`, as `--x=V` and `--x V`;
 booleans as `--x`, `--nox`, `--x=True`/`--x=False`; positionals as
