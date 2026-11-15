@@ -377,7 +377,8 @@ activated root and layer list,
 which takes seconds once the profile is built, but not the image stream itself.
 Add `--all-systems --no-build` to evaluate the Mac and ARM profiles and the ARM
 image too; without `--no-build`, Nix stops at the first check it cannot build
-on this system.
+on this system. CI runs both, and runs `nix flake check` on an ARM runner as
+well; see [ARM Linux](#arm-linux).
 
 ## Modal
 
@@ -419,8 +420,8 @@ home-manager switch --flake /root/.config/home-manager#modal
 
 The first switch downloads the build inputs the image left out. The Modal
 image is always x86_64, so switch to `modal`: `image build` builds only
-`packages.x86_64-linux.oci` and cannot select another system. `modal-arm`
-evaluates, but has never been built. A switch changes that sandbox only; the
+`packages.x86_64-linux.oci` and cannot select another system; `modal-arm`
+is for [ARM Linux](#arm-linux) hosts. A switch changes that sandbox only; the
 published image changes when it is rebuilt.
 
 Modal commands do not load shell startup files, so the image's environment
@@ -451,13 +452,13 @@ Keep the link outside this directory, or add it to `.gitignore`: a `result`
 link inside an unversioned copy would become part of the flake. The image
 is about 2.0 GB unpacked, in 99 layers. The layers follow store paths, so a
 rebuild after a small change reuses most of them. Two builds of one commit
-produce the same image. The ARM image needs an ARM Linux builder and has
-not been built yet; CI only evaluates it.
+produce the same image. The ARM image needs an ARM Linux builder; see
+[ARM Linux](#arm-linux).
 
 On an Apple Silicon Mac, Docker runs the x86_64 image under qemu emulation.
 Commands work, slowly, including `nix run`. Interactive shells do not: qemu
 hides the terminal from the container, so without a command it waits as if
-detached. The ARM image is meant for that case, but is unproven.
+detached. The ARM image is meant for that case, but nobody has run it yet.
 
 Run it:
 
@@ -542,6 +543,50 @@ A minimal `.devcontainer/devcontainer.json` for the loaded image:
 `overrideCommand: false` keeps the image's entry point, which writes the token
 file and keeps the container up. Without it, the devcontainer tools replace
 the entry point.
+
+## ARM Linux
+
+`modal-arm` is the sandbox profile, `home-manager/profiles/sandbox.nix`, for
+aarch64 Linux: the same modules and settings as `modal`, for root, from the
+same pins. `packages.aarch64-linux.oci` is its OCI image, for ARM Linux hosts
+and for Docker on an Apple Silicon Mac. Modal never uses either; the Modal
+image is the x86_64 one.
+
+CI checks both. `nix flake check --all-systems --no-build` evaluates them on
+x86_64, and the `Nix flake check (ARM)` job runs `nix flake check` on an
+`ubuntu-24.04-arm` runner, which builds the profile, the image's activated
+root and layer list, and the SSH engine checks. That job is new: it is
+expected to pass from its first run but has not yet been seen green. The ARM
+OCI image has not been built anywhere else, and nothing runs it yet.
+
+On x86_64 Linux, the profile builds under qemu-user emulation. This is how it
+was first built, in a Modal VM sandbox from the `NIX_BUILDER` image, in
+48 seconds from an empty store (64 local builds; the rest came from
+cache.nixos.org):
+
+```sh
+mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc  # if not mounted
+qemu=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#qemu-user)
+printf '%s' ":qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:$qemu/bin/qemu-aarch64:FP" \
+  > /proc/sys/fs/binfmt_misc/register
+nix build --option extra-platforms aarch64-linux \
+  .#homeConfigurations.modal-arm.activationPackage
+```
+
+Keep the `P` flag, which passes the program's own name to qemu. Without it,
+Python environments lose their packages under emulation, and the unfree
+binaries, which Nix builds here because cache.nixos.org does not serve them,
+fail in `autoPatchelfHook` with `No module named 'elftools'`. NixOS's
+`boot.binfmt.emulatedSystems` sets it too. The OCI image does not build under
+qemu-user: its fakechroot step runs proot, which needs `ptrace`, and qemu-user
+does not provide it. Build the image on an ARM machine.
+
+proot on aarch64 does not translate the path of the access check that
+`test -x` makes, while stat and readlink work. So the image build's checks
+test commands through their resolved store paths; a plain
+`test -x /root/.nix-profile/bin/NAME` fails there for every command. This
+was found and the fix confirmed by running the image's customisation step,
+proot and fakeroot included, in an aarch64 NixOS VM under qemu-system.
 
 ## macOS later
 

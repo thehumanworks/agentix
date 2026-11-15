@@ -541,7 +541,7 @@ lock. See [Rex in sandboxes](nix/README.md#rex-in-sandboxes).
 | Profile | System | Status |
 | --- | --- | --- |
 | `modal` | x86_64 Linux | The image; built by `image build` and CI |
-| `modal-arm` | ARM64 Linux | Evaluated by CI, not built |
+| `modal-arm` | ARM64 Linux | Built once under emulation; CI's ARM job should build it, not yet seen green |
 | `linux` | x86_64 Linux | An example of `lib.mkLinuxHome` for a user `agent`; built by CI |
 | `mac` | Apple Silicon macOS | Evaluated by CI, not built; see [macOS later](nix/README.md#macos-later) |
 
@@ -625,17 +625,21 @@ the same checks.
 GitHub Actions run two workflows from `.github/workflows/`. Neither needs a
 secret or contacts Modal.
 
-- `ci.yml` runs on pull requests, pushes to `main`, and on demand, with two
+- `ci.yml` runs on pull requests, pushes to `main`, and on demand, with three
   jobs that take about a minute. `Python tests and lint` runs the tests,
   `ruff check`, and `ruff format --check`. `Nix flake check` runs
   `nix flake check --all-systems --no-build`, which evaluates the x86_64,
   ARM, and Mac outputs, then `nix flake check` on x86_64 Linux: formatting,
   statix, deadnix, the `modal` and `linux` profiles, the OCI image's root
-  and layer list, and each SSH engine module on and off. To require CI
-  before merging, require those two checks by name.
+  and layer list, and each SSH engine module on and off. `Nix flake check
+  (ARM)` runs the same `nix flake check` beside it on an `ubuntu-24.04-arm`
+  runner, which builds `modal-arm`, the ARM image's root and layer list, and
+  the SSH engine checks. That job has not yet been seen green on GitHub. To
+  require CI before merging, require those three checks by name.
 - `flake-update.yml` runs every Monday and on demand. It runs
-  `nix flake update` in `nix/` and the same Nix checks on the new lock, and
-  when they pass opens or updates a pull request from
+  `nix flake update` in `nix/` and the same Nix checks on the new lock,
+  building x86_64 only; ARM is built when CI runs on the pull request. When
+  they pass, it opens or updates a pull request from
   `automation/flake-update`. It does not move Rex, and it does not build the
   image: after merging, rebuild and verify as `AGENTS.md` requires. GitHub
   lets it open the pull request only when "Allow GitHub Actions to create
@@ -665,10 +669,12 @@ token and no secrets; neither workflow uses `pull_request_target`.
   on its own; `sandbox shell` and `sandbox ssh start` start them.
 - Every image build that misses the cache starts from an empty Nix store;
   there is no binary cache of agentix's own.
-- Only the x86_64 image runs on Modal. CI evaluates the `modal-arm` and
-  `mac` profiles and the ARM OCI image but builds none of them, so they are
-  unproven. On an Apple Silicon Mac, Docker runs the x86_64 OCI image under
-  emulation; see [OCI image](nix/README.md#oci-image).
+- Only the x86_64 image runs on Modal: `image build` builds no other.
+  `modal-arm` has been built under qemu emulation. CI's ARM job is expected
+  to build it and the ARM OCI image's root from its first run, but has not
+  yet been seen green, and nothing runs the ARM image; see [ARM Linux](nix/README.md#arm-linux). CI only
+  evaluates `mac`. On an Apple Silicon Mac, Docker runs the x86_64 OCI image
+  under emulation; see [OCI image](nix/README.md#oci-image).
 - The SSH scripts use commands from other modules: `jq` (tools) for both
   engines, `flock` (base commands) for OpenSSH, and `ssh-keygen` (OpenSSH)
   for the Tailscale host keys that `sandbox shell` checks. With the OpenSSH

@@ -258,18 +258,30 @@ pkgs.dockerTools.streamLayeredImage {
     # The activation removes its temporary root; drop the link to it.
     find /nix/var/nix/gcroots/auto -xtype l -delete
 
-    test -L /root/.bashrc
-    test -L /root/.claude/CLAUDE.md
-    test -x /root/.nix-profile/bin/claude
-    test -x /root/.nix-profile/bin/nix
-    test -s /root/.claude.json
-    ${lib.getExe pkgs.jq} -e --arg rule "Read(/${paths.opTokenFile})" \
+    # A failed check names itself; a bare `test` would fail the build silently.
+    check() {
+      "$@" || { echo "oci: image check failed: $*" >&2; exit 1; }
+    }
+    # Whether a command in the image is executable. On aarch64, proot does not
+    # translate the path of the access check that `test -x` makes, so it fails
+    # for every path that exists only in the image's root, /root/.nix-profile
+    # among them, while stat and readlink see it. The resolved store path is
+    # the same inside and outside the root, so test that.
+    executable() {
+      test -x "$(readlink -f "$1")"
+    }
+    check test -L /root/.bashrc
+    check test -L /root/.claude/CLAUDE.md
+    check executable /root/.nix-profile/bin/claude
+    check executable /root/.nix-profile/bin/nix
+    check test -s /root/.claude.json
+    check ${lib.getExe pkgs.jq} -e --arg rule "Read(/${paths.opTokenFile})" \
       '.permissions.deny | index($rule)' /root/.claude/settings.json > /dev/null
     # Every command the configuration lists is in root's profile.
     for name in $(${lib.getExe pkgs.jq} -er '.commands | join(" ")' /root/.nix-profile/${manifestFile}); do
-      test -x "/root/.nix-profile/bin/$name" || { echo "missing: $name" >&2; exit 1; }
+      executable "/root/.nix-profile/bin/$name" || { echo "missing: $name" >&2; exit 1; }
     done
-    test "$(readlink /root/.local/state/home-manager/gcroots/current-home)" = ${generation}
+    check test "$(readlink /root/.local/state/home-manager/gcroots/current-home)" = ${generation}
   '';
 
   config = {
