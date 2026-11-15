@@ -54,13 +54,14 @@ uv run agentix sandbox shell dev --engine=openssh
 | `config show` | The defaults `sandbox up` uses, and where each comes from |
 | `sandbox up [FLAGS]` | Start a sandbox; prints `sandbox_id` and `name` |
 | `sandbox ls` | Every name with its current sandbox, and running sandboxes without a name |
-| `sandbox exec SANDBOX 'COMMAND'` | Run one command and print its output |
+| `sandbox exec SANDBOX 'COMMAND' [--resume[=CMD]]` | Run one command and print its output; `--resume` continues it after a timeout |
 | `sandbox shell [SANDBOX] [-- COMMAND]` | Start SSH if needed, then log in with `ssh`, or run COMMAND |
 | `sandbox ssh start\|status\|stop SANDBOX` | Control one SSH engine; `start` prints how to connect |
 | `sandbox down SANDBOX` | Stop a sandbox; for a named one, prints the snapshot Modal saved |
 | `sandbox snapshot SANDBOX` | Save the filesystem of a running sandbox now |
 | `sandbox snapshots SANDBOX` | The snapshots of a name, oldest first, with their expiry |
 | `sandbox restore NAME [--snapshot=ID]` | Start a new sandbox under NAME from its latest or the given snapshot |
+| `sandbox resume NAME` | Restore NAME and continue the `exec --resume` commands its timeout cut off |
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
 | `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
 
@@ -183,6 +184,9 @@ uv run agentix sandbox exec dev 'nvim --version'
 uv run agentix sandbox exec dev 'bash -lc "command -v uv && ls | wc -l"'
 ```
 
+A long agent run can outlast the sandbox; see
+[Resuming after a timeout](#resuming-after-a-timeout) for `--resume`.
+
 `sandbox shell` is described under [SSH](#ssh). Commands run with
 `sandbox exec`, SSH logins, and `ssh HOST COMMAND` all start in `/workdir`,
 or in the directory given with `--workdir`. A relative path in `rsync`,
@@ -238,6 +242,45 @@ SSH and Tailscale run again once started, for example by `sandbox shell`.
 sandbox writes it again. A restored sandbox runs the image its snapshot came
 from: a newer published image reaches a name only through `purge` and
 `up`.
+
+### Resuming after a timeout
+
+Modal ends a sandbox at its timeout without waiting for the commands in it.
+`sandbox exec NAME 'COMMAND' --resume` runs COMMAND so that, if the named
+sandbox reaches its timeout first, agentix restores the name from its exit
+snapshot and continues COMMAND there, up to 3 times. Put `--resume` after
+the command, or write `--resume=...`.
+
+```sh
+uv run agentix sandbox exec dev 'claude -p "Fix the failing tests"' --resume
+uv run agentix sandbox exec dev './build.sh' --resume='./build.sh --continue'
+uv run agentix sandbox resume dev
+```
+
+How a command continues is a rule per harness, in
+[`src/agentix/resume.py`](src/agentix/resume.py). `claude -p TASK ...`
+starts with its own `--session-id` and continues as
+`claude --resume ID -p CONTINUE ...`; `codex exec TASK ...` continues as
+`codex exec resume --last CONTINUE ...`, and `pi -p TASK ...` as
+`pi --continue -p CONTINUE ...`. CONTINUE is a neutral prompt (carry on,
+check what is done first), not the task again, so that the task is not
+started twice. Still, a resumed agent may repeat a step whose result the
+snapshot lacks, such as a pull request opened just before the timeout:
+write tasks with side effects so they check first. codex and pi take the
+latest session in the workdir, so run one of them per sandbox; their rules
+are untried, as neither is in the image yet. A command with no rule, a
+claude command that names its own session, and one run through `sh -c` are
+refused unless `--resume='COMMAND'` says how it continues. Nothing is
+resumed that was not started with `--resume`. Only named sandboxes that
+keep exit snapshots can resume.
+
+`exec --resume` prints on standard error what a timeout will lead to, and
+at each resume the snapshot, the new sandbox, and the command that
+continues. Only that `exec` watches for the timeout: if it is not running
+(the laptop slept, the terminal closed), the command still runs until the
+timeout, and `sandbox resume NAME` continues it later, while Modal keeps the
+snapshot. With nothing to continue, `sandbox resume` is `sandbox restore`.
+How it works and how it fails: [docs/resume.md](docs/resume.md).
 
 ### Purge, no snapshot, ephemeral
 
@@ -577,6 +620,7 @@ image.
 │   ├── __main__.py         the command line: parses input, prints results
 │   ├── local.py            runs each operation with one Modal session
 │   ├── lifecycle.py        up, down, ls, snapshot(s), restore, purge
+│   ├── resume.py           exec --resume and sandbox resume, with the resume rules
 │   ├── store.py            the record of a name and how copies merge
 │   ├── recordfiles.py      records as files on the Volume, cached in a Dict
 │   ├── sandbox.py          Modal sandbox calls and the sandbox start command
@@ -595,6 +639,7 @@ image.
 │   ├── sandbox.toml        paths and environment shared by the CLI and the image
 │   ├── home-manager/       profiles/, users/, modules/, home.nix, exports.nix
 │   └── oci/                the OCI image the Modal image is made from
+├── docs/                   design notes, such as resume.md
 ├── tests/                  unit tests; Modal is faked, nothing reaches it
 └── .github/                CI, the weekly lock update, Dependabot
 ```

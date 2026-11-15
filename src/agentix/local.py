@@ -9,6 +9,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 from . import lifecycle, names, sandbox, ssh
+from . import resume as resume_module
 from .session import Session, describe
 from .store import Options
 
@@ -63,6 +64,27 @@ class Local:
             return dict(await sandbox.execute(session, sandbox_id, args))
 
         return _run(run)
+
+    def execute_resumable(
+        self,
+        target: str,
+        args: Sequence[str],
+        resume: object,
+        notify: resume_module.Notify,
+        output: resume_module.Output,
+    ) -> dict[str, Any]:
+        return _run(
+            lambda session: resume_module.start(
+                session, target, args, resume, notify, output
+            )
+        )
+
+    def resume(
+        self, target: str, notify: resume_module.Notify, output: resume_module.Output
+    ) -> dict[str, Any]:
+        return _run(
+            lambda session: resume_module.resume(session, target, notify, output)
+        )
 
     def terminate(self, target: str) -> dict[str, Any]:
         return _run(lambda session: lifecycle.down(session, target))
