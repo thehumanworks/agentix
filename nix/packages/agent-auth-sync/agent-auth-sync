@@ -34,9 +34,13 @@ Usage: $PROG COMMAND
               newer one over the other
   watch       Sync now, then whenever a file changes, and every
               AGENT_AUTH_SYNC_REMOTE_INTERVAL seconds for remote changes;
-              needs a service account token
-  ensure      Unless a watcher runs, sync once and start one in the
-              background; does nothing without a service account token
+              needs a service account token. While another watcher runs, it
+              waits for that one to stop; with --no-wait, it exits instead
+  ensure [PATH...]
+              Unless a watcher runs, start one in the background; then wait
+              up to AGENT_AUTH_SYNC_ENSURE_WAIT seconds for its first sync of
+              each PATH (of every file without one); does nothing without a
+              service account token
   status      Show whether each file and its field agree; prints no secrets
   stop        Stop the watcher that runs here
   save-token  Keep OP_SERVICE_ACCOUNT_TOKEN from this shell for the service
@@ -54,9 +58,16 @@ writes ($config_file):
   AGENT_AUTH_SYNC_INTERVAL  Seconds between checks of the files (default: 5)
   AGENT_AUTH_SYNC_REMOTE_INTERVAL
                             Seconds between reads of 1Password (default: 120)
+  AGENT_AUTH_SYNC_ENSURE_WAIT
+                            Seconds ensure waits for the first sync (default: 10)
+  AGENT_AUTH_SYNC_OP_TIMEOUT
+                            Seconds before a call of op is given up (default: 30)
   AGENT_AUTH_SYNC_TOKEN_FILE
-                            The saved service account token, read when
+                            The token that save-token saves, read when
                             OP_SERVICE_ACCOUNT_TOKEN is not set
+  AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE
+                            Another token file, read when neither of those
+                            has one, such as a sandbox's; never written
   AGENT_AUTH_SYNC_STATE_DIR Where it keeps what both sides last agreed on
   AGENT_AUTH_SYNC_CONFIG_DIR
                             The directory of config and the token
@@ -81,6 +92,9 @@ fi
 : "${AGENT_AUTH_SYNC_JQ:=jq}"
 : "${AGENT_AUTH_SYNC_INTERVAL:=5}"
 : "${AGENT_AUTH_SYNC_REMOTE_INTERVAL:=120}"
+: "${AGENT_AUTH_SYNC_ENSURE_WAIT:=10}"
+: "${AGENT_AUTH_SYNC_OP_TIMEOUT:=30}"
+: "${AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE:=}"
 : "${AGENT_AUTH_SYNC_TOKEN_FILE:=$config_dir/op-token}"
 : "${AGENT_AUTH_SYNC_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/agent-auth-sync}"
 if [ -z "${AGENT_AUTH_SYNC_FILES:-}" ]; then
@@ -156,40 +170,110 @@ xml() {
   printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
 }
 
+# The saved token first, then the profile's (in a sandbox, the one the
+# sandbox was started with).
 load_token() {
-  if [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && [ -r "$AGENT_AUTH_SYNC_TOKEN_FILE" ]; then
-    OP_SERVICE_ACCOUNT_TOKEN=$(cat "$AGENT_AUTH_SYNC_TOKEN_FILE")
-    export OP_SERVICE_ACCOUNT_TOKEN
-  fi
+  for token_file in "$AGENT_AUTH_SYNC_TOKEN_FILE" "$AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE"; do
+    [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] || return 0
+    if [ -n "$token_file" ] && [ -r "$token_file" ]; then
+      OP_SERVICE_ACCOUNT_TOKEN=$(cat "$token_file")
+      export OP_SERVICE_ACCOUNT_TOKEN
+    fi
+  done
 }
 
-# The scratch directory: root-only, removed on exit.
+# save-token, install, and uninstall write and remove only a token of their
+# own, never the profile's: in a sandbox that is the sandbox's token.
+own_token_file() {
+  if [ -n "$AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE" ] &&
+    [ "$AGENT_AUTH_SYNC_TOKEN_FILE" -ef "$AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE" ]; then
+    return 1
+  fi
+  [ "$AGENT_AUTH_SYNC_TOKEN_FILE" != "$AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE" ]
+}
+
+# The scratch directory: root-only, removed on exit, with any lock of pi's
+# that a write holds and any op still running.
 work=
+plock=
+ltmp=
+op_pid=
+op_killer=
+cleanup() {
+  [ -z "$ltmp" ] || rm -f "$ltmp"
+  [ -z "$op_killer" ] || kill "$op_killer" 2>/dev/null
+  [ -z "$op_pid" ] || kill "$op_pid" 2>/dev/null
+  [ -z "$plock" ] || rmdir "$plock" 2>/dev/null
+  [ -z "$work" ] || rm -rf "$work"
+}
 setup() {
   need "$JQ" "install jq, or set AGENT_AUTH_SYNC_JQ"
   need "$OP" "install the 1Password CLI, or set AGENT_AUTH_SYNC_OP"
   mkdir -p "$state" || die "cannot create $state"
   if [ -z "$work" ]; then
     work=$(mktemp -d "${TMPDIR:-/tmp}/$PROG.XXXXXX") || die "cannot create a scratch directory"
-    trap 'rm -rf "$work"' EXIT
+    trap cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
   fi
 }
 
+# Every file that may hold credentials or op's view of an item. Each sync
+# and status of a file ends with this, whichever way it ends.
+scrub() {
+  (cd "$work" && rm -f local remote remote.raw merged after item.json edit.json new.json value)
+}
+
 # op never gets this script's stdin: with a pipe there, `op item edit` would
-# read it as the item.
+# read it as the item. A call that takes longer than
+# AGENT_AUTH_SYNC_OP_TIMEOUT seconds is stopped and fails, so a hanging op
+# never holds a file's lock for good. coreutils' timeout is not on every
+# Mac, so a second process does its job.
 run_op() {
-  "$OP" "$@" </dev/null
+  rm -f "$work/op-timed-out"
+  op_timed_out=
+  "$OP" "$@" </dev/null &
+  op_pid=$!
+  parent=$$
+  (
+    nap=
+    trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; exit 0' TERM
+    sleep "$AGENT_AUTH_SYNC_OP_TIMEOUT" &
+    nap=$!
+    wait "$nap" || exit 0
+    # Its PID could be another process's by now if this script was killed
+    # outright, so it stops op only while the script still runs.
+    alive "$parent" || exit 0
+    : >"$work/op-timed-out"
+    kill "$op_pid" 2>/dev/null
+  ) </dev/null >/dev/null 2>&1 &
+  op_killer=$!
+  wait "$op_pid"
+  op_rc=$?
+  kill "$op_killer" 2>/dev/null
+  wait "$op_killer" 2>/dev/null
+  op_killer=
+  op_pid=
+  if [ -f "$work/op-timed-out" ]; then
+    rm -f "$work/op-timed-out"
+    op_timed_out=1
+    return 1
+  fi
+  return "$op_rc"
 }
 
 # The first line of op's last complaint, without its timestamp.
 op_error() {
-  sed -n '1s/^\[ERROR\] [0-9/]* [0-9:]* //p' "$work/err"
+  if [ -n "${op_timed_out:-}" ]; then
+    printf 'op did not answer within %s seconds\n' "$AGENT_AUTH_SYNC_OP_TIMEOUT"
+  else
+    head -n 1 "$work/err" | sed 's/^\[ERROR\] [0-9/]* [0-9:]* //'
+  fi
 }
 
 # What op says when an item or field does not exist.
 op_missing() {
+  [ -z "${op_timed_out:-}" ] || return 1
   grep -qE "isn't an item|could not find item|does not have a field|no item found" "$work/err"
 }
 
@@ -245,7 +329,9 @@ EOF
 
 # Whether PID runs and is this program, not a later process with its number.
 # A zombie has ended: in a container whose init does not reap, an ended
-# watcher stays one.
+# watcher stays one. kill -0 also fails on another user's process, which is
+# right: the PIDs here are this user's own watchers and children, so such a
+# process took over the number of one that ended.
 alive() {
   [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
   # Where ps cannot look up one PID (busybox's lacks -p), kill -0 has to do.
@@ -372,16 +458,49 @@ push_remote() {
 }
 
 # Replaces PATH with the JSON in FILE, pretty-printed and readable only by
-# its owner, in one rename.
+# its owner, in one rename. Returns 0, 1 on failure, and 3, leaving PATH
+# alone, when PATH changed since it had the fingerprint EXPECTED, such as
+# when an agent refreshed between the read and now. The rename happens under
+# PATH.lock, the lock pi takes while it writes the file, so pi waits for it.
+# Sets written to the fingerprint of what it wrote.
 write_local() {
   dir=$(dirname "$2")
   mkdir -p "$dir" || return 1
   tmp=$dir/.$(basename "$2").$PROG.$$
-  if "$JQ" . "$1" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$2"; then
-    return 0
+  ltmp=$tmp
+  if ! { "$JQ" . "$1" >"$tmp" && chmod 600 "$tmp"; }; then
+    rm -f "$tmp"
+    ltmp=
+    return 1
+  fi
+  if ! mkdir "$2.lock" 2>/dev/null; then
+    # A lock left behind is taken over, as pi does.
+    if pi_writing "$2" || ! { rm -rf "$2.lock" && mkdir "$2.lock" 2>/dev/null; }; then
+      rm -f "$tmp"
+      ltmp=
+      return 3
+    fi
+  fi
+  plock=$2.lock
+  wrc=0
+  written=$(fingerprint "$tmp")
+  if [ "$(fingerprint "$2")" != "$3" ]; then
+    wrc=3
+  elif ! mv -f "$tmp" "$2"; then
+    wrc=1
   fi
   rm -f "$tmp"
-  return 1
+  ltmp=
+  rmdir "$2.lock" 2>/dev/null
+  plock=
+  return "$wrc"
+}
+
+# Whether pi holds PATH.lock. A lock that has not been touched for a minute
+# was left behind (pi touches its lock every few seconds while it holds it).
+pi_writing() {
+  [ -d "$1.lock" ] || return 1
+  [ -z "$(find "$1.lock" -prune -mmin +1 2>/dev/null)" ]
 }
 
 # When both sides changed: the newer credentials of the two. Codex's file is
@@ -407,7 +526,56 @@ set_base() {
   printf '%s\n' "$2" >"$state/$1.base.tmp" && mv -f "$state/$1.base.tmp" "$state/$1.base"
 }
 
-# Brings one file and its field together.
+# Forgets what both sides last agreed on, so that the next pass merges the
+# two instead of taking either as the newer.
+forget_base() {
+  rm -f "$state/$1.base"
+}
+
+# After a push, reads the field again: another machine may have pushed at
+# the same time, and the later push would have replaced the other. If the
+# field no longer holds what FILE holds, the newer tokens of the two go to
+# both sides, as when both changed. The file is replaced only while it has
+# the fingerprint EXPECTED. Records what both sides now hold; when that is
+# not known, because the field could not be read again or the merge could
+# not be written, it forgets the agreed version instead. Returns 0, 1 on
+# failure, and 3 when the file changed meanwhile.
+confirm_push() {
+  M=$(sha <"$1")
+  if ! read_remote "$ref" "$work/remote.raw" || ! canon "$work/remote.raw" "$work/after"; then
+    forget_base "$key"
+    return 0
+  fi
+  X=$(sha <"$work/after")
+  if [ "$X" = "$M" ]; then
+    set_base "$key" "$M"
+    return 0
+  fi
+  if ! merge "$1" "$work/after" >"$work/merged"; then
+    forget_base "$key"
+    warn "$path: merging with $ref failed"
+    return 1
+  fi
+  M=$(sha <"$work/merged")
+  if [ "$M" != "$(sha <"$1")" ]; then
+    write_local "$work/merged" "$path" "$2"
+    crc=$?
+    if [ "$crc" != 0 ]; then
+      forget_base "$key"
+      [ "$crc" = 1 ] && warn "$path: writing failed"
+      return "$crc"
+    fi
+  fi
+  if [ "$M" != "$X" ] && ! push_remote "$work/merged"; then
+    forget_base "$key"
+    return 1
+  fi
+  set_base "$key" "$M"
+  note "$ref: another machine pushed at the same time; kept the newer tokens of each"
+}
+
+# Brings one file and its field together. Returns 0, 1 on failure, and 3
+# when it left both alone for now because the file is being written.
 sync_one() {
   ref=$1
   path=$2
@@ -418,13 +586,17 @@ sync_one() {
   key=$(key_of "$ref")
 
   # pi holds auth.json.lock (a directory) while it changes the file.
-  if [ -d "$path.lock" ]; then
-    return 0
+  if pi_writing "$path"; then
+    return 3
   fi
 
+  # What the file was when read; a pull replaces only that.
+  before=$(fingerprint "$path")
   canon "$path" "$work/local"
   local_rc=$?
   if [ "$local_rc" = 1 ]; then
+    # Read while pi was writing it: the next look reads it again.
+    pi_writing "$path" && return 3
     warn "$path: not JSON; left alone"
     return 1
   fi
@@ -448,7 +620,6 @@ sync_one() {
 
   if [ "$L" = "$R" ]; then
     [ "$L" = - ] || set_base "$key" "$L"
-    rm -f "$work/local" "$work/remote"
     return 0
   fi
 
@@ -463,18 +634,22 @@ sync_one() {
   rc=0
   case $action in
     pull)
-      if write_local "$work/remote" "$path"; then
-        set_base "$key" "$R"
-        note "$path: updated from $ref"
-      else
-        warn "$path: writing failed"
-        rc=1
-      fi
+      write_local "$work/remote" "$path" "$before"
+      rc=$?
+      case $rc in
+        0)
+          set_base "$key" "$R"
+          note "$path: updated from $ref"
+          ;;
+        3) ;;
+        *) warn "$path: writing failed" ;;
+      esac
       ;;
     push)
       if push_remote "$work/local"; then
-        set_base "$key" "$L"
         note "$ref: updated from $path"
+        confirm_push "$work/local" "$before"
+        rc=$?
       else
         rc=1
       fi
@@ -482,15 +657,24 @@ sync_one() {
     merge)
       if merge "$work/local" "$work/remote" >"$work/merged"; then
         M=$(sha <"$work/merged")
-        if [ "$M" != "$L" ] && ! write_local "$work/merged" "$path"; then
-          warn "$path: writing failed"
-          rc=1
+        if [ "$M" != "$L" ]; then
+          write_local "$work/merged" "$path" "$before"
+          rc=$?
+          [ "$rc" = 1 ] && warn "$path: writing failed"
+          [ "$rc" = 0 ] && before=$written
         fi
-        if [ "$rc" = 0 ] && [ "$M" != "$R" ] && ! push_remote "$work/merged"; then
-          rc=1
+        if [ "$rc" = 0 ] && [ "$M" != "$R" ]; then
+          mv -f "$work/merged" "$work/local"
+          if push_remote "$work/local"; then
+            confirm_push "$work/local" "$before"
+            rc=$?
+          else
+            rc=1
+          fi
+        elif [ "$rc" = 0 ]; then
+          set_base "$key" "$M"
         fi
         if [ "$rc" = 0 ]; then
-          set_base "$key" "$M"
           note "$path and $ref both changed; kept the newer tokens of each"
         fi
       else
@@ -499,11 +683,11 @@ sync_one() {
       fi
       ;;
   esac
-  rm -f "$work/local" "$work/remote" "$work/merged"
   return "$rc"
 }
 
-# sync_one under the file's lock, then note the file's fingerprint.
+# sync_one under the file's lock, then note the file's fingerprint, unless
+# the file was left for the next look because it was being written.
 sync_locked() {
   key=$(key_of "$1")
   if ! lock "$state/$key.lock"; then
@@ -512,7 +696,12 @@ sync_locked() {
   fi
   sync_one "$1" "$2"
   sync_rc=$?
-  fingerprint "$2" >"$state/$key.seen"
+  scrub
+  if [ "$sync_rc" = 3 ]; then
+    sync_rc=0
+  else
+    fingerprint "$2" >"$state/$key.seen"
+  fi
   unlock "$state/$key.lock"
   return "$sync_rc"
 }
@@ -547,25 +736,37 @@ cmd_watch() {
   setup
   quiet_repeats=1
   # One watcher per state directory. A second one, such as a service started
-  # while `ensure` had started one, waits and takes over when that one ends.
+  # while `ensure` had started one, waits and takes over when that one ends;
+  # one that `ensure` started (--no-wait) leaves it to the first.
   waiting=
   until try_lock "$state/watch.lock"; do
+    if [ "${1:-}" = --no-wait ]; then
+      exit 0
+    fi
     if [ -z "$waiting" ]; then
       note "another watcher runs (PID $(cat "$state/watch.lock/pid" 2>/dev/null)); waiting for it to stop"
       waiting=1
     fi
     sleep "$AGENT_AUTH_SYNC_INTERVAL"
   done
-  trap 'rm -rf "$work"; [ "$(cat "$state/watch.lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$state/watch.lock"' EXIT
+  trap 'cleanup; [ "$(cat "$state/watch.lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$state/watch.lock"' EXIT
+  # Markers of an earlier watcher's first sync no longer tell ensure anything.
+  (cd "$state" && rm -f -- *.ready)
   note "watching (PID $$)"
   last_remote=0
+  first=1
   while :; do
     # Its state directory removed, a watcher has nothing to keep.
     [ -d "$state" ] || exit 0
     now=$(date +%s)
     if [ $((now - last_remote)) -ge "$AGENT_AUTH_SYNC_REMOTE_INTERVAL" ]; then
       # After a clean pass, a failure that comes back is reported again.
-      each_file sync_locked && rm -f "$work/warned"
+      if [ -n "$first" ]; then
+        each_file first_sync && rm -f "$work/warned"
+        first=
+      else
+        each_file sync_locked && rm -f "$work/warned"
+      fi
       last_remote=$now
     else
       each_file sync_if_changed
@@ -574,26 +775,94 @@ cmd_watch() {
   done
 }
 
+# sync_locked, then a marker of how it went, for ensure, which waits for it.
+first_sync() {
+  sync_locked "$1" "$2"
+  first_rc=$?
+  printf '%s\n' "$first_rc" >"$state/$key.ready.tmp" && mv -f "$state/$key.ready.tmp" "$state/$key.ready"
+  return "$first_rc"
+}
+
+# Sleeps a tenth of a second where sleep takes fractions (GNU, BSD, busybox),
+# and a second elsewhere; adds the tenths slept to tenths.
+nap() {
+  if sleep 0.1 2>/dev/null; then
+    tenths=$((tenths + 1))
+  else
+    sleep 1
+    tenths=$((tenths + 10))
+  fi
+}
+
+# Adds the key of REF to wanted when PATH is one of wanted_paths.
+want_key() {
+  while IFS= read -r want; do
+    if [ -n "$want" ] && { [ "$want" = "$2" ] || [ "$want" -ef "$2" ]; }; then
+      wanted="$wanted $(key_of "$1")"
+      return 0
+    fi
+  done <<EOF
+$wanted_paths
+EOF
+}
+
+all_keys() {
+  wanted="$wanted $(key_of "$1")"
+}
+
+# Starts a watcher unless one runs, then waits for its first sync of each
+# PATH given (of every file when none is given or none of them is
+# configured), at most AGENT_AUTH_SYNC_ENSURE_WAIT seconds: an agent that
+# ensure runs before starts with its file pulled, yet within that time even
+# when 1Password does not answer, and the sync goes on in the background.
 cmd_ensure() {
   # Without a token there is nothing to do: agents start as if it were not here.
   need_token || return 0
   mkdir -p "$state" || die "cannot create $state"
-  watcher_pid >/dev/null && return 0
-  cmd_sync
-  ensure_rc=$?
   log_file=$state/watch.log
-  # Keep the log small: it holds only changes and failures.
-  if [ -f "$log_file" ] && [ "$(wc -c <"$log_file")" -gt 1048576 ]; then
-    mv -f "$log_file" "$log_file.1"
+  if ! watcher_pid >/dev/null; then
+    # Keep the log small: it holds only changes and failures.
+    if [ -f "$log_file" ] && [ "$(wc -c <"$log_file")" -gt 1048576 ]; then
+      mv -f "$log_file" "$log_file.1"
+    fi
+    (cd "$state" && rm -f -- *.ready)
+    # A session of its own, and no terminal or pipe: the watcher outlives the
+    # command that started it, which does not wait for its output.
+    if command -v setsid >/dev/null 2>&1; then
+      setsid "$self" watch --no-wait </dev/null >>"$log_file" 2>&1 &
+    else
+      nohup "$self" watch --no-wait </dev/null >>"$log_file" 2>&1 &
+    fi
   fi
-  # A session of its own, and no terminal or pipe: the watcher outlives the
-  # command that started it, which does not wait for its output.
-  if command -v setsid >/dev/null 2>&1; then
-    setsid "$self" watch </dev/null >>"$log_file" 2>&1 &
-  else
-    nohup "$self" watch </dev/null >>"$log_file" 2>&1 &
+
+  wanted=
+  wanted_paths=$(printf '%s\n' "$@")
+  [ "$#" = 0 ] || each_file want_key
+  [ -n "$wanted" ] || each_file all_keys
+
+  tenths=0
+  while :; do
+    pending=
+    failed=
+    for k in $wanted; do
+      if [ ! -f "$state/$k.ready" ]; then
+        pending=1
+      elif [ "$(cat "$state/$k.ready" 2>/dev/null)" != 0 ]; then
+        failed=1
+      fi
+    done
+    [ -z "$pending" ] && break
+    if [ "$tenths" -ge $((AGENT_AUTH_SYNC_ENSURE_WAIT * 10)) ]; then
+      note "the first sync is still running after $AGENT_AUTH_SYNC_ENSURE_WAIT seconds; it goes on in the background (log: $log_file)"
+      return 0
+    fi
+    nap
+  done
+  if [ -n "$failed" ]; then
+    note "the first sync failed; see $log_file"
+    return 1
   fi
-  return "$ensure_rc"
+  return 0
 }
 
 cmd_status() {
@@ -618,6 +887,7 @@ status_one() {
   read_remote "$1" "$work/remote.raw"
   rrc=$?
   if [ "$rrc" = 1 ]; then
+    scrub
     printf '  state: 1Password unreadable\n'
     return 1
   fi
@@ -646,7 +916,7 @@ status_one() {
     s="both changed; sync keeps the newer tokens"
   fi
   printf '  state: %s\n' "$s"
-  rm -f "$work/local" "$work/remote" "$work/remote.raw"
+  scrub
 }
 
 cmd_stop() {
@@ -660,6 +930,8 @@ cmd_stop() {
 cmd_save_token() {
   [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] ||
     die "OP_SERVICE_ACCOUNT_TOKEN is not set in this shell. Export the 1Password service account token, then run this again."
+  own_token_file ||
+    die "$AGENT_AUTH_SYNC_TOKEN_FILE is the profile's token file, which $PROG never writes; set AGENT_AUTH_SYNC_TOKEN_FILE to another file"
   need "$OP" "install the 1Password CLI, or set AGENT_AUTH_SYNC_OP"
   "$OP" whoami </dev/null >/dev/null 2>&1 ||
     die "op does not accept OP_SERVICE_ACCOUNT_TOKEN; check the token"
@@ -804,14 +1076,22 @@ cmd_uninstall() {
       ;;
   esac
   cmd_stop >/dev/null
-  rm -f "$program" "$config_file" "$AGENT_AUTH_SYNC_TOKEN_FILE"
-  printf 'removed the service, %s, %s, and the saved token\n' "$program" "$config_file"
+  rm -f "$program" "$config_file"
+  if own_token_file; then
+    rm -f "$AGENT_AUTH_SYNC_TOKEN_FILE"
+    printf 'removed the service, %s, %s, and the saved token\n' "$program" "$config_file"
+  else
+    printf 'removed the service, %s, and %s; kept the profile'"'"'s token file %s\n' "$program" "$config_file" "$AGENT_AUTH_SYNC_TOKEN_FILE"
+  fi
 }
 
 case ${1:-help} in
   sync) cmd_sync ;;
-  watch) cmd_watch ;;
-  ensure) cmd_ensure ;;
+  watch) cmd_watch "${2:-}" ;;
+  ensure)
+    shift
+    cmd_ensure "$@"
+    ;;
   status) cmd_status ;;
   stop) cmd_stop ;;
   save-token) cmd_save_token ;;

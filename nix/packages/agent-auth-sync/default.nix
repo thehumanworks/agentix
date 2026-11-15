@@ -18,7 +18,9 @@
   op ? null,
   # Lines of "op://VAULT/ITEM/FIELD PATH"; null keeps the script's defaults.
   files ? null,
-  # A file holding a service account token, read when the environment has none.
+  # A file holding a service account token, read when neither the environment
+  # nor the token that save-token saves has one. save-token, install, and
+  # uninstall never write or remove it: in a sandbox it is the sandbox's.
   tokenFile ? null,
 }:
 
@@ -52,7 +54,7 @@ stdenvNoCC.mkDerivation {
         [ (setDefault "AGENT_AUTH_SYNC_JQ" (lib.getExe jq)) ]
         ++ lib.optional (op != null) (setDefault "AGENT_AUTH_SYNC_OP" (lib.getExe op))
         ++ lib.optional (files != null) (setDefault "AGENT_AUTH_SYNC_FILES" files)
-        ++ lib.optional (tokenFile != null) (setDefault "AGENT_AUTH_SYNC_TOKEN_FILE" tokenFile)
+        ++ lib.optional (tokenFile != null) (setDefault "AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE" tokenFile)
       )}
     runHook postInstall
   '';

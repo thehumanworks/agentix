@@ -4,10 +4,12 @@ The fake keeps its vault in a JSON file (see fake_op.py), so each test sets
 up both sides, runs the script, and reads what it left on each.
 """
 
+import contextlib
 import json
 import os
 import plistlib
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -52,6 +54,8 @@ class AuthSyncTestCase(unittest.TestCase):
             "FAKE_OP_STORE": str(self.store),
             "AGENT_AUTH_SYNC_OP": str(op),
             "AGENT_AUTH_SYNC_INTERVAL": "1",
+            # Generous, so that a busy test machine still sees the first sync.
+            "AGENT_AUTH_SYNC_ENSURE_WAIT": "15",
             "AGENT_AUTH_SYNC_FILES": (
                 f"op://agentix/codex/auth {self.codex}\n"
                 "# a comment\n"
@@ -187,6 +191,20 @@ class FirstSyncTest(AuthSyncTestCase):
         self.assertFalse(self.codex.exists())
         self.assertFalse(self.store.exists())
 
+    def test_pi_taking_its_lock_during_a_pull_stops_it(self):
+        self.put_field(
+            "pi", {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        self.pi.parent.mkdir(parents=True)
+        lock = Path(f"{self.pi}.lock")
+
+        self.sync(FAKE_OP_AFTER_READ=f"mkdir {lock}")
+
+        self.assertFalse(self.pi.exists())
+        lock.rmdir()
+        self.sync()
+        self.assertEqual(self.read_file(self.pi)["anthropic"]["access"], "pi-a")
+
 
 class LaterSyncTest(AuthSyncTestCase):
     def setUp(self):
@@ -272,6 +290,77 @@ class LaterSyncTest(AuthSyncTestCase):
         self.assertEqual(json.loads(self.field("pi")), merged)
         self.assertIn("both changed", result.stderr)
 
+    def test_a_refresh_during_a_pull_is_kept_and_pushed_next(self):
+        self.put_field("codex", self.new)
+        refreshed = codex_auth("access-new", "2026-11-10T00:00:00Z")
+        later = self.tmp / "refreshed.json"
+        later.write_text(json.dumps(refreshed))
+        # Codex refreshes after the script read the file, before it renames.
+        hook = f"cp {later} {self.codex}"
+
+        self.sync(FAKE_OP_AFTER_READ=hook)
+
+        self.assertEqual(self.read_file(self.codex), refreshed)
+        self.sync()
+        self.assertEqual(json.loads(self.field("codex")), refreshed)
+
+    MERGED = {
+        "anthropic": {"type": "oauth", "access": "pi-b", "expires": 20},
+        "openai": {"type": "oauth", "access": "pi-b", "expires": 60},
+    }
+
+    def crossing_push(self) -> Path:
+        """Both sides agree; then pi refreshes anthropic here, and the returned
+        store is the vault after another machine pushed its openai refresh."""
+        first = {
+            "anthropic": {"type": "oauth", "access": "pi-a", "expires": 10},
+            "openai": {"type": "oauth", "access": "pi-a", "expires": 50},
+        }
+        self.put_field("pi", first)
+        self.sync()
+        agreed = self.store.read_text()
+        self.put_field("pi", {**first, "openai": self.MERGED["openai"]})
+        elsewhere = self.tmp / "elsewhere.json"
+        elsewhere.write_text(self.store.read_text())
+        self.store.write_text(agreed)
+        self.write_file(self.pi, {**first, "anthropic": self.MERGED["anthropic"]})
+        return elsewhere
+
+    def test_a_push_at_the_same_time_elsewhere_is_merged(self):
+        elsewhere = self.crossing_push()
+
+        result = self.sync(FAKE_OP_AFTER_EDIT=f"cp {elsewhere} {self.store}")
+
+        self.assertEqual(self.read_file(self.pi), self.MERGED)
+        self.assertEqual(json.loads(self.field("pi")), self.MERGED)
+        self.assertIn("another machine pushed at the same time", result.stderr)
+
+    def test_a_push_that_cannot_be_read_back_is_merged_next_time(self):
+        elsewhere = self.crossing_push()
+        down = Path(f"{self.store}.down")
+
+        # 1Password goes away just after the push and the other machine's.
+        self.run_script(
+            "sync", FAKE_OP_AFTER_EDIT=f"cp {elsewhere} {self.store} && touch {down}"
+        )
+        down.unlink()
+        self.sync()
+
+        self.assertEqual(self.read_file(self.pi), self.MERGED)
+        self.assertEqual(json.loads(self.field("pi")), self.MERGED)
+
+    def test_a_merge_left_for_pis_lock_is_merged_next_time(self):
+        elsewhere = self.crossing_push()
+        lock = Path(f"{self.pi}.lock")
+
+        # pi takes its lock just as the push is read back.
+        self.sync(FAKE_OP_AFTER_EDIT=f"cp {elsewhere} {self.store} && mkdir {lock}")
+        lock.rmdir()
+        self.sync()
+
+        self.assertEqual(self.read_file(self.pi), self.MERGED)
+        self.assertEqual(json.loads(self.field("pi")), self.MERGED)
+
     def test_a_pi_provider_removed_locally_is_removed_remotely(self):
         both = {
             "anthropic": {"type": "oauth", "access": "pi-a", "expires": 10},
@@ -297,6 +386,18 @@ class FailureTest(AuthSyncTestCase):
         self.assertIn("reading 1Password failed: could not connect", result.stderr)
         self.assertEqual(self.codex.read_text(), before)
 
+    def test_a_hanging_op_is_given_up(self):
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        started = time.monotonic()
+        result = self.run_script(
+            "sync", FAKE_OP_HANG="20", AGENT_AUTH_SYNC_OP_TIMEOUT="1"
+        )
+
+        self.assertLess(time.monotonic() - started, 8)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("op did not answer within 1 seconds", result.stderr)
+
     def test_a_file_that_is_not_json_is_left_alone(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
         self.codex.parent.mkdir(parents=True)
@@ -317,6 +418,40 @@ class FailureTest(AuthSyncTestCase):
         self.sync()
 
         self.assertFalse(self.pi.exists())
+
+    def test_a_lock_left_behind_is_ignored(self):
+        self.put_field(
+            "pi", {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        self.pi.parent.mkdir(parents=True)
+        lock = Path(f"{self.pi}.lock")
+        lock.mkdir()
+        os.utime(lock, (time.time() - 120, time.time() - 120))
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.pi)["anthropic"]["access"], "pi-a")
+        self.assertFalse(lock.exists())
+
+    def test_a_file_pi_is_writing_is_read_again(self):
+        self.put_field(
+            "pi", {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        self.pi.parent.mkdir(parents=True)
+        self.pi.write_text('{"anthropic": ')  # half written
+        # pi takes its lock just after the script looked for it.
+        lock = Path(f"{self.pi}.lock")
+        jq = self.tmp / "jq"
+        jq.write_text(
+            f'#!/bin/sh\n[ -e {lock} ] || mkdir {lock}\nexec {shutil.which("jq")} "$@"\n'
+        )
+        jq.chmod(0o755)
+
+        result = self.run_script("sync", AGENT_AUTH_SYNC_JQ=str(jq))
+
+        self.assertNotIn("not JSON", result.stderr)
+        state = self.home / ".local" / "state" / "agent-auth-sync"
+        self.assertFalse((state / "op___agentix_pi_auth.seen").exists())
 
     def test_a_bad_reference_is_reported(self):
         result = self.run_script(
@@ -361,6 +496,139 @@ class CommandsTest(AuthSyncTestCase):
             self.assertLess(time.monotonic(), deadline, "the watcher did not push")
             time.sleep(0.2)
 
+        self.stop(pid)
+
+    def test_ensure_returns_soon_when_op_hangs(self):
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        started = time.monotonic()
+        result = self.run_script(
+            "ensure",
+            OP_SERVICE_ACCOUNT_TOKEN="ops_fake",
+            FAKE_OP_HANG="20",
+            AGENT_AUTH_SYNC_ENSURE_WAIT="1",
+        )
+
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("still running after 1 seconds", result.stderr)
+        self.stop(self.wait_for_watcher())
+        # Nothing of it is left waiting on op, which it stopped too.
+        deadline = time.monotonic() + 5
+        while self.watchers():
+            self.assertLess(time.monotonic(), deadline, "a process was left")
+            time.sleep(0.2)
+
+    def test_ensure_waits_only_for_the_agents_own_file(self):
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+        self.put_field(
+            "pi", {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        slow_pi = {
+            "OP_SERVICE_ACCOUNT_TOKEN": "ops_fake",
+            "FAKE_OP_HANG": "20",
+            "FAKE_OP_HANG_REF": "op://agentix/pi/auth",
+            "AGENT_AUTH_SYNC_ENSURE_WAIT": "6",
+        }
+
+        started = time.monotonic()
+        result = self.run_script("ensure", str(self.codex), **slow_pi)
+
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-old"
+        )
+
+        # pi's own wrapper waits for pi's file, which is still on its way.
+        result = self.run_script("ensure", str(self.pi), **slow_pi)
+        self.assertIn("still running after 6 seconds", result.stderr)
+        self.stop(self.wait_for_watcher())
+
+    def test_two_ensures_at_once_leave_one_watcher(self):
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+        env = {**self.env, "OP_SERVICE_ACCOUNT_TOKEN": "ops_fake"}
+        command = [os.environ.get("AUTH_SYNC_TEST_SHELL", "sh"), str(SCRIPT), "ensure"]
+        starts = [
+            subprocess.Popen(
+                command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+            )
+            for _ in range(2)
+        ]
+        for start in starts:
+            start.communicate(timeout=30)
+            self.assertEqual(start.returncode, 0)
+        pid = self.wait_for_watcher()
+
+        deadline = time.monotonic() + 10
+        while (watchers := self.watchers()) != [pid]:
+            self.assertLess(time.monotonic(), deadline, f"watchers: {watchers}")
+            time.sleep(0.2)
+        self.stop(pid)
+
+    def watchers(self) -> list[int]:
+        """The watchers of this test's home, by PID."""
+        found = []
+        for proc in Path("/proc").iterdir():
+            # Another user's process is never one of ours, and a user other
+            # than root may not even probe it.
+            if not proc.name.isdigit() or not _ours(proc):
+                continue
+            if not _alive(int(proc.name)):
+                continue
+            try:
+                args = (proc / "cmdline").read_bytes().split(b"\0")
+                environ = (proc / "environ").read_bytes().split(b"\0")
+            except OSError:
+                continue
+            if (
+                str(SCRIPT).encode() in args
+                and b"watch" in args
+                and f"HOME={self.home}".encode() in environ
+            ):
+                found.append(int(proc.name))
+        return found
+
+    def test_a_change_made_under_pis_lock_is_pushed_after_it(self):
+        old = {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        new = {"anthropic": {"type": "oauth", "access": "pi-b", "expires": 9}}
+        self.put_field("pi", old)
+        self.run_script("ensure", OP_SERVICE_ACCOUNT_TOKEN="ops_fake")
+        pid = self.wait_for_watcher()
+        self.assertEqual(self.read_file(self.pi), old)
+
+        lock = Path(f"{self.pi}.lock")
+        lock.mkdir()
+        self.write_file(self.pi, new)
+        time.sleep(2.5)  # two looks at the file, each left alone
+        self.assertEqual(json.loads(self.field("pi")), old)
+        lock.rmdir()
+
+        # Within the watcher's look at the files, not its 2-minute remote read.
+        deadline = time.monotonic() + 5
+        while json.loads(self.field("pi")) != new:
+            self.assertLess(time.monotonic(), deadline, "the change was not pushed")
+            time.sleep(0.2)
+        self.stop(pid)
+
+    def test_a_failed_sync_leaves_no_plaintext_behind(self):
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+        self.put_field("codex", "not json")
+        self.write_file(
+            self.pi, {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        self.put_field("pi", '{"half": ')
+
+        result = self.run_script("ensure", OP_SERVICE_ACCOUNT_TOKEN="ops_fake")
+        pid = self.wait_for_watcher()
+
+        self.assertEqual(result.returncode, 1)
+        scratch = list(self.tmp.glob("agent-auth-sync.*"))
+        self.assertEqual(len(scratch), 1)  # the watcher's, while it runs
+        for leftover in scratch[0].rglob("*"):
+            text = leftover.read_text()
+            for secret in SECRETS:
+                self.assertNotIn(secret, text, leftover.name)
         self.stop(pid)
 
     def test_a_watcher_whose_state_is_removed_ends(self):
@@ -416,6 +684,19 @@ class CommandsTest(AuthSyncTestCase):
         self.assertTrue(self.codex.exists())
         self.stop(self.wait_for_watcher())
 
+    def test_ensure_reads_the_profiles_token(self):
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+        token = self.tmp / "profile-token"
+        token.write_text("ops_fake")
+
+        result = self.run_script(
+            "ensure", AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE=str(token)
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(self.codex.exists())
+        self.stop(self.wait_for_watcher())
+
     def test_watch_needs_a_token(self):
         result = self.run_script("watch")
 
@@ -430,7 +711,9 @@ class CommandsTest(AuthSyncTestCase):
         while not pid_file.exists() or not pid_file.read_text().strip():
             self.assertLess(time.monotonic(), deadline, "no watcher started")
             time.sleep(0.1)
-        return int(pid_file.read_text())
+        pid = int(pid_file.read_text())
+        self.addCleanup(_kill, pid)  # even when the test fails before stop
+        return pid
 
     def test_save_token_needs_the_token_in_the_shell(self):
         result = self.run_script("save-token")
@@ -523,6 +806,28 @@ class InstallTest(AuthSyncTestCase):
         self.assertEqual(self.run_script("uninstall").returncode, 0)
         self.assertFalse(plist.exists())
 
+    def test_the_profiles_token_file_is_never_written_or_removed(self):
+        self.system("Linux")
+        profile = self.tmp / "run" / "op-token"
+        profile.parent.mkdir()
+        profile.write_text("ops_profile")
+        self.env["AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE"] = str(profile)
+
+        self.assertEqual(self.run_script("install").returncode, 0)
+        self.assertEqual((self.config / "op-token").read_text(), "ops_fake")
+        self.assertEqual(self.run_script("uninstall").returncode, 0)
+        self.assertFalse((self.config / "op-token").exists())
+        self.assertEqual(profile.read_text(), "ops_profile")
+
+        # Even when the token file is set to the profile's.
+        same = {"AGENT_AUTH_SYNC_TOKEN_FILE": str(profile)}
+        result = self.run_script("save-token", **same)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("never writes", result.stderr)
+        result = self.run_script("uninstall", **same)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(profile.read_text(), "ops_profile")
+
     def test_install_needs_the_token_in_the_shell(self):
         self.system("Linux")
         del self.env["OP_SERVICE_ACCOUNT_TOKEN"]
@@ -568,12 +873,28 @@ class CliTest(unittest.TestCase):
                 auth.run("install")
 
 
+def _kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
+
+
+def _ours(proc: Path) -> bool:
+    """Whether the process /proc/PID runs as this test's user."""
+    try:
+        return proc.stat().st_uid == os.getuid()
+    except OSError:  # it ended
+        return False
+
+
 def _alive(pid: int) -> bool:
-    """Whether PID runs; a zombie that no one reaped yet has ended."""
+    """Whether PID runs; a zombie that no one reaped yet has ended. Another
+    user's process runs too, though only root may signal it."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     status = Path(f"/proc/{pid}/status")
     return not status.exists() or "(zombie)" not in status.read_text()
 

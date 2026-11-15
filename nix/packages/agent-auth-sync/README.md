@@ -33,7 +33,19 @@ field, and the version both last agreed on, kept in
   later `last_refresh`. For pi, each provider entry with the later
   `expires` wins, and an entry on one side only is kept.
 - A file that is not JSON, or a pi `auth.json.lock` (pi is writing), is left
-  alone until the next pass.
+  alone until the next pass. A lock untouched for a minute counts as left
+  behind.
+- A pull replaces the file only if it is still what was read: it takes
+  `auth.json.lock` (so pi waits), checks the file again, and renames. If an
+  agent refreshed in between, the pull stops, and the next look (within
+  `AGENT_AUTH_SYNC_INTERVAL` seconds) pushes or merges the refresh.
+- After a push, it reads the field again. If another machine pushed at the
+  same moment, the newer tokens of the two go to both sides. Two pushes
+  can still cross unseen when each reads the field back before the other
+  writes; the later one then wins, as it did before. When the field cannot
+  be read back, or pi holds its lock as the merge would be written, it
+  forgets the agreed version, so the next pass merges the two rather than
+  pulling over the refresh.
 
 Values pass through files in a private temporary directory, never through a
 command line, and nothing prints them.
@@ -70,17 +82,28 @@ of `op` and `jq` to `~/.config/agent-auth-sync/config`, and starts
 | Command | What it does |
 | --- | --- |
 | `sync` | Compare each file with its field once, and copy the newer over the other |
-| `watch` | Sync now, then within seconds of a file changing, and every 2 minutes for changes elsewhere |
-| `ensure` | Unless a watcher runs, sync once and start one in the background; does nothing without a token |
+| `watch` | Sync now, then within seconds of a file changing, and every 2 minutes for changes elsewhere; a second watcher waits for the first to stop, or with `--no-wait` exits |
+| `ensure [PATH...]` | Unless a watcher runs, start one; then wait up to 10 seconds for its first sync of each PATH (of every file without one); does nothing without a token |
 | `status` | Whether each file and its field agree, and whether a watcher runs; prints no secrets |
 | `stop` | Stop the watcher |
 | `save-token` | Save `OP_SERVICE_ACCOUNT_TOKEN` from this shell for the service |
 | `install` / `uninstall` | Set up or remove the service, the copy, the config, and the saved token |
 
-A new login on one machine reaches the others. Signing out does not: a
-deleted file is pulled back, and a cleared field is pushed back by any
-machine that still has the file. To end a login everywhere, revoke it with
-the provider.
+The `codex` and `pi` wrappers each pass their own file, so `ensure` returns
+once the watcher's first sync of that file is done (one read of 1Password
+per file before it, in order), or after `AGENT_AUTH_SYNC_ENSURE_WAIT`
+seconds. So the agents start within that even when 1Password does not
+answer; the sync goes on in the background and writes to
+`~/.local/state/agent-auth-sync/watch.log`. If the first pull takes longer,
+the agent starts before its file arrives. Each call of `op` is stopped
+after `AGENT_AUTH_SYNC_OP_TIMEOUT` seconds.
+
+A new login on one machine reaches the others. Logging out does not stick:
+a deleted file, or pi's `{}` after `/logout`, is pulled back from
+1Password, and a cleared field is pushed back by any machine that still has
+the file. To end a login everywhere, revoke it with the provider (for
+Codex, the ChatGPT account's sessions; for pi, each provider's console),
+then delete the field.
 
 ## Settings
 
@@ -92,7 +115,10 @@ From the environment, then from `~/.config/agent-auth-sync/config`:
 | `AGENT_AUTH_SYNC_OP`, `AGENT_AUTH_SYNC_JQ` | `op`, `jq` |
 | `AGENT_AUTH_SYNC_INTERVAL` | `5`: seconds between looks at the files |
 | `AGENT_AUTH_SYNC_REMOTE_INTERVAL` | `120`: seconds between reads of 1Password; each read of each field counts against the service account's rate limit |
-| `AGENT_AUTH_SYNC_TOKEN_FILE` | `~/.config/agent-auth-sync/op-token` |
+| `AGENT_AUTH_SYNC_ENSURE_WAIT` | `10`: seconds `ensure` waits for the first sync |
+| `AGENT_AUTH_SYNC_OP_TIMEOUT` | `30`: seconds before a call of `op` is stopped |
+| `AGENT_AUTH_SYNC_TOKEN_FILE` | `~/.config/agent-auth-sync/op-token`: the token `save-token` writes and `uninstall` removes |
+| `AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE` | None; the Nix package sets the profile's `agentix.op.tokenFile` (in a sandbox, `/run/agentix/op-token`). Read when neither the environment nor the saved token has one; never written or removed |
 | `AGENT_AUTH_SYNC_STATE_DIR` | `~/.local/state/agent-auth-sync` |
 | `AGENT_AUTH_SYNC_CONFIG_DIR` | `~/.config/agent-auth-sync` |
 
@@ -106,3 +132,15 @@ sandboxes keep their files in step. On a computer,
 `agentix.authSync.service.enable = true` adds the launchd agent or systemd
 user service; run `agent-auth-sync save-token` once from a shell that has
 the token.
+
+What the Home Manager modules change on a Mac or Linux computer too, not
+only in sandboxes:
+
+- Codex keeps its login in `~/.codex/auth.json`
+  (`cli_auth_credentials_store = "file"`), not the macOS Keychain or another
+  keyring. A login kept in the keyring before is not read; run `codex login`
+  once.
+- `agentix.codex.secrets` and `agentix.pi.secrets` are empty by default:
+  `codex` and `pi` no longer get `CODEX_API_KEY` or `OPENAI_API_KEY` from
+  1Password and use the logins in their files instead. Add a key back with
+  those options to bill an API key.
