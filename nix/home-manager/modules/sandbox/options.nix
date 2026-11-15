@@ -18,10 +18,10 @@ in
 {
   options.agentix.sandbox = {
     enable = lib.mkEnableOption ''
-      the modules for root in a Modal sandbox: the 1Password token file,
-      Claude's sandbox brief, the SSH working directory, the manifest, Rex, and
-      Tailscale. Each has its own `agentix.sandbox.<name>.enable`, which
-      defaults to this value
+      the modules for root in a Modal sandbox: the base commands, the
+      1Password token file, Claude's sandbox brief, the SSH working directory,
+      the manifest, Rex, and Tailscale. Each has its own
+      `agentix.sandbox.<name>.enable`, which defaults to this value
     '';
 
     paths = {

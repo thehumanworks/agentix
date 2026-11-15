@@ -9,8 +9,8 @@
 {
   imports = [ ../home.nix ];
 
-  # The 1Password token file, Claude's sandbox brief, the SSH working
-  # directory, the manifest, Rex, and Tailscale.
+  # The base commands, the 1Password token file, Claude's sandbox brief, the
+  # SSH working directory, the manifest, Rex, and Tailscale.
   agentix.sandbox.enable = true;
   agentix.commands = [
     "ps"
