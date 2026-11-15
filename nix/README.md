@@ -246,10 +246,14 @@ both from `/etc/skel`, set `HOME_MANAGER_BACKUP_EXT=bak` (or pass
 the shared modules, `ps` and `strace`, the Bash setup that loads the session
 variables in login shells and `ssh HOST COMMAND`, the C.UTF-8 locale, a
 headless editor, and `nixpkgs` pinned to this flake's revision. Of the sandbox
-modules it turns on the ones that work for any user: the base commands (a
-fallback at a low priority, so a distribution's own win), the manifest, Rex,
-and OpenSSH. The rest depend on what `agentix sandbox up` sets up in a Modal
-sandbox, or on root, and stay off:
+modules it turns on the ones that work for any user: the base commands, the
+manifest, Rex, and OpenSSH. On a distribution, the base commands shadow its
+own `tar`, `less`, `which`, `flock`, and the rest, because
+`~/.nix-profile/bin` comes before `/usr/bin` on PATH; their low priority only
+decides between packages within the profile. Set
+`agentix.sandbox.baseCommands.enable = false` to keep the distribution's. The
+rest depend on what `agentix sandbox up` sets up in a Modal sandbox, or on
+root, and stay off:
 
 | Module | In a sandbox | Without it |
 | --- | --- | --- |
@@ -266,9 +270,11 @@ the token file, starts in the working directory, has the sandbox brief or
 `ts`, or lacks `claude`, `git`, `nvim`, `op`, `rex`, or `ssh`.
 
 The secrets that the `claude`, `gh`, and `gh-lf` wrappers read come from the
-`agentix` vault in 1Password, as in a sandbox; with no access to it, turn
-those modules off (`agentix.claude.enable = false`, `agentix.git.enable =
-false`) or sign `op` in to an account that has the items.
+`agentix` vault in 1Password, as in a sandbox. With no access to it, sign `op`
+in to an account that has the items, or turn those modules off:
+`agentix.claude.enable = false` removes Claude Code, and
+`agentix.git.enable = false` removes Git itself and its configuration along
+with the `gh` and `gh-lf` wrappers.
 
 ## What a sandbox gets
 
@@ -322,8 +328,10 @@ nix flake check
 
 `nix fmt` formats every Nix file with nixfmt. `nix flake check` verifies the
 formatting, runs statix and deadnix, and builds the profiles of the current
-system, the `linux` example included on x86_64. On Linux it also evaluates the sandbox profile with each SSH engine's
-module turned off in turn, and both off; see [SSH engines](#ssh-engines). On Linux it also builds the OCI image's activated root and layer list,
+system, the `linux` example included on x86_64. On Linux it also evaluates
+the sandbox profile with each SSH engine's module turned off in turn, and both
+off; see [SSH engines](#ssh-engines). On Linux it also builds the OCI image's
+activated root and layer list,
 which takes seconds once the profile is built, but not the image stream itself.
 Add `--all-systems --no-build` to evaluate the Mac and ARM profiles and the ARM
 image too; without `--no-build`, Nix stops at the first check it cannot build

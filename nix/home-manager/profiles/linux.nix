@@ -2,8 +2,9 @@
 # or the sandbox, which ./sandbox.nix builds on this. It names no user;
 # `lib.mkLinuxHome` in flake.nix sets home.username and home.homeDirectory.
 #
-# The sandbox modules that work for any user are on: the base commands, which
-# only fill gaps a distribution leaves, the manifest, Rex, and OpenSSH. The
+# The sandbox modules that work for any user are on: the base commands, the
+# manifest, Rex, and OpenSSH. ~/.nix-profile/bin comes before /usr/bin, so on
+# a distribution the base commands shadow its tools of the same name. The
 # ones that need root or a sandbox that `agentix sandbox up` started stay off,
 # since nothing else writes the files that nix/sandbox.toml names: the
 # 1Password token file (`op` signs in as usual, or reads
