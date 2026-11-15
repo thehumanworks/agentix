@@ -329,7 +329,9 @@ EOF
 
 # Whether PID runs and is this program, not a later process with its number.
 # A zombie has ended: in a container whose init does not reap, an ended
-# watcher stays one.
+# watcher stays one. kill -0 also fails on another user's process, which is
+# right: the PIDs here are this user's own watchers and children, so such a
+# process took over the number of one that ended.
 alive() {
   [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
   # Where ps cannot look up one PID (busybox's lacks -p), kill -0 has to do.

@@ -570,7 +570,11 @@ class CommandsTest(AuthSyncTestCase):
         """The watchers of this test's home, by PID."""
         found = []
         for proc in Path("/proc").iterdir():
-            if not proc.name.isdigit() or not _alive(int(proc.name)):
+            # Another user's process is never one of ours, and a user other
+            # than root may not even probe it.
+            if not proc.name.isdigit() or not _ours(proc):
+                continue
+            if not _alive(int(proc.name)):
                 continue
             try:
                 args = (proc / "cmdline").read_bytes().split(b"\0")
@@ -874,12 +878,23 @@ def _kill(pid: int) -> None:
         os.kill(pid, signal.SIGTERM)
 
 
+def _ours(proc: Path) -> bool:
+    """Whether the process /proc/PID runs as this test's user."""
+    try:
+        return proc.stat().st_uid == os.getuid()
+    except OSError:  # it ended
+        return False
+
+
 def _alive(pid: int) -> bool:
-    """Whether PID runs; a zombie that no one reaped yet has ended."""
+    """Whether PID runs; a zombie that no one reaped yet has ended. Another
+    user's process runs too, though only root may signal it."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    except PermissionError:
+        return True
     status = Path(f"/proc/{pid}/status")
     return not status.exists() or "(zombie)" not in status.read_text()
 
