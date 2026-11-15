@@ -89,7 +89,7 @@ class ParsingTests(unittest.TestCase):
             #/---[DOTENV_PUBLIC_KEY]---/
             DOTENV_PUBLIC_KEY="{FAKE_PUBLIC_KEY}"
             export A=op://vault/item/field
-            B='op://vault/item/section/field' # trailing comment
+            B='op://vault/item/section/field'
             C="{FAKE_CIPHERTEXT}"
             D=`op://v/i/f`
             E=
@@ -148,6 +148,52 @@ class ParsingTests(unittest.TestCase):
             with self.subTest(line=line):
                 self.assertTrue(problems(line + "\nTOKEN=op://v/i/f\n"))
         self.assertEqual(problems("# TOKEN=op://v/i/f\n# not an assignment\n"), [])
+
+    def test_op_references_as_1password_writes_them(self):
+        # MEDIUM-A: item titles have spaces; quote those.
+        for line in [
+            'A="op://Private/Modal Token/credential"',
+            "A='op://v/One Time/one-time password?attribute=otp'",
+            "A=op://v/ssh-key/private_key?ssh-format=openssh",
+            "A=op://dev.vault/item-1/section_2/field.name",
+        ]:
+            with self.subTest(line=line):
+                self.assertEqual(problems(line), [], line)
+        for line in [
+            f'A="op://x {PLAIN}"',
+            "A=op://Private/Modal Token/credential",
+            'A="op://v/ item/f"',
+            'A="op://v/item /f"',
+            f'A="op://a/b/c#{PLAIN}"',
+            f"A=op://a/b/c?{PLAIN}",
+            f"A=op://a/b/c?attribute={PLAIN}!",
+            f'A="op://a/b/c\x00{PLAIN}"',
+            "A=op://a/b/c\tx",
+        ]:
+            with self.subTest(line=line):
+                self.assertTrue(problems(line), line)
+
+    def test_inline_comments_are_refused(self):
+        # LOW-B: text after a value could hide a secret.
+        for line in [
+            f"A=op://a/b/c # A={PLAIN}",
+            f"A=op://a/b/c #{PLAIN}",
+            f"A=op://a/b/c#{PLAIN}",
+            f"A='op://a/b/c' # {PLAIN}",
+            'A="op://a/b/c"   # a harmless note',
+        ]:
+            with self.subTest(line=line):
+                found = problems(line)
+                self.assertTrue(found, line)
+                self.assertIn("no inline comment", found[0])
+                self.assertTrue(all(PLAIN not in p for p in found))
+
+    def test_commented_out_colon_assignments(self):
+        # LOW-B: `# KEY: value` is a dotenv assignment too.
+        for line in [f"# TOKEN: {PLAIN}", f"#TOKEN:{PLAIN}"]:
+            with self.subTest(line=line):
+                self.assertTrue(problems(line), line)
+        self.assertEqual(problems("# TOKEN: op://v/i/f\n"), [])
 
     def test_prefixes_do_not_make_plaintext_safe(self):
         # MEDIUM-2.
@@ -346,7 +392,7 @@ class DotenvxTests(unittest.TestCase):
             ".env",
             """\
             export TOKEN='op://agentix/modal/token'
-            OTHER="op://v/i/f" # a comment
+            OTHER="op://v/i/f"
             """,
         )
         self.assertPasses()
@@ -364,6 +410,20 @@ class DotenvxTests(unittest.TestCase):
     def test_duplicate_key_with_a_plaintext_value_fails(self):
         self.write(".env", f"TOKEN=op://v/i/f\nOTHER=op://v/i/f\nTOKEN={PLAIN}\n")
         self.assertFails()
+
+    def test_inline_comment_fails(self):
+        # LOW-B.
+        self.write(".env", f"TOKEN=op://v/i/f #{PLAIN}\nOTHER=op://v/i/f\n")
+        self.assertIn("no inline comment", self.assertFails().stderr)
+
+    def test_op_reference_with_spaces(self):
+        # MEDIUM-A.
+        self.write(
+            ".env",
+            'TOKEN="op://Private/Modal Token/credential"\n'
+            "OTHER='op://v/One Time/one-time password?attribute=otp'\n",
+        )
+        self.assertPasses()
 
     def test_comments(self):
         self.write(

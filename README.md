@@ -657,14 +657,16 @@ sets `strict true`, so a declared key that is missing fails.
 that Git does not ignore (`.env*`, `*.env`, `.dev.vars*`, `.flaskenv`, and
 files under a `.env` or `.env.d` directory, in any letter case):
 
-- every line is blank, a comment, or `KEY=VALUE` on one line (optionally
-  after `export`, the value optionally quoted, then an optional comment).
-  Anything else fails, so a pasted secret on a line of its own, or under a
-  key with a space in it, cannot slip past a dotenv parser;
-- every value, including one in a commented-out `# KEY=...` line, is empty,
-  a single-line `op://VAULT/ITEM/FIELD` or `op://VAULT/ITEM/SECTION/FIELD`
-  reference, or dotenvx ciphertext; `DOTENV_PUBLIC_KEY*` values must be
-  public keys;
+- every line is blank, a comment, or `KEY=VALUE` on one line, optionally
+  after `export`, with the value optionally quoted. Anything else fails, so
+  a pasted secret on a line of its own, or under a key with a space in it,
+  cannot slip past a dotenv parser;
+- every value, including one in a commented-out `# KEY=...` or `# KEY: ...`
+  line, is empty, a single-line `op://VAULT/ITEM/FIELD` or
+  `op://VAULT/ITEM/SECTION/FIELD` reference (letters, digits, `.`, `_`, `-`,
+  and inner spaces, which need quotes, plus an optional `?attribute=` or
+  `?ssh-format=`), or dotenvx ciphertext; `DOTENV_PUBLIC_KEY*` values must
+  be public keys;
 - the `Envfile` holds only comments, `strict true`, and `env "KEY"` lines
   whose options are `redacted: true`, `encrypted: true`, `optional`,
   `required`, or `type`. `encrypted: false`, `redacted: false` (which would
@@ -678,7 +680,13 @@ files under a `.env` or `.env.d` directory, in any letter case):
   variable cannot stand in for a missing key.
 
 Templates (`*.example`, `*.sample`, `*.template`) skip the declaration
-check and `dotenvx check`, so they may leave out keys and values. The script prints key names,
+check and `dotenvx check`, so they may leave out keys and values.
+
+Some ordinary-looking forms are refused on purpose, because a secret could
+hide in them: spaces around `=` (`KEY = value`), an inline comment after a
+value (`KEY=op://v/i/f # note`; put the note on its own line), a trailing
+comment on an `Envfile` line, and a comment that starts like an assignment
+(`# KEY=...` or `# Note: ...`), whose value must then pass the rule above. The script prints key names,
 line numbers, and dotenvx's redacted preview, never a value. It needs
 dotenvx 2.32.4 to 2.38.x, the releases that read an `Envfile`, and says
 which `dotenvx` on `PATH` it found when that one is outside the range.

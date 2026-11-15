@@ -63,18 +63,25 @@ ENV_DIRS = (".env", ".env.d")
 TEMPLATE_SUFFIXES = (".example", ".sample", ".template")
 
 KEY = r"[A-Za-z_][A-Za-z0-9_]*"
-# KEY=VALUE on one line: optional `export`, no spaces around `=`, a value that
-# is unquoted (up to a comment) or quoted and closed on the same line, then an
-# optional comment.
+# KEY=VALUE on one line: optional `export`, no spaces around `=`, and a value
+# that is unquoted or quoted and closed on the same line. Nothing may follow
+# the value: an inline comment could hide a secret, so it is refused.
 ASSIGNMENT = re.compile(
     rf"^(?:export\s+)?({KEY})="
-    r"(?:'([^'\n]*)'|\"((?:[^\"\\\n]|\\.)*)\"|`([^`\n]*)`|([^\s#'\"`][^#]*?)?)"
-    r"\s*(?:#.*)?$"
+    r"(?:'([^'\n]*)'|\"((?:[^\"\\\n]|\\.)*)\"|`([^`\n]*)`|([^\s#'\"`][^\s#]*)?)$"
 )
-# A comment that is a commented-out assignment: `# KEY=...` or `#KEY=...`.
-COMMENTED = re.compile(rf"^#\s*((?:export\s+)?{KEY}\s*=.*)$")
+# A comment that is a commented-out assignment: `# KEY=...`, `#KEY=...`, or
+# `# KEY: ...`.
+COMMENTED = re.compile(rf"^#\s*((?:export\s+)?{KEY}\s*[=:].*)$")
 
-OP_REFERENCE = re.compile(r"^op://[^/\s\\]+(?:/[^/\s\\]+){2,3}$")
+# A 1Password secret reference: op://VAULT/ITEM[/SECTION]/FIELD, each part of
+# the characters 1Password allows (spaces inside only), and an optional
+# ?attribute= or ?ssh-format= query.
+SEGMENT = r"[A-Za-z0-9._-](?:[A-Za-z0-9._ -]*[A-Za-z0-9._-])?"
+OP_REFERENCE = re.compile(
+    rf"^op://{SEGMENT}(?:/{SEGMENT}){{2,3}}"
+    r"(?:\?(?:attribute|ssh-format)=[A-Za-z0-9._-]+)?$"
+)
 CIPHERTEXT = re.compile(r"^encrypted:([A-Za-z0-9+/]{120,}={0,2})$")
 PUBLIC_KEY = re.compile(r"^0[23][0-9a-f]{64}$")
 
@@ -165,15 +172,18 @@ def parse(content: str) -> tuple[list[str], list[str]]:
             commented = True
             line = match.group(1).strip()
             # A commented-out assignment is held to the same rule.
-            line = re.sub(rf"^((?:export\s+)?{KEY})\s*=\s*", r"\1=", line)
+            line = re.sub(rf"^((?:export\s+)?{KEY})\s*[=:]\s*", r"\1=", line)
         match = ASSIGNMENT.match(line)
         if not match:
             what = "commented-out line" if commented else "line"
-            problems.append(f"{what} {number} is not a comment or a KEY=VALUE line")
+            problems.append(
+                f"{what} {number} is not a comment or a KEY=VALUE line"
+                " (no spaces around =, no inline comment)"
+            )
             continue
         key = match.group(1)
         value = next((g for g in match.groups()[1:] if g is not None), "")
-        problem = value_problem(key, value.strip() if match.group(5) else value)
+        problem = value_problem(key, value)
         if problem:
             where = "commented-out " if commented else ""
             problems.append(f"{where}{key} on line {number} {problem}")
