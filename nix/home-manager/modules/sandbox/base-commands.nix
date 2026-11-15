@@ -1,9 +1,9 @@
 # Commands that a Debian system provides and that agents, the Home Manager
 # scripts, and `agentix sandbox ssh` expect: archives, a pager, `which`,
 # `flock`, the terminal and locale tools. Taken from the pinned nixpkgs, they
-# follow flake.lock instead of the base image, and the image build checks that
-# each one on the list resolves to the profile. The OCI image, which has no
-# Debian, gets them here too.
+# follow flake.lock, and the image build checks that each one on the list is in
+# the profile. The sandbox image has no distribution under it, so they come
+# only from here.
 {
   config,
   lib,
@@ -14,8 +14,10 @@
 let
   cfg = config.agentix.sandbox.baseCommands;
 
-  # Only these of glibc's commands. Its ldconfig and ldd would shadow Debian's:
-  # dpkg runs ldconfig from PATH, and Nix's ldd misreports Debian's programs.
+  # Only these of glibc's commands. On a distribution that uses this module,
+  # its ldconfig and ldd would shadow the system's: dpkg runs ldconfig from
+  # PATH, and Nix's ldd misreports Debian's programs. The OCI image adds the
+  # rest itself.
   glibcCommands = pkgs.runCommand "glibc-commands" { } ''
     mkdir -p $out/bin
     ln -s ${lib.getBin pkgs.glibc}/bin/iconv ${lib.getBin pkgs.glibc}/bin/locale $out/bin/

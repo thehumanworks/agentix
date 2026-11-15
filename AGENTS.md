@@ -1,8 +1,9 @@
 # Agentix project instructions
 
-Agentix builds and publishes a Modal image from `src/agentix/image.py` and the
-Home Manager configuration in `nix/`. New sandboxes use the published image;
-`sandbox up` does not rebuild it. Run project commands from this directory.
+Agentix builds and publishes a Modal image from the flake's OCI image
+(`nix build .#oci` in `nix/`), with the build in `src/agentix/image.py`. New
+sandboxes use the published image; `sandbox up` does not rebuild it. Run
+project commands from this directory.
 
 ## Own image rebuilds
 
@@ -16,8 +17,10 @@ A rebuild is required when a change affects the image's contents or build:
 
 - Nix flakes, pinned inputs, Home Manager modules, packages, settings, or scripts
   used by the `modal` profile, including `nix/home-manager/modules/scripts/`.
-- The base image, installed dependencies, image environment, copied files, or
-  build and activation commands in `src/agentix/image.py`.
+- The OCI image in `nix/oci/`, and `nix/sandbox.toml`, which holds the
+  image's paths and environment.
+- The builder pin (`NIX_BUILDER`), the build script, the image's command, or
+  the checks in `src/agentix/image.py`.
 - Any other input consumed when constructing the image. Trace the actual build
   inputs if the effect of a change is unclear.
 

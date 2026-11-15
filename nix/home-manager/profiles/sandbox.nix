@@ -1,4 +1,5 @@
-# Root in a Modal sandbox: a Debian container with no systemd and no Nix daemon.
+# Root in a sandbox: the image that ../../oci builds, with no distribution
+# under it, no systemd, and no Nix daemon. Modal runs it, as do Docker and Podman.
 {
   config,
   inputs,
@@ -28,8 +29,9 @@
       pkgs.strace
     ];
 
-    # Replace the Debian defaults for root instead of failing on them. The
-    # sandbox modules add the start in the working directory to both.
+    # Replace a distribution's defaults for root, when there are any, instead
+    # of failing on them. The sandbox modules add the start in the working
+    # directory to both.
     file = {
       ".bashrc".force = true;
       ".profile".force = true;
@@ -47,14 +49,21 @@
       . "${config.home.sessionVariablesPackage}/etc/profile.d/hm-session-vars.sh"
     '';
 
-    # Debian's /etc/profile resets PATH, and the Nix profile script runs once
-    # per session. A login shell started from another shell, as in
-    # `ssh HOST 'bash -lc COMMAND'`, would otherwise lose the Nix profile.
+    # A distribution's /etc/profile, such as Debian's, resets PATH, and the
+    # Nix profile script runs once per session. A login shell started from
+    # another shell, as in `ssh HOST 'bash -lc COMMAND'`, would otherwise lose
+    # the Nix profile.
     profileExtra = ''
       case ":$PATH:" in
         *":$HOME/.nix-profile/bin:"*) ;;
         *) PATH="$HOME/.nix-profile/bin:/nix/var/nix/profiles/default/bin:$PATH" ;;
       esac
+    '';
+
+    # The prompt that Debian's /etc/bash.bashrc sets, which the image lacks:
+    # user, host, and directory.
+    initExtra = ''
+      PS1='\u@\h:\w\$ '
     '';
   };
 

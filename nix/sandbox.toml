@@ -24,3 +24,23 @@ opTokenFile = "/run/agentix/op-token"
 workdirFile = "/run/agentix/workdir"
 # Written last. `sandbox up` returns once it exists.
 readyFile = "/run/agentix/ready"
+
+# The environment of the image, for the Modal image and the OCI image alike.
+# Commands that start without a login shell, such as `sandbox exec` and the
+# image build's checks, get these from the image. Login shells and SSH
+# sessions set PATH, EDITOR, VISUAL, LANG, and NIX_PATH through Home Manager.
+# IS_SANDBOX lets Claude skip permission prompts as root. Modal sets
+# SSL_CERT_DIR=/etc/ssl/certs for the commands it starts, and the curl command
+# then looks only there unless SSL_CERT_FILE names the bundle too; the image
+# keeps the bundle in that directory, not one file per certificate.
+[env]
+PATH = "/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+HOME = "/root"
+USER = "root"
+LOGNAME = "root"
+EDITOR = "nvim"
+VISUAL = "nvim"
+LANG = "C.UTF-8"
+NIX_PATH = "nixpkgs=flake:nixpkgs"
+IS_SANDBOX = "1"
+SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt"

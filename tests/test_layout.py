@@ -80,11 +80,10 @@ class ImageCheckTests(unittest.TestCase):
         self.assertIn(".commands | length > 0", check)
 
     def test_claude_deny_rule_names_the_token_file(self):
-        check = next(check for check in image._checks() if "permissions.deny" in check)
-        words = shlex.split(check)
-        self.assertEqual(
-            words[words.index("--arg") + 2], f"Read(/{layout.OP_TOKEN_FILE})"
-        )
+        """The OCI build checks the rule, with the path from sandbox.toml."""
+        oci = (ROOT / "nix/oci/default.nix").read_text()
+        self.assertIn('--arg rule "Read(/${paths.opTokenFile})"', oci)
+        self.assertIn("'.permissions.deny | index($rule)'", oci)
 
 
 class OpenSSHScriptTests(unittest.TestCase):

@@ -9,15 +9,25 @@ uv run agentix image build
 uv run agentix sandbox up
 ```
 
-The build starts from a Debian 12 image pinned by digest, installs a pinned
-Nix release checked against its SHA-256, activates the `modal` Home Manager
-profile, and removes the build inputs from the Nix store. It installs nothing
-with apt, so two builds from one `nix/flake.lock` start from the same files.
-`BASE_IMAGE` and `NIX_INSTALLER_VERSION` in `src/agentix/image.py` hold the
-pins, with how to move them. If `nix/flake.lock` is missing, a temporary
-sandbox generates it and copies it back to this checkout. Keep that lockfile
-in version control. No local Nix install is needed. The completed image is
-published as `determinate-nix:latest`; starting a sandbox does not rebuild it.
+The image is the flake's OCI image, `nix build .#oci` in `nix/`, so the
+same files run on Modal, Docker, and Podman. Modal's image builder cannot run
+that build, so a temporary VM sandbox does: it starts from the official Nix
+image of a pinned release, builds the OCI image, and unpacks it into a
+directory. A snapshot of that directory becomes the image, with the
+environment and working directory that `nix/sandbox.toml` gives the OCI
+image. No base image, registry, or registry credential is involved, and
+nothing of the builder reaches the image. If `nix/flake.lock` is missing, a
+temporary sandbox generates it and copies it back to this checkout. Keep that
+lockfile in version control. No local Nix install is needed. The completed
+image is published as `determinate-nix:latest`, a name kept from when it held
+Determinate Nix; starting a sandbox does not rebuild it.
+
+A build from an empty Nix store takes about two minutes. The unpacked files
+are kept as the Modal image `agentix-rootfs`, tagged with a hash of `nix/`,
+the builder, and the build recipe, so a later build with the same inputs
+reuses them and finishes in seconds. `--force-build` builds them again. See
+[the Nix setup notes](nix/README.md#modal) for how the build works and how
+the image differs from the Debian-based one it replaces.
 
 The image gives an agent search and data tools, Python with uv, Bun and Node,
 linters and formatters, language servers, and direnv. A tool that is not
@@ -148,9 +158,9 @@ Rebuild after editing the Nix configuration. A rebuild keeps the revisions in
 `nix/flake.lock`; `uv run agentix flake update [INPUT...]` moves them first, and with `--build`
 also builds the image when one moved. Rex moves only when named, as
 `flake update rex`; see [Rex in sandboxes](nix/README.md#rex-in-sandboxes). Use `image build --force-build`
-only when an uncached build is needed. Modal's image-layer cache is used now;
-a separate Nix binary-cache service is deferred. Persistent volume mounting
-remains manual; see [the Nix setup notes](nix/README.md).
+only when an uncached build is needed. Each build that misses the cache starts
+from an empty Nix store; a Nix binary-cache service is deferred. Persistent
+volume mounting remains manual; see [the Nix setup notes](nix/README.md).
 
 ## Snapshots
 
@@ -254,14 +264,15 @@ names; move it with `uv run agentix flake update rex`. It does not build or
 publish the image: after merging its pull request, rebuild the image and
 verify it as `AGENTS.md` requires.
 
-The runners install the Determinate Nix release that `src/agentix/image.py`
-pins for the image. Neither workflow keeps a Nix store cache. Nearly every
-path the checks need is on cache.nixos.org, and fetching it from there was no
-slower than restoring it from the Actions cache. With Magic Nix Cache the Nix
-job took 8.5 minutes, 7 of them spent uploading paths that cache.nixos.org
-already serves. On the first run, with nothing to restore, the two checks
-took about a minute. The Nix installer action and `setup-uv` still keep their
-own downloads in the Actions cache.
+The runners install the Nix release whose official image
+`src/agentix/image.py` pins as the image's builder, with
+`cachix/install-nix-action`. Neither workflow keeps a Nix store cache. Nearly
+every path the checks need is on cache.nixos.org, and fetching it from there
+was no slower than restoring it from the Actions cache. With Magic Nix Cache
+the Nix job took 8.5 minutes, 7 of them spent uploading paths that
+cache.nixos.org already serves. On the first run, with nothing to restore, the
+two checks took about a minute. `setup-uv` still keeps its own downloads in the
+Actions cache.
 
 The weekly job opens its pull request with the workflow's own token. GitHub
 allows that only when "Allow GitHub Actions to create and approve pull

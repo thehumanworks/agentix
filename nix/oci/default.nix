@@ -2,10 +2,10 @@
 # package manager. It runs under Docker, Podman, a devcontainer, or any other
 # OCI runtime. See ../README.md for building, loading, and running it.
 #
-# The image is the Modal sandbox without Debian: root's Home Manager
-# generation, activated while the image is built, a Nix that can add to the
-# store, and the files and variables that src/agentix/image.py and the start
-# command in src/agentix/sandbox.py provide there.
+# The x86_64 image is the Modal sandbox: src/agentix/image.py publishes its
+# files on Modal. It holds root's Home Manager generation, activated while the
+# image is built, a Nix that can add to the store, and the files and variables
+# that the start command in src/agentix/sandbox.py provides on Modal.
 {
   pkgs,
   # A Home Manager configuration of the sandbox profile for this system.
@@ -19,19 +19,20 @@ let
   homePath = home.config.home.path;
   # From nix/sandbox.toml, which the agentix command reads too.
   inherit (home.config.agentix.sandbox) paths manifestFile;
+  shared = lib.importTOML ../sandbox.toml;
   # Where other distributions keep the dynamic loader.
   loaderDir = if pkgs.stdenv.hostPlatform.isx86_64 then "lib64" else "lib";
 
-  # The rest of glibc's commands, such as ldd and getconf, which the Modal
-  # image keeps from Debian. The other base commands, tar, less, flock, and
+  # The rest of glibc's commands, such as ldd and getconf, which a
+  # distribution would provide. The other base commands, tar, less, flock, and
   # locale among them, are in the Home Manager profile; see
   # home-manager/modules/sandbox/base-commands.nix. A Home Manager package of
   # the same name wins.
   base = lib.lowPrio pkgs.glibc.bin;
 
-  # Root's Nix profile, as `nix profile add` writes it in the Modal image:
-  # Nix, the Home Manager packages, CA certificates, and glibc's commands. A
-  # later `home-manager switch` finds home-path in the manifest and replaces it.
+  # Root's Nix profile, as `nix profile add` writes it: Nix, the Home Manager
+  # packages, CA certificates, and glibc's commands. A later `home-manager
+  # switch` finds home-path in the manifest and replaces it.
   profilePackages = [
     pkgs.nix.out
     homePath
@@ -266,20 +267,9 @@ pkgs.dockerTools.streamLayeredImage {
       (lib.getExe entrypoint)
     ];
     WorkingDir = paths.workdir;
-    # src/agentix/image.py sets the same for Modal; keep them in step. Commands
-    # run without a login shell get them from here. IS_SANDBOX lets Claude
-    # skip permission prompts as root; sandbox.py sets it on Modal.
-    Env = [
-      "PATH=/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-      "HOME=/root"
-      "USER=root"
-      "LOGNAME=root"
-      "EDITOR=nvim"
-      "VISUAL=nvim"
-      "LANG=C.UTF-8"
-      "NIX_PATH=nixpkgs=flake:nixpkgs"
-      "IS_SANDBOX=1"
-    ];
+    # From nix/sandbox.toml, which src/agentix/image.py reads for the Modal
+    # image too.
+    Env = lib.mapAttrsToList (name: value: "${name}=${value}") shared.env;
     Labels."org.opencontainers.image.title" = "agentix-sandbox";
   };
 }

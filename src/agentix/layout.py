@@ -27,3 +27,5 @@ WORKDIR_FILE = PATHS["workdirFile"]
 READY_FILE = PATHS["readyFile"]
 # The manifest, relative to the Home Manager profile.
 MANIFEST = _SHARED["manifest"]
+# The environment of the image, for commands that start without a login shell.
+IMAGE_ENV: dict[str, str] = _SHARED["env"]

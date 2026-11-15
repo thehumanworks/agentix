@@ -14,7 +14,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | Path | Contents |
 | --- | --- |
 | `flake.nix` | Pinned inputs, the profile table, the exported modules, the formatter, and the checks |
-| `sandbox.toml` | The paths that the agentix command on the host and the image share, and where the manifest goes |
+| `sandbox.toml` | The paths that the agentix command on the host and the image share, where the manifest goes, and the image's environment |
 | `home-manager/exports.nix` | The modules the flake exports as `homeManagerModules`, and `default`, which imports them all |
 | `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
@@ -22,7 +22,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
 | `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
-| `oci/` | The sandbox profile as an OCI image; see [OCI image](#oci-image) |
+| `oci/` | The sandbox profile as an OCI image, which the Modal image is made from; see [OCI image](#oci-image) |
 
 Each home in `flake.nix` combines every module, a profile, and a user file.
 To add a tool everywhere, add it to the list in `modules/tools.nix`. To add it
@@ -92,7 +92,9 @@ directory, and the files the start command writes to `/run/agentix` (the
 1Password token, the `--workdir` override, and the ready file). The Home
 Manager modules read it as the read-only options `agentix.sandbox.paths`, and
 `src/agentix/layout.py` reads it for the command line and the image build.
-Change a path there, then rebuild the image.
+Its `[env]` table is the environment of the image, which `oci/default.nix`
+writes into the OCI image and the Modal build gives the Modal image. Change a
+value there, then rebuild the image.
 
 The Home Manager build writes a manifest into the profile, at
 `share/agentix/manifest.json`: in a sandbox,
@@ -111,9 +113,9 @@ generation, `/opt/agentix/home-generation/home-path/share/agentix/manifest.json`
 }
 ```
 
-The image build fails if a listed command does not resolve to the Nix
-profile, ahead of any copy in the base image, or if the paths
-differ from the ones `sandbox.toml` gives the host.
+The image build fails if a listed command is not in root's profile or does
+not resolve to it on the image's `PATH`, or if the paths differ from the ones
+`sandbox.toml` gives the host.
 
 ## Use from another flake
 
@@ -189,7 +191,7 @@ modules you have no such items for.
   `tar`, `gzip`, `xz`, `bzip2`, `less`, `which`, `flock` and the rest of
   util-linux, `locale`, `iconv`, `infocmp`, `tput`, `openssl`, `hostname`, and
   `getent`, listed in `modules/sandbox/base-commands.nix`. They come from the
-  pinned nixpkgs and win over the base image's copies. There is no C compiler;
+  pinned nixpkgs, as everything in the image does. There is no C compiler;
   use `nix shell nixpkgs#gcc`.
 - Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
@@ -239,10 +241,35 @@ on this system.
 
 ## Modal
 
-`uv run agentix image build` copies this directory to
-`/root/.config/home-manager` in the image, builds the `modal` profile, activates
-it, and removes the build inputs from the Nix store. See the
-[project README](../README.md). Nothing below is needed for a normal build.
+`uv run agentix image build` publishes the [OCI image](#oci-image) of this
+directory as a Modal image; see the [project README](../README.md). Nothing
+below is needed for a normal build.
+
+Modal's image builder cannot build the OCI image itself: the activation under
+proot crashes there, and so do some builds of the stock Nix. The build
+therefore runs in a temporary VM sandbox started from the official image of
+the Nix release that `NIX_BUILDER` in `src/agentix/image.py` pins by digest.
+The sandbox gets this directory, runs `nix build .#oci`, and unpacks the
+image's layers, lowest first, into a directory. A snapshot of that directory
+is the root of the Modal image, so nothing of the builder is in it. The build
+adds the `[env]` of `sandbox.toml`, the working directory, and `sleep
+infinity` as the command for a sandbox started without one, then runs its
+checks in a layer it does not publish.
+
+The OCI image's entry point is left out on Modal, because Modal would run
+every sandbox's start command through it. The start command in
+`src/agentix/sandbox.py` does the same work there: the token file, the
+`--workdir` file, and the ready file.
+
+Each unpacked root is kept as the Modal image `agentix-rootfs:HASH`, where
+the hash covers the files of this directory, `NIX_BUILDER`, and the build
+script. A build from the same inputs reuses it, so only the Modal layers are
+built again; `--force-build` builds the root again too. Without such a hit,
+the build starts from an empty store and takes about two minutes. The roots
+stay until deleted with `modal.experimental.image_delete`; a published image
+is built on its root, so delete a root only after nothing uses it. Deleting
+an image leaves its name, which `modal image names delete` removes; a build
+that finds a deleted root under its name builds the root again.
 
 To try a change in a running sandbox before rebuilding the image:
 
@@ -254,27 +281,18 @@ The first switch downloads the build inputs the image left out. Use
 `modal-arm` if the image uses ARM64. A switch changes that sandbox only; the
 published image changes when it is rebuilt.
 
-Modal commands do not load shell startup files. The image therefore sets
-`PATH`, `EDITOR`, `VISUAL`, `LANG`, and `NIX_PATH` itself, in
-`src/agentix/image.py`.
-
-The image starts from `buildpack-deps:bookworm-curl`, pinned by digest as
-`BASE_IMAGE` in `src/agentix/image.py`: Debian 12 with curl and CA
-certificates, which is what the Nix installer needs, so the build runs no apt.
-The installer is a release checked against its SHA-256. From the base, a
-sandbox still uses `/bin/sh`, root's login shell `/bin/bash`, `/usr/bin/env`,
-the system loader, the files in `/etc`, the CA certificates, `apt` and `dpkg`,
-`perl`, `gpg`, `ldd`, `su`, the `useradd` the build runs to create the `sshd`
-account, and the other Debian commands that nothing in the profile replaces.
-The image build checks that every command in the manifest resolves to the Nix
-profile.
+Modal commands do not load shell startup files, so the image's environment
+gives them `PATH`, `EDITOR`, `VISUAL`, `LANG`, `NIX_PATH`, `IS_SANDBOX`, and
+`SSL_CERT_FILE`, from `sandbox.toml`. Modal also sets `SSL_CERT_DIR` to
+`/etc/ssl/certs` for the commands it starts, which holds only the CA bundle;
+with `SSL_CERT_FILE`, `curl` finds the bundle there too.
 
 ## OCI image
 
 `packages.x86_64-linux.oci` and `packages.aarch64-linux.oci` build the same
 sandbox as an OCI image with Nix alone: no base image and no apt. It runs
 under Docker, Podman, a devcontainer, or another cloud. The Modal image is
-still built by `src/agentix/image.py` and does not use it yet.
+the x86_64 one; see [Modal](#modal).
 
 Build it on a Linux machine with Nix, or in a sandbox, from this directory.
 The result is a script that streams the image, so the image never lands in
@@ -313,8 +331,7 @@ by root, and records a working directory set with `-w PATH` for SSH logins.
 shell, so the token stays off the command line. A container started without
 a command opens a login shell when it has a terminal. Without a terminal it
 stays up for `docker exec`, as a Modal sandbox does. Any other command runs as
-given, with the same `PATH`, `EDITOR`, `LANG`, and `NIX_PATH` as on Modal, and
-`IS_SANDBOX=1`.
+given, with the environment in `sandbox.toml`, as on Modal.
 
 As on Modal, processes that `docker run` and `docker exec` start get the token
 from the environment. SSH sessions and Claude's commands get it from the file
@@ -330,28 +347,39 @@ The image holds:
   Manager's own activation script runs, with stand-ins for the Nix commands
   it calls; see `oci/activation-shim.sh`. A Home Manager update that needs
   more from Nix fails the build.
-- Root's Nix profile, laid out as in the Modal image: Nix, the Home Manager
-  packages, which include the base commands such as `tar`, `less`, `flock`,
-  and `locale`, CA certificates, and glibc's other commands, such as `ldd`,
-  which the Modal image gets from Debian. The Nix database
+- Root's Nix profile, laid out as `nix profile add` lays it out: Nix, the
+  Home Manager packages, which include the base commands such as `tar`,
+  `less`, `flock`, and `locale`, CA certificates, and glibc's other commands,
+  such as `ldd`. The Nix database
   registers every store path in the image, so `nix run`, `nix profile`,
   `home-manager switch`, and `nix store gc` work and keep the image intact.
 - This flake in `/root/.config/home-manager`, as on Modal.
 - `/etc` files for root and an `sshd` account, `/bin/sh`, `/usr/bin/env`, the
   dynamic loader at its usual path for binaries built elsewhere, and
   `/workdir`. `/etc/bashrc` puts the Nix profile on `PATH` for
-  `ssh HOST COMMAND`, as the Nix installer's hook does on Debian.
+  `ssh HOST COMMAND`, as the Nix installer's hook does on other distributions.
 
 The entry point, the working directory, and Claude's deny rule use the paths
 in `sandbox.toml`. The build fails unless every command in the manifest is in
 root's profile.
 
-It differs from the Modal image in these ways:
+The Modal image was built on Debian 12 with the Determinate Nix installer
+until it came from this image. Compared with that image:
 
-- Nix comes from the pinned nixpkgs, not the Determinate installer.
-- Debian's own tools are absent, including `apt`, `perl`, `gpg`, and
-  `useradd`.
-- `~/.claude/CLAUDE.md` still describes a Modal sandbox.
+- Nix is the pinned nixpkgs' release, 2.35, not Determinate Nix 3, so
+  Determinate's own settings, such as `eval-cores` and `lazy-trees`, are
+  unknown to it.
+- Debian's own commands are gone: `apt` and `dpkg`, `perl`, `gpg`, `su`,
+  `useradd` and the rest of the shadow tools, the ext4 tools, `dash`, and
+  `run-parts`. Run any of them from nixpkgs, for example
+  `nix shell nixpkgs#gnupg -c gpg --version`. Git's own Perl scripts carry
+  their Perl.
+- The `sshd` account is uid 74 with `/var/empty` as its home, not uid 999.
+- The CA certificates are nixpkgs' bundle, in
+  `/etc/ssl/certs/ca-certificates.crt`, not one file per certificate.
+- The prompt, `user@host:directory#`, comes from Home Manager's `.bashrc`, not
+  from Debian's `/etc/bash.bashrc`.
+- `~/.claude/CLAUDE.md` says that there is no distribution under the sandbox.
 
 A minimal `.devcontainer/devcontainer.json` for the loaded image:
 
@@ -411,10 +439,10 @@ same run when an input moved; otherwise rebuild afterwards. Commit what
 changed.
 
 Keep `home.stateVersion` unchanged unless deliberately migrating its
-compatibility settings. The base image and the Nix version are pinned by
-`BASE_IMAGE`, `NIX_INSTALLER_VERSION`, and `NIX_INSTALLER_SHA256` in
-`src/agentix/image.py`, whose comments say how to move them. Moving either
-rebuilds every layer of the image.
+compatibility settings. The Nix that builds the image is pinned by
+`NIX_BUILDER` in `src/agentix/image.py`, whose comment says how to move it;
+CI installs the same release. Moving it builds the image's root again, but
+the image's own Nix follows `flake.lock`.
 
 See the [Home Manager manual](https://nix-community.github.io/home-manager/nix-flakes.html).
 

@@ -1,8 +1,9 @@
 # Sandbox environment
 
-You are root in a disposable Modal sandbox: a Debian VM with no systemd and no
-Nix daemon. Work in `@workdir@` unless told otherwise. Files are lost when the
-sandbox ends, so push or hand back anything that must survive.
+You are root in a disposable sandbox, normally a Modal VM. Every file in it
+comes from Nix: there is no Debian or other distribution under it, no systemd,
+and no Nix daemon. Work in `@workdir@` unless told otherwise. Files are lost
+when the sandbox ends, so push or hand back anything that must survive.
 
 ## Tools
 
@@ -11,8 +12,9 @@ sandbox ends, so push or hand back anything that must survive.
   `nix run nixpkgs#NAME -- ARGS` or `nix shell nixpkgs#NAME -c COMMAND`.
   `nixpkgs` resolves to the image's revision, so most packages download from the
   binary cache in seconds. Find names with `nix search nixpkgs TERM`.
-- There is no `sudo`; you are already root. Prefer Nix to `apt-get`: packages
-  installed with apt are invisible to Nix-built tools and are not reproducible.
+- There is no `sudo`; you are already root. There is no `apt-get` either, and
+  no `perl`, `gpg`, or `useradd` outside Nix: run them from nixpkgs, for
+  example `nix run nixpkgs#gnupg -- ARGS`.
 - There is no C compiler. Build native code inside
   `nix shell nixpkgs#gcc -c COMMAND`, or in a project's own Nix shell.
 - Python: use `uv` (`uv run`, `uv sync`, `uv tool run`); do not `pip install`

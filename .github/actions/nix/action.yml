@@ -1,6 +1,6 @@
 name: Install Nix
 description: >-
-  Install the Determinate Nix release that src/agentix/image.py pins for the
+  Install the Nix release that src/agentix/image.py pins for building the
   Modal image. Run it after actions/checkout, which provides that file.
 
 # No Nix store cache. Magic Nix Cache added 7 minutes to the first green run,
@@ -18,21 +18,19 @@ runs:
       id: pin
       shell: bash
       working-directory: ${{ github.workspace }}
-      # Either NIX_INSTALLER_VERSION = "v3.24.2" or a NIX_INSTALLER URL that
-      # ends in /nix/tag/v3.24.2. The pattern admits only v, digits, and dots.
+      # NIX_BUILDER names the official image of a release, such as
+      # "nixos/nix:2.35.6-amd64@sha256:...". The pattern admits only digits
+      # and dots.
       run: |
-        tag=$(sed -n \
-          -e 's|^NIX_INSTALLER_VERSION = "\(v[0-9][0-9.]*\)"$|\1|p' \
-          -e 's|^NIX_INSTALLER = "https://install\.determinate\.systems/nix/tag/\(v[0-9][0-9.]*\)"$|\1|p' \
+        version=$(sed -n 's|^ *"nixos/nix:\([0-9][0-9.]*\)-amd64"$|\1|p' \
           src/agentix/image.py | head -n 1)
-        if [ -n "$tag" ]; then
-          echo "Installing Determinate Nix $tag, as the Modal image does."
-        else
-          echo "::warning file=src/agentix/image.py::No Determinate Nix release found in src/agentix/image.py, so CI installs the newest one. Update .github/actions/nix/action.yml."
+        if [ -z "$version" ]; then
+          echo "::error file=src/agentix/image.py::No nixos/nix release found in NIX_BUILDER. Update .github/actions/nix/action.yml."
+          exit 1
         fi
-        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+        echo "Installing Nix $version, as the Modal image build does."
+        echo "version=$version" >> "$GITHUB_OUTPUT"
 
-    - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+    - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
       with:
-        source-tag: ${{ steps.pin.outputs.tag }}
-        diagnostic-endpoint: ""
+        install_url: https://releases.nixos.org/nix/nix-${{ steps.pin.outputs.version }}/install
