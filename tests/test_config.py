@@ -184,6 +184,14 @@ class PrecedenceTest(ConfigTestCase):
         self.assertEqual(options["secret_name"], "1password")
         self.assertEqual(options["cpu"], 0)
 
+    def test_ignored_file_value_falls_back_to_the_default_but_not_a_flag(self):
+        self.write_config('[sandbox.up]\nworkdir = "/src"\nmemory = 4096\n')
+        options = config.up_options(ignore_file=("workdir",))
+        self.assertEqual(options["workdir"], "")
+        self.assertEqual(options["memory"], 4096)
+        options = config.up_options(ignore_file=("workdir",), workdir="/x")
+        self.assertEqual(options["workdir"], "/x")
+
     def test_flag_of_the_wrong_type_is_refused(self):
         with self.assertRaisesRegex(
             ConfigError, r"--tailscale \(write True or False\)"

@@ -11,6 +11,7 @@ Keep this module free of heavy imports: the command line reads it on every
 
 import os
 import tomllib
+from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -122,12 +123,16 @@ def load(file: Path | None = None) -> dict[str, Any]:
 
 
 def resolve(
-    flags: dict[str, Any], file: Path | None = None
+    flags: dict[str, Any],
+    file: Path | None = None,
+    ignore_file: Collection[str] = (),
 ) -> dict[str, tuple[Any, str]]:
     """Each `sandbox up` option's value and where it came from.
 
     `flags` holds what the command line gave, with None for a flag it did
-    not give. The source is "flag", "config FILE", or "default".
+    not give. The source is "flag", "config FILE", or "default". A key in
+    `ignore_file` skips the file's value (it is still checked), for a flag
+    that replaces that option, as --repo replaces workdir.
     """
     file = path() if file is None else file
     unknown = set(flags) - set(UP_KEYS)
@@ -143,16 +148,17 @@ def resolve(
                 value = str(value)
             flag = "--" + name.replace("_", "-")
             result[name] = (_check_type(key, value, flag), "flag")
-        elif name in configured:
+        elif name in configured and name not in ignore_file:
             result[name] = (configured[name], f"config {file}")
         else:
             result[name] = (key.default, "default")
     return result
 
 
-def up_options(**flags: Any) -> dict[str, Any]:
+def up_options(ignore_file: Collection[str] = (), **flags: Any) -> dict[str, Any]:
     """The values `sandbox up` runs with: flag, then config file, then default."""
-    return {name: value for name, (value, _) in resolve(flags).items()}
+    resolved = resolve(flags, ignore_file=ignore_file)
+    return {name: value for name, (value, _) in resolved.items()}
 
 
 def show() -> list[dict[str, Any]]:
