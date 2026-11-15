@@ -451,6 +451,13 @@ fail in `autoPatchelfHook` with `No module named 'elftools'`. NixOS's
 qemu-user: its fakechroot step runs proot, which needs `ptrace`, and qemu-user
 does not provide it. Build the image on an ARM machine.
 
+proot on aarch64 does not translate the path of the access check that
+`test -x` makes, while stat and readlink work. So the image build's checks
+test commands through their resolved store paths; a plain
+`test -x /root/.nix-profile/bin/NAME` fails there for every command. This
+was found and the fix confirmed by running the image's customisation step,
+proot and fakeroot included, in an aarch64 NixOS VM under qemu-system.
+
 ## macOS later
 
 Install Nix on the Mac first, with flakes enabled. Change the user and home
