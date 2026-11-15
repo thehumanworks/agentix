@@ -612,8 +612,10 @@ It pushes a file when it changes, and pulls the field when another machine
 changed it. When both changed, the newer tokens win.
 
 - In a sandbox, `codex` and `pi` run `agent-auth-sync ensure` before they
-  start. If no watcher runs, it pulls both files and leaves one running in
-  the background, which pushes the sandbox's refreshes back.
+  start. If no watcher runs, it starts one in the background, which pulls
+  both files and pushes the sandbox's refreshes back, and waits up to 2
+  seconds for that first pull: when 1Password does not answer, the agent
+  starts anyway (`AGENT_AUTH_SYNC_ENSURE_WAIT` changes the wait).
   `agent-auth-sync status` shows whether the files and fields agree. Without
   a token, as with `--secret-name=''`, it does nothing.
 - On your computer, sign in once with `codex login` and pi's `/login`, then
@@ -634,9 +636,19 @@ changed it. When both changed, the newer tokens win.
 
 The service account needs write access to the vault for these pushes. A new
 login on one machine (`codex login`, pi's `/login`) reaches the others.
-Signing out does not: a deleted file is pulled back, and a cleared field is
-pushed back by any machine that still has the file. To end a login
-everywhere, revoke it with the provider.
+Logging out does not stick: a deleted file, or pi's `{}`, is pulled back
+from 1Password, and a cleared field is pushed back by any machine that
+still has the file. To end a login everywhere, revoke it with the provider.
+
+These modules change Codex and pi on a Mac or Linux computer too:
+
+- Codex keeps its login in `~/.codex/auth.json`
+  (`cli_auth_credentials_store = "file"`) rather than the macOS Keychain or
+  another keyring; a login only in the keyring is not read, so run
+  `codex login` once.
+- `codex` and `pi` no longer get `CODEX_API_KEY` or `OPENAI_API_KEY` from
+  1Password by default; `agentix.codex.secrets` and `agentix.pi.secrets`
+  add them back.
 
 ## The image
 
@@ -883,7 +895,8 @@ token and no secrets; neither workflow uses `pull_request_target`.
   run.
 - agent-auth-sync reads 1Password every 2 minutes. Two machines that
   refresh the same login within that window still collide, and one of them
-  must sign in again; pi's short-lived tokens make this likelier with
+  must sign in again; two pushes at the same moment are merged when either
+  machine reads the other's back, and otherwise the later one wins; pi's short-lived tokens make this likelier with
   several sandboxes. A sandbox that refreshes and ends before its watcher
   pushes takes the only valid token with it. Its launchd and systemd paths
   are tested with stand-ins only, not on a real Mac or systemd, and not
