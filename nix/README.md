@@ -13,7 +13,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 
 | Path | Contents |
 | --- | --- |
-| `flake.nix` | Pinned inputs, the profile table, the exported modules, the formatter, and the checks |
+| `flake.nix` | Pinned inputs, the profile table, the exported modules, the OCI images, the formatter, and the checks |
 | `sandbox.toml` | The paths that the agentix command on the host and the image share, where the manifest goes, and the image's environment |
 | `home-manager/exports.nix` | The modules the flake exports as `homeManagerModules`, and `default`, which imports them all |
 | `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
@@ -76,8 +76,9 @@ Settings that a person or another module provides:
 To add a module here:
 
 1. Create `modules/NAME.nix` with an `agentix.NAME.enable` option, made with
-   `lib.mkEnableOption` and `default = true` for a shared module, or
-   `default = config.agentix.sandbox.enable` and an import of `./options.nix`
+   `lib.mkEnableOption` and `default = true`, for a shared module, or
+   `modules/sandbox/NAME.nix` with `agentix.sandbox.NAME.enable`,
+   `default = config.agentix.sandbox.enable`, and an import of `./options.nix`
    for a sandbox one. Put its settings under `lib.mkIf` of that option.
 2. Import the files whose options it reads, such as `./1password.nix` for
    `agentix.op.package`. Importing a file more than once is fine.
@@ -286,15 +287,18 @@ To try a change in a running sandbox before rebuilding the image:
 home-manager switch --flake /root/.config/home-manager#modal
 ```
 
-The first switch downloads the build inputs the image left out. Use
-`modal-arm` if the image uses ARM64. A switch changes that sandbox only; the
+The first switch downloads the build inputs the image left out. The Modal
+image is always x86_64, so switch to `modal`: `image build` builds only
+`packages.x86_64-linux.oci` and cannot select another system. `modal-arm`
+evaluates, but has never been built. A switch changes that sandbox only; the
 published image changes when it is rebuilt.
 
 Modal commands do not load shell startup files, so the image's environment
-gives them `PATH`, `EDITOR`, `VISUAL`, `LANG`, `NIX_PATH`, `IS_SANDBOX`, and
-`SSL_CERT_FILE`, from `sandbox.toml`. Modal also sets `SSL_CERT_DIR` to
-`/etc/ssl/certs` for the commands it starts, which holds only the CA bundle;
-with `SSL_CERT_FILE`, `curl` finds the bundle there too.
+gives them `PATH`, `HOME`, `USER`, `LOGNAME`, `EDITOR`, `VISUAL`, `LANG`,
+`NIX_PATH`, `IS_SANDBOX`, and `SSL_CERT_FILE`, from `sandbox.toml`. Modal
+also sets `SSL_CERT_DIR` to `/etc/ssl/certs` for the commands it starts,
+which holds only the CA bundle; with `SSL_CERT_FILE`, `curl` finds the
+bundle there too.
 
 ## OCI image
 
@@ -317,12 +321,13 @@ Keep the link outside this directory, or add it to `.gitignore`: a `result`
 link inside an unversioned copy would become part of the flake. The image
 is about 2.0 GB unpacked, in 99 layers. The layers follow store paths, so a
 rebuild after a small change reuses most of them. Two builds of one commit
-produce the same image. The ARM image needs an ARM Linux builder.
+produce the same image. The ARM image needs an ARM Linux builder and has
+not been built yet; CI only evaluates it.
 
 On an Apple Silicon Mac, Docker runs the x86_64 image under qemu emulation.
 Commands work, slowly, including `nix run`. Interactive shells do not: qemu
 hides the terminal from the container, so without a command it waits as if
-detached. Use the ARM image there.
+detached. The ARM image is meant for that case, but is unproven.
 
 Run it:
 
@@ -475,6 +480,9 @@ sandbox profile has both, and either can be turned off without the other:
 Tailscale SSH's server is part of `tailscaled` and needs nothing from
 OpenSSH, `sftp` included. `ts ssh` runs the OpenSSH client, which the `ts`
 wrapper carries on its own `PATH`, so it works with the OpenSSH module off.
+`agentix sandbox shell` over Tailscale does not: it checks the host keys,
+which the sandbox reads with `ssh-keygen`, so with the OpenSSH module off it
+finds none and refuses.
 An `scp -O` to the sandbox, which runs `scp` there instead of SFTP, needs the
 OpenSSH module.
 
@@ -505,13 +513,16 @@ You can instead supply `TAILSCALE_AUTHKEY` as an injected key or secret referenc
 The key is passed through a file descriptor, not command arguments or a disk file.
 
 Repeated starts reuse the daemon and identity. The daemon outlives the command
-and terminal, but is not automatically restarted after a crash or sandbox reboot.
-Run the same command from your sandbox startup process to restore it.
+and terminal, but nothing restarts it after a crash or in a restored sandbox,
+which starts with no processes. Run the same command again to restore it. From
+the host, `agentix sandbox ssh start` starts it again, and `sandbox shell` does
+when Tailscale is not running.
 Existing authenticated state does not require 1Password to be available.
 
-State defaults to `$HOME/.local/state/agentix/tailscale`. To retain the identity
-across replacement sandboxes, mount a persistent volume and use the same path
-on each start, for example:
+State defaults to `$HOME/.local/state/agentix/tailscale`, under `/root`, so a
+snapshot of a Modal sandbox holds it; see the end of this section. Where
+nothing keeps that directory, as in a container that is replaced, mount a
+persistent volume and use the same path on each start, for example:
 
 ```sh
 export TAILSCALE_STATE_DIR=/volume/tailscale/agentix-dev
@@ -539,9 +550,24 @@ socket. Host DNS is left unchanged. Logs are in `$TAILSCALE_STATE_DIR/daemon.log
 on; the native Mac Tailscale application remains responsible for its
 connection.
 
-This repository does not yet mount a persistent Modal volume or invoke this
-command at sandbox boot; those are required for automatic recovery across
-sandbox replacement.
+On Modal, a name keeps its Tailscale identity through `agentix sandbox
+restore`, with no volume. Nothing starts Tailscale when a sandbox boots:
+`sandbox restore --tailscale`, `sandbox ssh start`, or `sandbox shell` starts
+it from the state in the snapshot, under a hostname that defaults to the
+sandbox's name, or to its lowercase ID for a sandbox without one. All three
+run `src/agentix/scripts/tailscale-ssh.sh`. If the control server has removed
+the old node meanwhile, as it removes an ephemeral node some time after it
+went offline, the node stays offline and is asked to log in. The script then
+logs out, which drops only the node key, and enrolls again with `ts up` under
+the same hostname, which reads the auth key from 1Password again. The node
+gets a new address and keeps its SSH host keys.
+
+If Tailscale names the node `NAME-1` because another node still has `NAME`,
+the script renames it away and back, which takes `NAME` if it is free by now;
+otherwise `start` adds a `warning`. See [Tailscale](../README.md#tailscale)
+in the project README. A sandbox with no snapshot to restore, such as one
+started with `--ephemeral` or under a name that was purged, enrolls as a new
+node.
 
 ## Rex in sandboxes
 
