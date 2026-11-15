@@ -37,13 +37,14 @@ jobs:
         run: uv run --locked ruff format --check
 
   # One job, not an eval job and a build job. From an empty store, both checks
-  # took 37 s in a Modal sandbox: 620 MiB downloaded, 82 small local builds,
-  # 2.9 GiB added to the store. That fits a standard runner, and a split would
-  # install Nix and fetch the inputs twice.
+  # took 37 s in a Modal sandbox and 64 s on a runner: 620 MiB downloaded from
+  # cache.nixos.org, 82 small local builds, 2.9 GiB added to the store. A
+  # split would install Nix and fetch the inputs twice. It keeps no store cache;
+  # .github/actions/nix/action.yml says why.
   nix:
     name: Nix flake check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
     permissions:
       contents: read
     defaults:
@@ -53,7 +54,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/nix
+      # Not $/.github/actions/nix, which zizmor suggests: actionlint 1.7.12
+      # rejects it. The checkout above is the only earlier step, so ./ loads
+      # this commit's action.
+      - uses: ./.github/actions/nix # zizmor: ignore[self-repository]
       # The x86_64, ARM, and Mac profiles and both OCI images, without building.
       - name: Evaluate every system
         run: nix flake check --all-systems --no-build

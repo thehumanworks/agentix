@@ -18,8 +18,7 @@ defaults:
 
 jobs:
   # Fetches and builds the new inputs before anyone has reviewed them, so it
-  # gets a read-only token and no cache: nothing it builds reaches the cache
-  # that CI on the default branch restores.
+  # gets a read-only token.
   update:
     name: Update and check the lock
     runs-on: ubuntu-latest
@@ -32,9 +31,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: ./.github/actions/nix
-        with:
-          cache: "false"
+      # Not $/.github/actions/nix, which zizmor suggests: actionlint 1.7.12
+      # rejects it. The checkout above is the only earlier step, so ./ loads
+      # this commit's action.
+      - uses: ./.github/actions/nix # zizmor: ignore[self-repository]
       - name: Update every input
         id: update
         working-directory: nix
@@ -112,8 +112,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
-      contents: write
-      pull-requests: write
+      contents: write # Push the automation/flake-update branch.
+      pull-requests: write # Open or update its pull request.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

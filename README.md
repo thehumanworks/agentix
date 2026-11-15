@@ -223,14 +223,29 @@ merging its pull request, rebuild the image and verify it as `AGENTS.md`
 requires.
 
 The runners install the Determinate Nix release that `src/agentix/image.py`
-pins for the image. `ci.yml` keeps the store paths that
-cache.nixos.org lacks in the repository's Actions cache, with Magic Nix Cache.
-The weekly update uses no cache, because it builds inputs that nobody has
-reviewed yet.
+pins for the image. Neither workflow keeps a Nix store cache. Nearly every
+path the checks need is on cache.nixos.org, and fetching it from there was no
+slower than restoring it from the Actions cache. With Magic Nix Cache the Nix
+job took 8.5 minutes, 7 of them spent uploading paths that cache.nixos.org
+already serves. On the first run, with nothing to restore, the two checks
+took about a minute. The Nix installer action and `setup-uv` still keep their
+own downloads in the Actions cache.
 
 The weekly job opens its pull request with the workflow's own token. GitHub
 allows that only when "Allow GitHub Actions to create and approve pull
 requests" is on in the repository's Actions settings. CI does not start on a
-pull request opened with that token; close and reopen it to run CI. Each
-third-party action is pinned to a full commit SHA, with its version in a
-comment.
+pull request opened with that token; close and reopen it to run CI.
+
+Each third-party action is pinned to a full commit SHA, with its version in a
+comment. Dependabot (`.github/dependabot.yml`) proposes newer pins every
+Monday in one pull request against `main`, for releases at least 7 days old.
+GitHub runs scheduled workflows and reads the Dependabot configuration only
+from the default branch, so both weekly jobs need their files on it.
+
+The repository is public, so pull requests from forks run `ci.yml`. Their
+runs get a read-only `GITHUB_TOKEN` and no secrets, a first-time
+contributor's run waits for approval, and neither workflow uses
+`pull_request_target`. To require CI before merging into `main`, require the
+checks `Python tests and lint` and `Nix flake check`, the jobs' `name:`
+values. Renaming a job renames its check. The weekly lock pull request then
+needs the close and reopen above before it can merge.

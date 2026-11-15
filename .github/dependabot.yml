@@ -1,0 +1,23 @@
+version: 2
+
+updates:
+  # Bumps the commit SHA that each `uses:` pins, and the version comment beside
+  # it. "/" covers .github/workflows; the composite actions need their own entry.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    # Dependabot reads this file only from the default branch. The workflows
+    # live on main, so its pull requests go there whichever branch is default.
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+    # Waits a week after a release before proposing it, so a compromised tag
+    # has time to be noticed and pulled first.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns:
+          - "*"

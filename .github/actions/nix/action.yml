@@ -1,14 +1,15 @@
 name: Install Nix
 description: >-
   Install the Determinate Nix release that src/agentix/image.py pins for the
-  Modal image, optionally with Magic Nix Cache. Run it after actions/checkout.
+  Modal image. Run it after actions/checkout, which provides that file.
 
-inputs:
-  cache:
-    description: >-
-      Keep the store paths that cache.nixos.org lacks in this repository's
-      GitHub Actions cache, with Magic Nix Cache.
-    default: "true"
+# No Nix store cache. Magic Nix Cache added 7 minutes to the first green run,
+# 8.5 in all: its post step spent 408 s uploading 477 store paths one at a
+# time, and 395 of them were public paths that cache.nixos.org already serves.
+# Restoring them was no faster than fetching them from cache.nixos.org. The
+# check builds only about 80 small derivations itself, and on the cold run its
+# build step, downloads included, took 43 s. Revisit this if the check starts
+# to build something expensive.
 
 runs:
   using: composite
@@ -18,7 +19,7 @@ runs:
       shell: bash
       working-directory: ${{ github.workspace }}
       # Either NIX_INSTALLER_VERSION = "v3.24.2" or a NIX_INSTALLER URL that
-      # ends in /nix/tag/v3.24.2.
+      # ends in /nix/tag/v3.24.2. The pattern admits only v, digits, and dots.
       run: |
         tag=$(sed -n \
           -e 's|^NIX_INSTALLER_VERSION = "\(v[0-9][0-9.]*\)"$|\1|p' \
@@ -34,13 +35,4 @@ runs:
     - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       with:
         source-tag: ${{ steps.pin.outputs.tag }}
-        diagnostic-endpoint: ""
-
-    # The action downloads the cache daemon at run time; without a pin that is
-    # whatever magic-nix-cache's main branch holds that day.
-    - if: inputs.cache == 'true'
-      uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
-      with:
-        source-revision: cd88146e8de45fc50afaee98634fea04249c3c13 # magic-nix-cache main, 2026-10-21
-        use-flakehub: disabled
         diagnostic-endpoint: ""
