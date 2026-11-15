@@ -266,13 +266,20 @@
       homeManagerModules = import ./home-manager/exports.nix { inherit inputs lib; };
 
       # The sandbox profile as an OCI image for Docker, Podman, and other
-      # hosts: `nix build .#oci` on Linux. See oci/default.nix.
-      packages = lib.mapAttrs (system: name: {
-        oci = import ./oci {
-          pkgs = pkgsFor.${system};
-          home = self.homeConfigurations.${name};
-        };
-      }) sandboxHomes;
+      # hosts: `nix build .#oci` on Linux. See oci/default.nix. And
+      # agentix-sync, on every system: `nix run .#agentix-sync -- info`.
+      packages = forAllSystems (
+        system:
+        {
+          agentix-sync = pkgsFor.${system}.callPackage ./packages/agentix-sync.nix { };
+        }
+        // lib.optionalAttrs (sandboxHomes ? ${system}) {
+          oci = import ./oci {
+            pkgs = pkgsFor.${system};
+            home = self.homeConfigurations.${sandboxHomes.${system}};
+          };
+        }
+      );
 
       # `nix fmt` formats every Nix file under this directory. The root is tied
       # to flake.nix: outside a Git checkout treefmt otherwise picks its own
