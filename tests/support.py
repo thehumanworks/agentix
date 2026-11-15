@@ -9,7 +9,6 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 import modal
-from fire import Fire
 from modal.volume import FileEntry, FileEntryType
 
 from agentix import session as session_module
@@ -202,15 +201,8 @@ class ModalTestCase(unittest.TestCase):
         return asyncio.run(run())
 
     def run_cli(self, *command):
-        real_fire = Fire
-        with (
-            patch(
-                "fire.Fire",
-                side_effect=lambda commands: real_fire(commands, command=list(command)),
-            ),
-            contextlib.redirect_stdout(io.StringIO()) as output,
-        ):
-            main()
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            main(list(command))
         return output.getvalue()
 
 

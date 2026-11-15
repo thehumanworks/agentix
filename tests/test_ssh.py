@@ -8,6 +8,7 @@ from support import ModalTestCase
 
 from agentix import ssh, ssh_input
 from agentix.errors import PublicKeyRequired
+from agentix.sandbox import NAME_TAG
 
 TUNNEL = {22: Mock(tcp_socket=("example.modal.host", 12345))}
 
@@ -39,7 +40,7 @@ class SSHTests(ModalTestCase):
         self.assertIn("100.64.0.1", output)
         self.assertEqual(
             self.sandbox.exec.aio.call_args.args[-2:],
-            ("start", "sb-01m7dn105mg5ptyjhdwffwch54"),
+            ("start", "sb-test"),
         )
 
     def test_distinct_sandboxes_get_distinct_stable_names(self):
@@ -49,6 +50,63 @@ class SSHTests(ModalTestCase):
             self.assertEqual(
                 self.sandbox.exec.aio.call_args.args[-1], sandbox_id.lower()
             )
+
+    def test_named_sandbox_given_by_id_gets_its_name(self):
+        self.sandbox.get_tags.aio.return_value = {NAME_TAG: "dev"}
+        self.manage("start")
+        self.assertEqual(self.sandbox.exec.aio.call_args.args[-2:], ("start", "dev"))
+
+    def test_known_name_needs_no_lookup(self):
+        self.run_core(ssh.manage, "start", "sb-test", name="dev")
+        self.assertEqual(self.sandbox.exec.aio.call_args.args[-1], "dev")
+        self.sandbox.get_tags.aio.assert_not_called()
+
+    def test_name_that_is_no_hostname_falls_back_to_the_id(self):
+        # Names from before the hostname rule can end with a dash, which
+        # Tailscale would drop from the DNS name.
+        self.run_core(ssh.manage, "start", "sb-01M7DN105MG5PTYJHDWFFWCH54", name="dev-")
+        self.assertEqual(
+            self.sandbox.exec.aio.call_args.args[-1], "sb-01m7dn105mg5ptyjhdwffwch54"
+        )
+
+    def test_status_and_stop_ask_for_no_name(self):
+        for action in ("status", "stop"):
+            self.manage(action)
+        self.sandbox.get_tags.aio.assert_not_called()
+
+    def test_node_named_differently_by_tailscale_is_reported(self):
+        self.process.stdout.read.aio.return_value = json.dumps(
+            {
+                "status": "running",
+                "magicdns": "dev-1.test.ts.net",
+                "ipv4": "100.64.0.1",
+            }
+        )
+        result = self.run_core(ssh.manage, "start", "sb-test", name="dev")
+        self.assertEqual(result["ssh_command"], "ssh root@dev-1.test.ts.net")
+        self.assertIn("named this node dev-1", result["warning"])
+        self.assertIn("ssh root@dev reaches that node", result["warning"])
+        self.assertIn("agentix sandbox ssh start dev takes the name", result["warning"])
+        self.process.stdout.read.aio.return_value = json.dumps(
+            {"status": "running", "magicdns": "box-2.test.ts.net", "ipv4": ""}
+        )
+        result = self.run_core(
+            ssh.manage, "start", "sb-test", hostname="box", name="dev"
+        )
+        self.assertIn(
+            "agentix sandbox ssh start dev --hostname=box takes", result["warning"]
+        )
+        # Only a suffix means that the name was taken.
+        self.process.stdout.read.aio.return_value = json.dumps(
+            {"status": "running", "magicdns": "dev-box.test.ts.net", "ipv4": ""}
+        )
+        result = self.run_core(ssh.manage, "start", "sb-test", name="dev")
+        self.assertNotIn("warning", result)
+        self.process.stdout.read.aio.return_value = json.dumps(
+            {"status": "running", "magicdns": "dev.test.ts.net", "ipv4": "100.64.0.1"}
+        )
+        result = self.run_core(ssh.manage, "start", "sb-test", name="dev")
+        self.assertNotIn("warning", result)
 
     def test_hostname_is_a_separate_argument(self):
         hostname = "literal; $(echo unsafe)"

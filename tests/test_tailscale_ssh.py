@@ -27,32 +27,55 @@ class TailscaleScriptTests(unittest.TestCase):
             .replace(
                 "/run/agentix-tailscale/tailscaled.sock", str(self.root / "socket")
             )
+            .replace("system_keys=/etc/ssh", f"system_keys={self.root / 'etc-ssh'}")
         )
+        # Prints a public key named after the private key file.
+        keygen = self.root / "ssh-keygen"
+        keygen.write_text(
+            '#!/bin/sh\n[ "$1" = -y ] && [ "$2" = -f ] || exit 9\n'
+            'grep -q unreadable "$3" && exit 1\n'
+            'echo "ssh-test $(basename "$(dirname "$3")")/$(basename "$3") comment"\n'
+        )
+        keygen.chmod(0o755)
         stub = """import json, os, sys
 from pathlib import Path
 root = Path(os.environ['TEST_ROOT'])
 state = json.loads((root / 'state').read_text())
 args = sys.argv[1:]
+def log(mutation):
+    with (root / 'mutations').open('a') as f: f.write(mutation + '\\n')
 if Path(sys.argv[0]).name == 'ts':
+    if state.get('up_fails'):
+        raise SystemExit('timeout waiting for Tailscale to enter a Running state')
+    if state['BackendState'] == 'NeedsLogin':
+        # Enrollment: a new node, which is connected.
+        state['Self']['Online'] = True
+        state['TailscaleIPs'] = ['fd7a::9', '100.64.0.9']
+        log('enroll')
+    else:
+        log('up')
     state['BackendState'] = 'Running'
     state['enabled'] = True
     if len(args) > 1:
         state['hostname'] = args[1]
         state['Self']['HostName'] = args[1]
         state['Self']['DNSName'] = args[1] + '.test.ts.net.'
-    with (root / 'mutations').open('a') as f: f.write('up\\n')
 elif args[1:] == ['status', '--json']:
     if state.get('pending_hostname'):
         state['pending_reads'] -= 1
         if state['pending_reads'] == 0:
             name = state.pop('pending_hostname')
-            state['Self'] = {'HostName': name, 'DNSName': name + '.test.ts.net.'}
+            state['Self'].update(HostName=name, DNSName=name + '.test.ts.net.')
     print(json.dumps(state))
+elif args[1:] == ['logout']:
+    state.update(BackendState='NeedsLogin', AuthURL='', up_fails=False)
+    state['Self']['Online'] = False
+    log('logout')
 elif args[1:] == ['debug', 'prefs']:
     print(json.dumps({'RunSSH': state['enabled'], 'Hostname': state['hostname']}))
 elif args[1:] == ['set', '--ssh=false']:
     state['enabled'] = False
-    with (root / 'mutations').open('a') as f: f.write('disable\\n')
+    log('disable')
 elif args[1:3] == ['set', '--ssh=true']:
     state['enabled'] = True
     if len(args) > 3:
@@ -63,7 +86,14 @@ elif args[1:3] == ['set', '--ssh=true']:
         else:
             state['Self']['HostName'] = state['hostname']
             state['Self']['DNSName'] = state['hostname'] + '.test.ts.net.'
-    with (root / 'mutations').open('a') as f: f.write('enable\\n')
+    log('enable')
+elif args[1] == 'set' and args[2:] and args[2].startswith('--hostname='):
+    # A name that another node has gets a suffix, as Tailscale gives it.
+    name = args[2].split('=', 1)[1]
+    state['hostname'] = state['Self']['HostName'] = name
+    label = name + '-1' if name in state.get('taken', []) else name
+    state['Self']['DNSName'] = label + '.test.ts.net.'
+    log('rename ' + label)
 else:
     raise SystemExit('unexpected arguments')
 (root / 'state').write_text(json.dumps(state))
@@ -76,18 +106,25 @@ else:
             "BackendState": "Running",
             "enabled": True,
             "hostname": "existing",
-            "Self": {"HostName": "existing", "DNSName": "existing.test.ts.net."},
+            "Self": {
+                "HostName": "existing",
+                "DNSName": "existing.test.ts.net.",
+                "Online": True,
+            },
+            "AuthURL": "",
             "TailscaleIPs": ["fd7a::1", "100.64.0.2"],
         }
         (self.root / "state").write_text(json.dumps(self.state))
 
-    def run_action(self, action, hostname="existing"):
+    def run_action(self, action, hostname="existing", path=None):
+        """Run the script, with the stubs first in PATH, or with PATH `path`."""
         proc = subprocess.run(
-            ["bash", str(self.script), action, hostname],
+            [shutil.which("bash"), str(self.script), action, hostname],
             env={
                 **os.environ,
                 "TEST_ROOT": str(self.root),
-                "PATH": f"{self.root}:{os.environ['PATH']}",
+                "PATH": path or f"{self.root}:{os.environ['PATH']}",
+                "TAILSCALE_STATE_DIR": str(self.root / "ts-state"),
             },
             text=True,
             capture_output=True,
@@ -101,8 +138,10 @@ else:
             result,
             {
                 "status": "running",
+                "online": True,
                 "magicdns": "existing.test.ts.net",
                 "ipv4": "100.64.0.2",
+                "host_keys": [],
             },
         )
         self.assertFalse((self.root / "mutations").exists())
@@ -119,7 +158,60 @@ else:
         (self.root / "state").write_text(json.dumps(self.state))
         result = self.run_action("start", "sb-new")
         self.assertEqual(result["magicdns"], "sb-new.test.ts.net")
-        self.assertEqual((self.root / "mutations").read_text(), "up\n")
+        self.assertEqual((self.root / "mutations").read_text(), "enroll\n")
+
+    def write_state(self, **changes):
+        self.state.update(changes)
+        (self.root / "state").write_text(json.dumps(self.state))
+
+    def test_restored_node_that_the_tailnet_removed_enrolls_again(self):
+        # tailscaled reports Running from the snapshot's state, but the node
+        # is offline and the control server asks it to log in.
+        self.state["Self"]["Online"] = False
+        self.write_state(AuthURL="https://login.example/a/1")
+        result = self.run_action("start")
+        self.assertEqual(
+            result,
+            {
+                "status": "running",
+                "online": True,
+                "magicdns": "existing.test.ts.net",
+                "ipv4": "100.64.0.9",
+                "host_keys": [],
+            },
+        )
+        self.assertEqual((self.root / "mutations").read_text(), "logout\nenroll\n")
+
+    def test_failed_start_that_asks_for_a_login_enrolls_again(self):
+        # ts read the state before the control server answered, and its
+        # `tailscale up` waited for an interactive login until it timed out.
+        self.state["Self"]["Online"] = False
+        self.write_state(
+            BackendState="Starting",
+            up_fails=True,
+            AuthURL="https://login.example/a/1",
+        )
+        result = self.run_action("start", "dev")
+        self.assertEqual(result["magicdns"], "dev.test.ts.net")
+        self.assertEqual((self.root / "mutations").read_text(), "logout\nenroll\n")
+
+    def test_other_failures_are_reported_without_logging_out(self):
+        # Without a login request, a failed start is not a removed node.
+        self.write_state(BackendState="NeedsLogin", up_fails=True)
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.run_action("start")
+        self.assertIn("timeout waiting", error.exception.stderr)
+        self.assertFalse((self.root / "mutations").exists())
+
+    def test_node_that_never_connects_is_not_reported_as_running(self):
+        self.script.write_text(self.script.read_text().replace("sleep 0.25", ":"))
+        self.state["Self"]["Online"] = False
+        self.write_state()
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.run_action("start")
+        self.assertEqual(error.exception.stdout, "")
+        self.assertIn("did not connect", error.exception.stderr)
+        self.assertFalse((self.root / "mutations").exists())
 
     def test_rename_waits_for_control_plane_before_returning_address(self):
         self.state["pending_reads"] = 3
@@ -127,6 +219,28 @@ else:
         result = self.run_action("start", "sb-renamed")
         self.assertEqual(result["magicdns"], "sb-renamed.test.ts.net")
         self.assertEqual((self.root / "mutations").read_text(), "enable\n")
+
+    def test_suffixed_name_is_taken_back_once_it_is_free(self):
+        # Named dev-1 while an earlier node had dev, which is gone now.
+        self.state["Self"].update(HostName="dev", DNSName="dev-1.test.ts.net.")
+        self.write_state(hostname="dev")
+        self.assertEqual(self.run_action("start", "dev")["magicdns"], "dev.test.ts.net")
+        self.assertEqual(
+            (self.root / "mutations").read_text(), "rename dev-rename\nrename dev\n"
+        )
+
+    def test_suffixed_name_stays_while_another_node_has_the_name(self):
+        self.state["Self"].update(HostName="dev", DNSName="dev-1.test.ts.net.")
+        self.write_state(hostname="dev", taken=["dev"])
+        self.assertEqual(
+            self.run_action("start", "dev")["magicdns"], "dev-1.test.ts.net"
+        )
+
+    def test_other_names_are_not_renamed(self):
+        self.state["Self"].update(HostName="dev", DNSName="dev-box.test.ts.net.")
+        self.write_state(hostname="dev")
+        self.run_action("start", "dev")
+        self.assertFalse((self.root / "mutations").exists())
 
     def test_unconfirmed_rename_fails_instead_of_returning_stale_address(self):
         self.state["pending_reads"] = 100
@@ -151,9 +265,44 @@ else:
         for action in ("status", "stop"):
             self.assertEqual(
                 self.run_action(action),
-                {"status": "stopped", "magicdns": "", "ipv4": ""},
+                {
+                    "status": "stopped",
+                    "online": False,
+                    "magicdns": "",
+                    "ipv4": "",
+                    "host_keys": [],
+                },
             )
         self.assertFalse((self.root / "mutations").exists())
+
+    def test_image_without_tailscale_is_named_as_the_cause(self):
+        (self.root / "ts").unlink()
+        with self.assertRaises(subprocess.CalledProcessError) as error:
+            self.run_action("start", path=str(self.root))
+        self.assertEqual(error.exception.stdout, "")
+        self.assertIn("agentix.sandbox.tailscale is off", error.exception.stderr)
+        self.assertFalse((self.root / "mutations").exists())
+
+    def test_host_keys_are_those_that_tailscaled_presents(self):
+        # The system's key of a type wins over the one in the state directory.
+        for path in (
+            "etc-ssh/ssh_host_rsa_key",
+            "ts-state/ssh/ssh_host_rsa_key",
+            "ts-state/ssh/ssh_host_ed25519_key",
+        ):
+            (self.root / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.root / path).write_text("private")
+        self.assertEqual(
+            self.run_action("status")["host_keys"],
+            ["ssh-test etc-ssh/ssh_host_rsa_key", "ssh-test ssh/ssh_host_ed25519_key"],
+        )
+
+    def test_unreadable_host_key_does_not_fail_ssh(self):
+        key = self.root / "ts-state/ssh/ssh_host_ed25519_key"
+        key.parent.mkdir(parents=True)
+        key.write_text("unreadable")
+        result = self.run_action("start")
+        self.assertEqual((result["status"], result["host_keys"]), ("running", []))
 
     def test_disconnected_network_is_not_reported_as_running_ssh(self):
         self.state["BackendState"] = "Stopped"

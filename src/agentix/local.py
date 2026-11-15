@@ -7,7 +7,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
-from . import lifecycle, sandbox, ssh
+from . import lifecycle, names, sandbox, ssh
 from .session import Session, describe
 from .store import Options
 
@@ -75,8 +75,26 @@ class Local:
     ) -> dict[str, Any]:
         async def run(session: Session):
             sandbox_id = await lifecycle.resolve(session, target)
+            # A sandbox given by its ID is asked for its name, if it needs one.
+            name = None if names.is_sandbox_id(target) else target
             return await ssh.manage(
-                session, action, sandbox_id, engine, hostname, public_key
+                session, action, sandbox_id, engine, hostname, public_key, name
+            )
+
+        return _run(run)
+
+    def shell(
+        self, target: str, engine: str, hostname: str = "", public_key: str = ""
+    ) -> dict[str, Any]:
+        """How to log in to a running sandbox with ssh, once it answers.
+
+        Without a target, the only sandbox that runs. See `ssh.connect`.
+        """
+
+        async def run(session: Session):
+            sandbox_id, name = await lifecycle.running(session, target)
+            return await ssh.connect(
+                session, sandbox_id, name, engine, hostname, public_key
             )
 
         return _run(run)
