@@ -638,6 +638,70 @@ Signing out does not: a deleted file is pulled back, and a cleared field is
 pushed back by any machine that still has the file. To end a login
 everywhere, revoke it with the provider.
 
+## The committed .env
+
+`.env` is tracked in Git, and this repository is public, so it must never hold
+a plaintext secret. Each value is a 1Password reference (`op://VAULT/ITEM/FIELD`)
+or a value encrypted by [dotenvx](https://dotenvx.com) (`encrypted:...`).
+`dotenvx run -- uv run agentix ...` or `op run --env-file .env -- uv run
+agentix ...` resolves the references at run time. Other env files, such as
+`.env.local` and `.env.keys`, stay ignored; only `.env` and `*.example` files
+may be committed.
+
+The [`Envfile`](Envfile) at the root is dotenvx's policy file
+([docs](https://github.com/dotenvx/dotenvx/blob/v2.38.2/README.md)): it
+declares each key of `.env`, marks every value `redacted: true` (masked in
+dotenvx's output) and `encrypted: true` (never committed as plaintext), and
+sets `strict true`, so a declared key that is missing fails.
+`scripts/check_env.py` enforces it, for every tracked or untracked env file
+that Git does not ignore:
+
+- `dotenvx protect --git-file`, the check behind dotenvx's own Git filter,
+  refuses any value that is not empty, an `op://` or `bw://` reference, or
+  ciphertext, and refuses `.env.keys` files and plaintext private keys;
+- every key must be declared in the `Envfile` (`DOTENV_PUBLIC_KEY` excepted);
+- `dotenvx check` must pass, with 1Password resolution, key stores, and shell
+  values all off, so it needs no secret and a shell variable cannot stand in
+  for a missing key.
+
+Templates (`*.example`, `*.sample`, `*.template`) get only the first check,
+so their values may be empty. The script prints key names and dotenvx's
+redacted preview, never a value.
+
+Run it with `python3 scripts/check_env.py`. It runs in CI (the `Nix flake
+check` job, and the flake's `env-check` check), and as a pre-commit hook on
+the staged versions once a clone opts in, which changes only this clone's
+`.git/config`:
+
+```sh
+git config core.hooksPath .githooks
+```
+
+dotenvx comes from the Home Manager profiles (`modules/tools.nix`), so the
+Mac and every sandbox have it; elsewhere `nix shell nixpkgs#dotenvx`. `dotenvx
+protect`, run once, installs the same check as a Git filter for every
+repository on the machine; it changes the global Git configuration, so it is
+left to you.
+
+To add a secret:
+
+1. Declare it in `Envfile`: `env "NEW_KEY", redacted: true, encrypted: true`.
+2. Either store it in 1Password and add `NEW_KEY=op://agentix/ITEM/FIELD` to
+   `.env`, or encrypt it into `.env` with dotenvx, which writes the private
+   key to `.env.keys`. `read -rs` keeps the value out of shell history:
+
+   ```sh
+   read -rs value && dotenvx set NEW_KEY "$value"; unset value
+   ```
+
+   Keep `.env.keys` out of Git (it is ignored) and in 1Password; without it
+   no one can decrypt.
+3. Run `python3 scripts/check_env.py` before committing.
+
+This is dotenvx 2.38, nixpkgs' release. Its next release replaces `Envfile`
+with `Dotenvxfile` and removes `dotenvx check`, so a nixpkgs update that
+brings it needs this file, the script, and the hook moved over.
+
 ## The image
 
 ### How it is built
@@ -676,7 +740,7 @@ Root's Home Manager generation, activated at build time, with:
 - a headless Chromium, `chrome-headless-shell`, which Playwright finds too;
 - comma, so `, COMMAND` runs a command that is not installed, with a prebuilt
   nix-index database, and `nix-locate`;
-- Python 3 with uv, Bun, and Node; ruff, ty, shellcheck, shfmt, nixfmt,
+- Python 3 with uv, Bun, and Node; ruff, ty, shellcheck, shfmt, dotenvx, nixfmt,
   statix, and deadnix; language servers for Python, TypeScript, Bash, Nix,
   and more, used by Neovim and by Claude Code's LSP tool;
 - Claude Code with its settings and plugins, and `~/.claude/CLAUDE.md`, a
@@ -762,6 +826,9 @@ image.
 ```text
 .
 ├── AGENTS.md               rules for agents: when and how to rebuild and verify the image
+├── .env                    tracked: op:// references and ciphertext only
+├── Envfile                 the keys .env may hold; see "The committed .env"
+├── scripts/check_env.py    fails on plaintext in env files; .githooks/pre-commit runs it
 ├── pyproject.toml          the agentix package (click, modal), Python 3.14
 ├── src/agentix/
 │   ├── __main__.py         the command line: one function per command, and its flags
@@ -803,7 +870,10 @@ image.
 uv run --with pytest pytest -q
 uv run ruff check
 uv run ruff format --check
+python3 scripts/check_env.py
 ```
+
+The env check's tests need dotenvx and are skipped without it.
 
 The tests never contact Modal. `.python-version` selects the standard
 CPython 3.14 build; Modal imports take about twice as long on the
@@ -830,11 +900,14 @@ secret or contacts Modal.
 - `ci.yml` runs on pull requests, pushes to `main`, and on demand, with three
   jobs that take about a minute. `Python tests and lint` runs the tests,
   `ruff check`, and `ruff format --check`. `Nix flake check` runs
+  `scripts/check_env.py` with the pinned dotenvx (see
+  [The committed .env](#the-committed-env)), then
   `nix flake check --all-systems --no-build`, which evaluates the x86_64,
   ARM, and Mac outputs, then `nix flake check` on x86_64 Linux: formatting,
   statix, deadnix, the `modal` and `linux` profiles, the OCI image's root
-  and layer list, each SSH engine module on and off, and that the harness
-  wrappers keep the 1Password token from the harness. `Nix flake check
+  and layer list, each SSH engine module on and off, that the harness
+  wrappers keep the 1Password token from the harness, and `env-check`, which
+  runs the env check and its tests. `Nix flake check
   (ARM)` runs the same `nix flake check` beside it on an `ubuntu-24.04-arm`
   runner, which builds `modal-arm`, the ARM image's root and layer list, and
   the SSH engine checks. That job has not yet been seen green on GitHub. To

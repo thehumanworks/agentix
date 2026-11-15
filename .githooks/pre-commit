@@ -1,0 +1,7 @@
+#!/bin/sh
+# Refuses a commit whose staged env files hold plaintext values or keys the
+# Envfile does not declare. Install it for this clone only with
+#   git config core.hooksPath .githooks
+# See "The committed .env" in README.md.
+root=$(git rev-parse --show-toplevel) || exit 1
+exec python3 "$root/scripts/check_env.py" --staged

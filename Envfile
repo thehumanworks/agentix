@@ -1,0 +1,16 @@
+# What the committed .env may hold. dotenvx reads this file: `dotenvx check`
+# validates the keys, `dotenvx protect` refuses plaintext values, and
+# `dotenvx run` masks the values in its output. scripts/check_env.py runs
+# these checks before each commit and in CI; see "The committed .env" in
+# README.md.
+#
+# Every value is redacted (masked in output) and encrypted, which here means
+# committed as a 1Password reference (op://VAULT/ITEM/FIELD) or as dotenvx
+# ciphertext (encrypted:...), never as plaintext. Both are the dotenvx
+# defaults; they are written out so the rule is visible. Declare each new key
+# here before adding it to .env: the check fails on an undeclared key.
+strict true
+
+# Modal credentials for the agentix command line on the host.
+env "MODAL_TOKEN_ID", redacted: true, encrypted: true
+env "MODAL_TOKEN_SECRET", redacted: true, encrypted: true
