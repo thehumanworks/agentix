@@ -85,6 +85,7 @@ that has a name. The command line uses
 | `--memory=MIB` | `8192` | Memory reserved for the sandbox |
 | `--cpu=CORES` | Modal's default share | CPU cores reserved |
 | `--workdir=PATH` | `/workdir` | Absolute path where commands and SSH logins start |
+| `--repo=OWNER/NAME[@REF]` | none | Clone that GitHub repository into `/workdir/NAME` and start there; see below |
 | `--secret-name=NAME` | `1password` | Modal secret to attach; `''` attaches none |
 | `--image-name=NAME` | `determinate-nix:latest` | Published image to start from |
 | `--tailscale` | off | Also start Tailscale SSH and print its address |
@@ -99,6 +100,23 @@ its default from your config file instead; see
 `sandbox up` returns once the sandbox is ready for commands, about a second
 after Modal accepts it. It does not build the image. Sandboxes run in
 Modal's VM runtime and reserve TCP port 22 for the OpenSSH tunnel.
+
+`--repo=OWNER/NAME[@REF]` starts the sandbox inside a clone of
+`github.com/OWNER/NAME`: Git clones it in the sandbox with the sandbox's own
+GitHub credentials (the image's `gh` credential helper, through the attached
+secret), checks out REF (a branch, tag, or commit) if given, and runs
+`direnv allow` if the repository has an `.envrc`. `/workdir/NAME` then
+replaces `--workdir`, which is refused with `--repo` (a `workdir` in the
+config file is ignored), so `sandbox exec`, `sandbox shell`, and a later
+`sandbox restore` start there; a restore does not clone again. If the clone
+fails, for a wrong name or a repository the credentials cannot read, the
+sandbox is removed and Git's error is reported. A public repository clones
+without a secret.
+
+```sh
+uv run agentix sandbox up --name=dev --repo=thehumanworks/agentix@main
+uv run agentix sandbox shell dev   # lands in /workdir/agentix
+```
 
 ### Defaults for `sandbox up`
 
