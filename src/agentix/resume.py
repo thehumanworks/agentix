@@ -34,7 +34,10 @@ class Rule(NamedTuple):
     prompt cannot be found, or that has a word of `refuse`, is not resumed
     by the rule. With `subcommand`, `then` is a subcommand that takes the
     prompt but not the other words, so they go before it and only the
-    prompt after it.
+    prompt after it. `values` lists the options that take a value, which
+    `refuse` then does not look at. With `one_message`, a command with
+    another message than the prompt, or an @file, is not resumed either,
+    since those would give the task again.
     """
 
     start: tuple[str, ...]
@@ -43,6 +46,8 @@ class Rule(NamedTuple):
     prompt_after: tuple[str, ...]
     refuse: tuple[str, ...] = ()
     subcommand: bool = False
+    values: tuple[str, ...] = ()
+    one_message: bool = False
 
 
 # Each rule was checked against the harness's --help and, for codex and pi,
@@ -71,6 +76,12 @@ RULES: dict[str, Rule] = {
         prompt_after=("",),
         refuse=("resume", "fork", "review", "-i", "--image", "--ephemeral"),
         subcommand=True,
+        values=(
+            *("-c", "--config", "--enable", "--disable", "-m", "--model"),
+            *("--local-provider", "-p", "--profile", "-s", "--sandbox", "-C"),
+            *("--cd", "--add-dir", "--thread-source", "--cyber-access-program"),
+            *("--output-schema", "--color", "-o", "--output-last-message"),
+        ),
     ),
     "pi": Rule(
         start=("pi",),
@@ -87,6 +98,16 @@ RULES: dict[str, Rule] = {
             "--fork",
             "--no-session",
         ),
+        # From pi 1.5.2's --help. --export and --list-models end pi at once.
+        values=(
+            *("--provider", "--model", "--api-key", "--system-prompt"),
+            *("--append-system-prompt", "--mode", "--session", "--session-id"),
+            *("--fork", "--session-dir", "--name", "-n", "--models", "--tools"),
+            *("-t", "--exclude-tools", "-xt", "--thinking", "--extension", "-e"),
+            *("--skill", "--prompt-template", "--theme", "--use-theme"),
+            "--tui-mode",
+        ),
+        one_message=True,
     ),
 }
 # What a resumed agent is told instead of its task.
@@ -110,13 +131,15 @@ RESTORE_ATTEMPTS = 3
 
 # $1 is RUNS_DIR, $2 the run ID, $3 the marker, then the command. The marker
 # is removed when the command exits, whatever its exit code, so one that is
-# left means the sandbox ended while the command ran.
+# left means the sandbox ended while the command ran. Nothing ever writes to
+# the command's input, and `codex exec` and `pi -p` read an open stdin until
+# it ends, so the command reads /dev/null instead.
 WRAPPER = """set -u
 mkdir -p "$1" && printf '%s\\n' "$3" > "$1/$2.tmp" && mv "$1/$2.tmp" "$1/$2.json" \
   || { echo "agentix: cannot write the resume marker in $1" >&2; exit 125; }
 marker=$1/$2.json
 shift 3
-"$@"
+"$@" < /dev/null
 code=$?
 rm -f "$marker"
 exit "$code"
@@ -170,14 +193,26 @@ def plan(argv: Sequence[str], resume: object) -> tuple[list[str], list[str], str
             continue
         rest = list(argv[n:])
         prompt = _prompt(rest, rule.prompt_after)
-        clash = [word for word in rest if word.split("=")[0] in rule.refuse]
-        if prompt is None or clash:
+        words = _words(rest, rule.values)
+        clash = [word for _, word in words if word.split("=")[0] in rule.refuse]
+        extra = [
+            word
+            for i, word in words
+            if rule.one_message
+            and i != prompt
+            and (word == "--" or word.startswith("@") or not word.startswith("-"))
+        ]
+        if prompt is None or clash or extra:
             places = [word or " ".join(rule.start) for word in rule.prompt_after]
-            why = (
-                f"it already says which session to use ({clash[0]})"
-                if clash
-                else f"its prompt is not right after {' or '.join(places)}"
-            )
+            if clash:
+                why = f"it already says which session to use ({clash[0]})"
+            elif prompt is None:
+                why = f"its prompt is not right after {' or '.join(places)}"
+            else:
+                why = (
+                    f"it has more to say than its prompt ({extra[0]}), which "
+                    "would give the task again"
+                )
             raise InvalidRequest(
                 f"The {name} rule cannot resume `{shlex.join(argv)}`: {why}. Say "
                 "how it continues with --resume='COMMAND'."
@@ -196,6 +231,18 @@ def plan(argv: Sequence[str], resume: object) -> tuple[list[str], list[str], str
         f"No resume rule for `{shlex.join(argv)}`, so it would not be resumed. "
         f"Rules: {known}. Say how it continues with --resume='COMMAND'."
     )
+
+
+def _words(rest: list[str], values: tuple[str, ...]) -> list[tuple[int, str]]:
+    """The words of `rest` with their index, leaving out options' values."""
+    words, skip = [], False
+    for i, word in enumerate(rest):
+        if skip:
+            skip = False
+            continue
+        words.append((i, word))
+        skip = word in values
+    return words
 
 
 def _prompt(rest: list[str], after: tuple[str, ...]) -> int | None:

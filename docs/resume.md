@@ -65,7 +65,12 @@ session itself (`-c`, `-r`, `--resume`, `--session-id`, `--fork-session`) is
 refused by the rule. pi 1.5.2's `--session-id ID` opens the workdir's
 session with that ID, or creates it, so the pi rule passes the same new ID
 when it starts and when it continues; a pi command with `-c`, `-r`,
-`--session`, `--session-id`, `--fork`, or `--no-session` is refused.
+`--session`, `--session-id`, `--fork`, or `--no-session` is refused, and
+so is one with more than the prompt to say: pi takes several messages and
+`@file` arguments, and only the prompt is replaced by CONTINUE, so
+`pi -p @spec.md "do X"` and `pi -p A B` are refused rather than sent again.
+The rules know which options take a value (`--model m`), so a value is
+neither a message nor a refused word: `codex exec TASK -m review` is fine.
 `codex exec` cannot be given a session ID when it starts, so codex continues
 the latest session in the workdir (`--last` looks only at sessions started
 there): run one resumable codex run per workdir, and nothing else of codex
@@ -98,6 +103,12 @@ when the command exits, whatever its exit code:
 
 `command` is what runs now, with its session ID; `resume` is what continues
 it, with the same ID.
+
+The command's input is `/dev/null`. Nothing writes to it, and `codex exec`
+and `pi -p` read an open input until it ends, so with the input of the exec
+they would wait there until the timeout, each time they were resumed.
+`claude -p` with a prompt does not read it. A command that needs input reads
+a file instead.
 
 `/root` is in the exit snapshot (`/run` is not), so a marker in a snapshot
 means the command was still running when that sandbox ended. `sandbox_id`

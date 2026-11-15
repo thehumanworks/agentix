@@ -10,6 +10,25 @@
 let
   cfg = config.agentix.codex;
   opRun = import ./op-run.nix { inherit config lib pkgs; };
+
+  # nixpkgs' build leaves the symbol tables in the binaries. Stripping them
+  # takes about 155 MiB off; logs_client, a log viewer for Codex's
+  # developers, goes too. Only on Linux, where strip -s is GNU's.
+  codex =
+    if pkgs.stdenv.hostPlatform.isLinux then
+      pkgs.runCommand "codex-${pkgs.codex.version}"
+        {
+          inherit (pkgs.codex) version meta;
+          nativeBuildInputs = [ pkgs.binutils ];
+        }
+        ''
+          cp -a ${pkgs.codex} $out
+          chmod -R u+w $out
+          rm $out/bin/logs_client
+          strip -s $out/bin/codex $out/bin/codex-code-mode-host
+        ''
+    else
+      pkgs.codex;
 in
 {
   imports = [ ./1password.nix ];
@@ -48,7 +67,7 @@ in
       package =
         (opRun {
           name = "codex";
-          program = lib.getExe pkgs.codex;
+          program = lib.getExe codex;
           inherit (cfg) secrets;
           bypass = [
             "--version"
@@ -57,7 +76,7 @@ in
             "-h"
           ];
         }).overrideAttrs
-          { inherit (pkgs.codex) version; };
+          { inherit (codex) version; };
     };
   };
 }

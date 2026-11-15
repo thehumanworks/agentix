@@ -347,10 +347,12 @@ with the `gh` and `gh-lf` wrappers.
   (`pi`, nixpkgs' `pi-coding-agent`, `modules/pi.nix`). Each wrapper gets
   its API key from 1Password when it starts. Codex's own command sandbox
   works in a Modal sandbox, so its settings keep the default sandbox modes.
-  They took the unpacked image from 3.0 to 4.0 GiB: Codex about 605 MiB
+  They took the unpacked image from 3.0 to 3.8 GiB: Codex about 410 MiB
   plus about 110 MiB of the GStreamer libraries for its voice mode, and pi
-  about 240 MiB. Turn `agentix.codex.enable` or `agentix.pi.enable` off to
-  leave either out.
+  about 240 MiB. On Linux the module strips Codex's binaries, which nixpkgs
+  leaves with their symbol tables, and drops its `logs_client` (about
+  195 MiB less; `codex doctor` reports the same). Turn
+  `agentix.codex.enable` or `agentix.pi.enable` off to leave either out.
 - Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
   Claude's LSP tool run the same builds. Claude has the Python, TypeScript,
