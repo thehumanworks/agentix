@@ -425,13 +425,20 @@ lock. See [Rex in sandboxes](nix/README.md#rex-in-sandboxes).
 
 ### Profiles and modules
 
-`nix/flake.nix` builds three Home Manager profiles:
+`nix/flake.nix` builds four Home Manager profiles:
 
 | Profile | System | Status |
 | --- | --- | --- |
 | `modal` | x86_64 Linux | The image; built by `image build` and CI |
 | `modal-arm` | ARM64 Linux | Evaluated by CI, not built |
+| `linux` | x86_64 Linux | An example of `lib.mkLinuxHome` for a user `agent`; built by CI |
 | `mac` | Apple Silicon macOS | Evaluated by CI, not built; see [macOS later](nix/README.md#macos-later) |
+
+For any other Linux machine or container, `lib.mkLinuxHome { username;
+homeDirectory; }` gives a configuration for that user, root or not, without
+Modal. The sandbox modules that rely on what `sandbox up` writes under
+`/run/agentix`, or on root, stay off there. See
+[Any Linux user](nix/README.md#any-linux-user).
 
 Every module has an `enable` option: `agentix.NAME.enable` for the shared
 modules, which default to on, and `agentix.sandbox.NAME.enable` for the
@@ -509,9 +516,9 @@ secret or contacts Modal.
   `ruff check`, and `ruff format --check`. `Nix flake check` runs
   `nix flake check --all-systems --no-build`, which evaluates the x86_64,
   ARM, and Mac outputs, then `nix flake check` on x86_64 Linux: formatting,
-  statix, deadnix, the `modal` profile, the OCI image's root and layer list,
-  and each SSH engine module on and off. To require CI before merging,
-  require those two checks by name.
+  statix, deadnix, the `modal` and `linux` profiles, the OCI image's root
+  and layer list, and each SSH engine module on and off. To require CI
+  before merging, require those two checks by name.
 - `flake-update.yml` runs every Monday and on demand. It runs
   `nix flake update` in `nix/` and the same Nix checks on the new lock, and
   when they pass opens or updates a pull request from
