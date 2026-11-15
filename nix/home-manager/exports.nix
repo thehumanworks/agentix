@@ -28,6 +28,7 @@ in
     ;
   git = ./modules/git.nix;
   language-servers = ./modules/language-servers.nix;
+  sync = ./modules/sync.nix;
   tools = ./modules/tools.nix;
 
   # Claude's sandbox settings extend the Claude module, so it comes along.
@@ -61,6 +62,7 @@ in
     ./modules/language-servers.nix
     nix-index
     nixvim
+    ./modules/sync.nix
     ./modules/tools.nix
   ];
 }

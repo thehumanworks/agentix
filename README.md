@@ -57,6 +57,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox exec SANDBOX 'COMMAND' [--resume[=CMD]] [--detach]` | Run one command and print its output; `--resume` continues it after a timeout; `--detach` prints a run ID and leaves it running |
 | `sandbox logs RUN` / `sandbox wait RUN` | Follow a detached run's output from its start / wait for it and exit with its exit code |
 | `sandbox runs [SANDBOX] [--clean]` | Detached runs and their state; `--clean` forgets those that ended |
+| `sandbox sync [SANDBOX] [--pull] [--path=DIR]` | Copy this checkout's uncommitted changes into the sandbox's clone, or back with `--pull` |
 | `sandbox shell [SANDBOX] [-- COMMAND]` | Start SSH if needed, then log in with `ssh`, or run COMMAND |
 | `sandbox ssh start\|status\|stop SANDBOX` | Control one SSH engine; `start` prints how to connect |
 | `sandbox down SANDBOX` | Stop a sandbox; for a named one, prints the snapshot Modal saved |
@@ -223,6 +224,62 @@ modes: [docs/detached-runs.md](docs/detached-runs.md).
 or in the directory given with `--workdir`. A relative path in `rsync`,
 `scp`, or `sftp` is relative to `/workdir`, except for `scp` and `sftp`
 over Tailscale SSH, which start in `/root`.
+
+### Copying changes with `sandbox sync`
+
+`sandbox sync` copies the uncommitted changes of the checkout you run it in
+into the same repository's clone in a sandbox, the `/workdir/NAME` that
+`sandbox up --repo=OWNER/NAME` makes; `--pull` copies the sandbox's changes
+back. NAME comes from the checkout's GitHub `origin`, or else its directory;
+`--path=DIR` names another checkout in the sandbox. Without a sandbox, it
+means the only one that runs, as for `sandbox shell`.
+
+```sh
+cd ~/src/agentix
+uv run agentix sandbox up --name=dev --repo=thehumanworks/agentix
+# edit here, then
+uv run agentix sandbox sync dev
+# let an agent work there, then
+uv run agentix sandbox sync dev --pull
+```
+
+Both sides run one script, `agentix-sync`, through Git: the image has it on
+PATH, and the host runs the same file from `nix/` (or `nix run
+./nix#agentix-sync`). It needs Git 2.40 or newer on the host.
+
+- What moves: the working tree against HEAD, with untracked files,
+  deletions, binary files, modes, and symlinks; not ignored files. It goes
+  as a Git bundle without the commits the other side has, so only the
+  changes cross.
+- It merges: the sender's changes are merged into the receiver's working
+  tree as `git merge` would, from the last state both sides agreed on
+  (`refs/agentix-sync/synced`), else from the sender's HEAD. So a file
+  synced before and changed since on one side is no conflict, and the two
+  may be on different commits; then only the uncommitted changes move, and
+  the sender's commit is kept in `refs/agentix-sync/incoming^` there.
+  Changes show as unstaged, and new files as untracked; the index and HEAD
+  stay.
+- It refuses conflicts: if a file changed on both sides in ways that do not
+  merge, or writing would remove a file that Git ignores there (one where a
+  new file or a new file's directory goes, or one inside a directory that a
+  file replaces), nothing changes on either side and the files are listed.
+- It stops before writing anything if Git cannot read the working tree (a
+  failing filter, such as LFS without git-lfs, or an unreadable file), if
+  the new files cannot be prepared, or if a file changed while it ran. It
+  writes by moving the old files aside and the new ones in, and if a move
+  fails it puts the old files back.
+- It keeps a backup: before it writes, the receiver's working tree, untracked
+  files included, is saved as a commit under
+  `refs/agentix-sync/backup/NNNNNN-TIME`, numbered in order. `agentix-sync
+  undo` there puts back the latest one, after saving the current state the
+  same way. Any failure after the backup was taken prints its ref and the
+  undo command. Backups accumulate, with every untracked file they held;
+  delete them all with `git for-each-ref --format='delete %(refname)'
+  refs/agentix-sync/backup/ | git update-ref --stdin`.
+- It refuses changes over 1 GiB, and warns from 100 MiB: untracked files
+  that are not ignored are sent too.
+- A sandbox from an image without `agentix-sync`, or with an older one, gets
+  the host's copy of the script for that run.
 
 ## Sandbox lifecycle
 
@@ -660,6 +717,7 @@ image.
 │   ├── session.py          shared Modal handles and error mapping
 │   ├── ssh.py              SSH engines, sandbox shell, host keys
 │   ├── ssh_input.py        checks on SSH flags and keys, made before Modal
+│   ├── sync.py             sandbox sync: runs agentix-sync on both sides
 │   ├── names.py            sandbox name rules and generated names
 │   ├── image.py            the image build, its checks, and NIX_BUILDER
 │   ├── flake.py            flake update and the Rex pin
@@ -668,7 +726,7 @@ image.
 │   ├── config.py           defaults for sandbox up from ~/.config/agentix/config.toml
 │   └── scripts/            tailscale-ssh.sh and openssh-ssh.sh, run in the sandbox
 ├── nix/                    the flake; see nix/README.md
-│   ├── flake.nix           inputs, profiles, exported modules, OCI packages, checks
+│   ├── flake.nix           inputs, profiles, exported modules, OCI and agentix-sync packages, checks
 │   ├── sandbox.toml        paths and environment shared by the CLI and the image
 │   ├── home-manager/       profiles/, users/, modules/, home.nix, exports.nix
 │   └── oci/                the OCI image the Modal image is made from

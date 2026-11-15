@@ -406,6 +406,28 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" + ("" if number == 1 else "s")
 
 
+def _sync(name: str = "", pull: Any = False, path: Any = ""):
+    """Copy this checkout's uncommitted changes into a sandbox, or back with --pull.
+
+    NAME is the sandbox, a name or an ID; without one, the only sandbox that
+    runs. Its checkout is the one `sandbox up --repo=OWNER/NAME` makes, in
+    the image's working directory, or --path=DIR. Untracked files,
+    deletions, and binary files move; ignored files do not. Only what the
+    other side lacks is sent. Changes are merged into the other side's
+    working tree; if any file conflicts, nothing changes and the files are
+    listed. The other side's working tree is saved first as a Git ref, and
+    `agentix-sync undo` there puts it back.
+    """
+    if not isinstance(pull, bool):
+        raise InvalidRequest(
+            f"--pull takes no value, not {pull!r}. Put it after the sandbox: "
+            "sandbox sync NAME --pull."
+        )
+    if not isinstance(path, str):
+        raise InvalidRequest(f"Invalid --path: {path!r}. Give a directory.")
+    return _backend().sync(str(name), os.getcwd(), path, pull)
+
+
 def _ssh_start(
     sandbox_id: str, engine: str = "tailscale", hostname: str = "", public_key: str = ""
 ):
@@ -558,6 +580,7 @@ def main(argv: Sequence[str] | None = None):
                 "resume": _resume,
                 "purge": _purge,
                 "prune": _prune,
+                "sync": _sync,
                 "shell": _shell_command(command),
                 "ssh": {
                     "start": _ssh_start,
