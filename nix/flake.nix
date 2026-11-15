@@ -90,6 +90,21 @@
       # For other flakes; see README.md.
       homeManagerModules = import ./home-manager/exports.nix { inherit inputs lib; };
 
+      # The sandbox profile as an OCI image for Docker, Podman, and other
+      # hosts: `nix build .#oci` on Linux. See oci/default.nix.
+      packages =
+        lib.mapAttrs
+          (system: name: {
+            oci = import ./oci {
+              pkgs = pkgsFor.${system};
+              home = self.homeConfigurations.${name};
+            };
+          })
+          {
+            x86_64-linux = "modal";
+            aarch64-linux = "modal-arm";
+          };
+
       # `nix fmt` formats every Nix file under this directory. The root is tied
       # to flake.nix: outside a Git checkout treefmt otherwise picks its own
       # root, and as root in a sandbox that rewrote files in /nix/store.
@@ -121,6 +136,8 @@
         // lib.mapAttrs' (
           name: _: lib.nameValuePair "home-${name}" self.homeConfigurations.${name}.activationPackage
         ) (lib.filterAttrs (_: home: home.system == system) homes)
+        # Builds the image's activated root and layer list, not its layers.
+        // self.packages.${system} or { }
       );
     };
 }

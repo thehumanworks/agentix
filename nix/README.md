@@ -22,6 +22,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
 | `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
+| `oci/` | The sandbox profile as an OCI image; see [OCI image](#oci-image) |
 
 Each home in `flake.nix` combines every module, a profile, and a user file.
 To add a tool everywhere, add it to the list in `modules/tools.nix`. To add it
@@ -221,7 +222,11 @@ nix flake check
 
 `nix fmt` formats every Nix file with nixfmt. `nix flake check` verifies the
 formatting, runs statix and deadnix, and builds the profiles of the current
-system. Add `--all-systems` to evaluate the Mac and ARM profiles too.
+system. On Linux it also builds the OCI image's activated root and layer list,
+which takes seconds once the profile is built, but not the image stream itself.
+Add `--all-systems --no-build` to evaluate the Mac and ARM profiles and the ARM
+image too; without `--no-build`, Nix stops at the first check it cannot build
+on this system.
 
 ## Modal
 
@@ -243,6 +248,105 @@ published image changes when it is rebuilt.
 Modal commands do not load shell startup files. The image therefore sets
 `PATH`, `EDITOR`, `VISUAL`, `LANG`, and `NIX_PATH` itself, in
 `src/agentix/image.py`.
+
+## OCI image
+
+`packages.x86_64-linux.oci` and `packages.aarch64-linux.oci` build the same
+sandbox as an OCI image with Nix alone: no base image and no apt. It runs
+under Docker, Podman, a devcontainer, or another cloud. The Modal image is
+still built by `src/agentix/image.py` and does not use it yet.
+
+Build it on a Linux machine with Nix, or in a sandbox, from this directory.
+The result is a script that streams the image, so the image never lands in
+the store as one large file:
+
+```sh
+nix build .#oci -o /tmp/oci     # x86_64; .#packages.aarch64-linux.oci on ARM
+/tmp/oci | docker load          # or podman load; prints agentix-sandbox:latest
+/tmp/oci | zstd > agentix-sandbox.tar.zst   # a file to copy elsewhere
+```
+
+Keep the link outside this directory, or add it to `.gitignore`: a `result`
+link inside an unversioned copy would become part of the flake. The image
+is about 2.0 GB unpacked, in 99 layers. The layers follow store paths, so a
+rebuild after a small change reuses most of them. Two builds of one commit
+produce the same image. The ARM image needs an ARM Linux builder.
+
+On an Apple Silicon Mac, Docker runs the x86_64 image under qemu emulation.
+Commands work, slowly, including `nix run`. Interactive shells do not: qemu
+hides the terminal from the container, so without a command it waits as if
+detached. Use the ARM image there.
+
+Run it:
+
+```sh
+docker run -it --rm agentix-sandbox                      # login shell in /workdir
+docker run --rm agentix-sandbox nix run nixpkgs#hello   # one command
+docker run -d --name dev -e OP_SERVICE_ACCOUNT_TOKEN agentix-sandbox
+docker exec -it dev bash -l                             # into the running one
+```
+
+The entry point does what `agentix sandbox up` does in its start command.
+It stores `OP_SERVICE_ACCOUNT_TOKEN` in `/run/agentix/op-token`, readable only
+by root, and records a working directory set with `-w PATH` for SSH logins.
+`-e OP_SERVICE_ACCOUNT_TOKEN` without a value copies the variable from your
+shell, so the token stays off the command line. A container started without
+a command opens a login shell when it has a terminal. Without a terminal it
+stays up for `docker exec`, as a Modal sandbox does. Any other command runs as
+given, with the same `PATH`, `EDITOR`, `LANG`, and `NIX_PATH` as on Modal, and
+`IS_SANDBOX=1`.
+
+As on Modal, processes that `docker run` and `docker exec` start get the token
+from the environment. SSH sessions and Claude's commands get it from the file
+through `op`, and Claude starts without it. Docker keeps `/run` on disk, in
+the container's writable layer, so the entry point keeps `/run/agentix` in
+`/dev/shm`, which is in memory. With `--tmpfs /run` it uses `/run` itself. A
+container started with another `--entrypoint` gets no token file. The runtime
+stores the variables passed with `-e`, and `docker inspect` shows them.
+
+The image holds:
+
+- Root's Home Manager generation, activated while the image is built. Home
+  Manager's own activation script runs, with stand-ins for the Nix commands
+  it calls; see `oci/activation-shim.sh`. A Home Manager update that needs
+  more from Nix fails the build.
+- Root's Nix profile, laid out as in the Modal image: Nix, the Home Manager
+  packages, CA certificates, and the commands the Modal image gets from
+  Debian, such as `tar`, `less`, `flock`, and `locale`. The Nix database
+  registers every store path in the image, so `nix run`, `nix profile`,
+  `home-manager switch`, and `nix store gc` work and keep the image intact.
+- This flake in `/root/.config/home-manager`, as on Modal.
+- `/etc` files for root and an `sshd` account, `/bin/sh`, `/usr/bin/env`, the
+  dynamic loader at its usual path for binaries built elsewhere, and
+  `/workdir`. `/etc/bashrc` puts the Nix profile on `PATH` for
+  `ssh HOST COMMAND`, as the Nix installer's hook does on Debian.
+
+The entry point, the working directory, and Claude's deny rule use the paths
+in `sandbox.toml`. The build fails unless every command in the manifest is in
+root's profile.
+
+It differs from the Modal image in these ways:
+
+- Nix comes from the pinned nixpkgs, not the Determinate installer.
+- Debian's own tools are absent, including `apt`, `gcc`, `perl`, and
+  `useradd`. Run a compiler with `nix shell nixpkgs#gcc`.
+- `~/.claude/CLAUDE.md` still describes a Modal sandbox.
+
+A minimal `.devcontainer/devcontainer.json` for the loaded image:
+
+```json
+{
+  "image": "agentix-sandbox:latest",
+  "overrideCommand": false,
+  "workspaceFolder": "/workdir",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workdir,type=bind",
+  "containerEnv": { "OP_SERVICE_ACCOUNT_TOKEN": "${localEnv:OP_SERVICE_ACCOUNT_TOKEN}" }
+}
+```
+
+`overrideCommand: false` keeps the image's entry point, which writes the token
+file and keeps the container up. Without it, the devcontainer tools replace
+the entry point.
 
 ## macOS later
 
