@@ -4,10 +4,12 @@ The fake keeps its vault in a JSON file (see fake_op.py), so each test sets
 up both sides, runs the script, and reads what it left on each.
 """
 
+import contextlib
 import json
 import os
 import plistlib
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -302,39 +304,62 @@ class LaterSyncTest(AuthSyncTestCase):
         self.sync()
         self.assertEqual(json.loads(self.field("codex")), refreshed)
 
-    def test_a_push_at_the_same_time_elsewhere_is_merged(self):
+    MERGED = {
+        "anthropic": {"type": "oauth", "access": "pi-b", "expires": 20},
+        "openai": {"type": "oauth", "access": "pi-b", "expires": 60},
+    }
+
+    def crossing_push(self) -> Path:
+        """Both sides agree; then pi refreshes anthropic here, and the returned
+        store is the vault after another machine pushed its openai refresh."""
         first = {
             "anthropic": {"type": "oauth", "access": "pi-a", "expires": 10},
             "openai": {"type": "oauth", "access": "pi-a", "expires": 50},
         }
         self.put_field("pi", first)
         self.sync()
-        # Another machine refreshed openai and pushed just after this one.
         agreed = self.store.read_text()
-        self.put_field(
-            "pi",
-            {**first, "openai": {**first["openai"], "access": "pi-b", "expires": 60}},
-        )
+        self.put_field("pi", {**first, "openai": self.MERGED["openai"]})
         elsewhere = self.tmp / "elsewhere.json"
         elsewhere.write_text(self.store.read_text())
         self.store.write_text(agreed)
-        self.write_file(
-            self.pi,
-            {
-                **first,
-                "anthropic": {**first["anthropic"], "access": "pi-b", "expires": 20},
-            },
-        )
+        self.write_file(self.pi, {**first, "anthropic": self.MERGED["anthropic"]})
+        return elsewhere
+
+    def test_a_push_at_the_same_time_elsewhere_is_merged(self):
+        elsewhere = self.crossing_push()
 
         result = self.sync(FAKE_OP_AFTER_EDIT=f"cp {elsewhere} {self.store}")
 
-        merged = {
-            "anthropic": {"type": "oauth", "access": "pi-b", "expires": 20},
-            "openai": {"type": "oauth", "access": "pi-b", "expires": 60},
-        }
-        self.assertEqual(self.read_file(self.pi), merged)
-        self.assertEqual(json.loads(self.field("pi")), merged)
+        self.assertEqual(self.read_file(self.pi), self.MERGED)
+        self.assertEqual(json.loads(self.field("pi")), self.MERGED)
         self.assertIn("another machine pushed at the same time", result.stderr)
+
+    def test_a_push_that_cannot_be_read_back_is_merged_next_time(self):
+        elsewhere = self.crossing_push()
+        down = Path(f"{self.store}.down")
+
+        # 1Password goes away just after the push and the other machine's.
+        self.run_script(
+            "sync", FAKE_OP_AFTER_EDIT=f"cp {elsewhere} {self.store} && touch {down}"
+        )
+        down.unlink()
+        self.sync()
+
+        self.assertEqual(self.read_file(self.pi), self.MERGED)
+        self.assertEqual(json.loads(self.field("pi")), self.MERGED)
+
+    def test_a_merge_left_for_pis_lock_is_merged_next_time(self):
+        elsewhere = self.crossing_push()
+        lock = Path(f"{self.pi}.lock")
+
+        # pi takes its lock just as the push is read back.
+        self.sync(FAKE_OP_AFTER_EDIT=f"cp {elsewhere} {self.store} && mkdir {lock}")
+        lock.rmdir()
+        self.sync()
+
+        self.assertEqual(self.read_file(self.pi), self.MERGED)
+        self.assertEqual(json.loads(self.field("pi")), self.MERGED)
 
     def test_a_pi_provider_removed_locally_is_removed_remotely(self):
         both = {
@@ -408,6 +433,26 @@ class FailureTest(AuthSyncTestCase):
         self.assertEqual(self.read_file(self.pi)["anthropic"]["access"], "pi-a")
         self.assertFalse(lock.exists())
 
+    def test_a_file_pi_is_writing_is_read_again(self):
+        self.put_field(
+            "pi", {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        self.pi.parent.mkdir(parents=True)
+        self.pi.write_text('{"anthropic": ')  # half written
+        # pi takes its lock just after the script looked for it.
+        lock = Path(f"{self.pi}.lock")
+        jq = self.tmp / "jq"
+        jq.write_text(
+            f'#!/bin/sh\n[ -e {lock} ] || mkdir {lock}\nexec {shutil.which("jq")} "$@"\n'
+        )
+        jq.chmod(0o755)
+
+        result = self.run_script("sync", AGENT_AUTH_SYNC_JQ=str(jq))
+
+        self.assertNotIn("not JSON", result.stderr)
+        state = self.home / ".local" / "state" / "agent-auth-sync"
+        self.assertFalse((state / "op___agentix_pi_auth.seen").exists())
+
     def test_a_bad_reference_is_reported(self):
         result = self.run_script(
             "sync", AGENT_AUTH_SYNC_FILES="op://agentix/codex /tmp/x"
@@ -466,13 +511,39 @@ class CommandsTest(AuthSyncTestCase):
 
         self.assertLess(time.monotonic() - started, 3)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("has not answered within 1 seconds", result.stderr)
+        self.assertIn("still running after 1 seconds", result.stderr)
         self.stop(self.wait_for_watcher())
         # Nothing of it is left waiting on op, which it stopped too.
         deadline = time.monotonic() + 5
         while self.watchers():
             self.assertLess(time.monotonic(), deadline, "a process was left")
             time.sleep(0.2)
+
+    def test_ensure_waits_only_for_the_agents_own_file(self):
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+        self.put_field(
+            "pi", {"anthropic": {"type": "oauth", "access": "pi-a", "expires": 5}}
+        )
+        slow_pi = {
+            "OP_SERVICE_ACCOUNT_TOKEN": "ops_fake",
+            "FAKE_OP_HANG": "20",
+            "FAKE_OP_HANG_REF": "op://agentix/pi/auth",
+            "AGENT_AUTH_SYNC_ENSURE_WAIT": "6",
+        }
+
+        started = time.monotonic()
+        result = self.run_script("ensure", str(self.codex), **slow_pi)
+
+        self.assertLess(time.monotonic() - started, 4)
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-old"
+        )
+
+        # pi's own wrapper waits for pi's file, which is still on its way.
+        result = self.run_script("ensure", str(self.pi), **slow_pi)
+        self.assertIn("still running after 6 seconds", result.stderr)
+        self.stop(self.wait_for_watcher())
 
     def test_two_ensures_at_once_leave_one_watcher(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
@@ -636,7 +707,9 @@ class CommandsTest(AuthSyncTestCase):
         while not pid_file.exists() or not pid_file.read_text().strip():
             self.assertLess(time.monotonic(), deadline, "no watcher started")
             time.sleep(0.1)
-        return int(pid_file.read_text())
+        pid = int(pid_file.read_text())
+        self.addCleanup(_kill, pid)  # even when the test fails before stop
+        return pid
 
     def test_save_token_needs_the_token_in_the_shell(self):
         result = self.run_script("save-token")
@@ -794,6 +867,11 @@ class CliTest(unittest.TestCase):
             run.return_value.returncode = 3
             with self.assertRaisesRegex(OperationFailed, "install failed"):
                 auth.run("install")
+
+
+def _kill(pid: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, signal.SIGTERM)
 
 
 def _alive(pid: int) -> bool:

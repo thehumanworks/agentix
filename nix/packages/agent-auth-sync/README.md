@@ -42,7 +42,10 @@ field, and the version both last agreed on, kept in
 - After a push, it reads the field again. If another machine pushed at the
   same moment, the newer tokens of the two go to both sides. Two pushes
   can still cross unseen when each reads the field back before the other
-  writes; the later one then wins, as it did before.
+  writes; the later one then wins, as it did before. When the field cannot
+  be read back, or pi holds its lock as the merge would be written, it
+  forgets the agreed version, so the next pass merges the two rather than
+  pulling over the refresh.
 
 Values pass through files in a private temporary directory, never through a
 command line, and nothing prints them.
@@ -80,19 +83,20 @@ of `op` and `jq` to `~/.config/agent-auth-sync/config`, and starts
 | --- | --- |
 | `sync` | Compare each file with its field once, and copy the newer over the other |
 | `watch` | Sync now, then within seconds of a file changing, and every 2 minutes for changes elsewhere; a second watcher waits for the first to stop, or with `--no-wait` exits |
-| `ensure` | Unless a watcher runs, start one and wait up to 2 seconds for its first sync; does nothing without a token |
+| `ensure [PATH...]` | Unless a watcher runs, start one; then wait up to 10 seconds for its first sync of each PATH (of every file without one); does nothing without a token |
 | `status` | Whether each file and its field agree, and whether a watcher runs; prints no secrets |
 | `stop` | Stop the watcher |
 | `save-token` | Save `OP_SERVICE_ACCOUNT_TOKEN` from this shell for the service |
 | `install` / `uninstall` | Set up or remove the service, the copy, the config, and the saved token |
 
-`ensure` returns once the watcher's first sync is done, or after
-`AGENT_AUTH_SYNC_ENSURE_WAIT` seconds, so `codex` and `pi` start within that
-even when 1Password does not answer; the sync goes on in the background and
-writes to `~/.local/state/agent-auth-sync/watch.log`. On a fresh machine
-whose first pull takes longer, the agent starts before its file arrives;
-raise the wait to avoid that. Each call of `op` is stopped after
-`AGENT_AUTH_SYNC_OP_TIMEOUT` seconds.
+The `codex` and `pi` wrappers each pass their own file, so `ensure` returns
+once the watcher's first sync of that file is done (one read of 1Password
+per file before it, in order), or after `AGENT_AUTH_SYNC_ENSURE_WAIT`
+seconds. So the agents start within that even when 1Password does not
+answer; the sync goes on in the background and writes to
+`~/.local/state/agent-auth-sync/watch.log`. If the first pull takes longer,
+the agent starts before its file arrives. Each call of `op` is stopped
+after `AGENT_AUTH_SYNC_OP_TIMEOUT` seconds.
 
 A new login on one machine reaches the others. Logging out does not stick:
 a deleted file, or pi's `{}` after `/logout`, is pulled back from
@@ -111,7 +115,7 @@ From the environment, then from `~/.config/agent-auth-sync/config`:
 | `AGENT_AUTH_SYNC_OP`, `AGENT_AUTH_SYNC_JQ` | `op`, `jq` |
 | `AGENT_AUTH_SYNC_INTERVAL` | `5`: seconds between looks at the files |
 | `AGENT_AUTH_SYNC_REMOTE_INTERVAL` | `120`: seconds between reads of 1Password; each read of each field counts against the service account's rate limit |
-| `AGENT_AUTH_SYNC_ENSURE_WAIT` | `2`: seconds `ensure` waits for the first sync |
+| `AGENT_AUTH_SYNC_ENSURE_WAIT` | `10`: seconds `ensure` waits for the first sync |
 | `AGENT_AUTH_SYNC_OP_TIMEOUT` | `30`: seconds before a call of `op` is stopped |
 | `AGENT_AUTH_SYNC_TOKEN_FILE` | `~/.config/agent-auth-sync/op-token`: the token `save-token` writes and `uninstall` removes |
 | `AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE` | None; the Nix package sets the profile's `agentix.op.tokenFile` (in a sandbox, `/run/agentix/op-token`). Read when neither the environment nor the saved token has one; never written or removed |

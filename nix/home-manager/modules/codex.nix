@@ -85,7 +85,7 @@ in
             "-h"
           ];
           beforeLaunch = lib.optionalString (authSync.enable && authSync.startWithAgents) ''
-            ${lib.getExe authSync.package} ensure || true
+            ${lib.getExe authSync.package} ensure ${lib.escapeShellArg authSync.codexFile} || true
           '';
         }).overrideAttrs
           { inherit (codex) version; };

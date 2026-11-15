@@ -613,9 +613,10 @@ changed it. When both changed, the newer tokens win.
 
 - In a sandbox, `codex` and `pi` run `agent-auth-sync ensure` before they
   start. If no watcher runs, it starts one in the background, which pulls
-  both files and pushes the sandbox's refreshes back, and waits up to 2
-  seconds for that first pull: when 1Password does not answer, the agent
-  starts anyway (`AGENT_AUTH_SYNC_ENSURE_WAIT` changes the wait).
+  both files and pushes the sandbox's refreshes back. Each agent waits for
+  the first pull of its own file, up to 10 seconds: when 1Password does not
+  answer, the agent starts anyway (`AGENT_AUTH_SYNC_ENSURE_WAIT` changes
+  the wait).
   `agent-auth-sync status` shows whether the files and fields agree. Without
   a token, as with `--secret-name=''`, it does nothing.
 - On your Mac (or a Linux computer), run one command from the root of a

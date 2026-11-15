@@ -6,7 +6,9 @@ arguments go to $FAKE_OP_STORE.calls, one JSON list per line, so a test can
 check that no secret reached a command line. $FAKE_OP_FAIL makes every call
 fail as op does when it cannot reach 1Password, and $FAKE_OP_HANG makes each
 call sleep that many seconds first, as op does when the network drops its
-packets. $FAKE_OP_AFTER_READ and $FAKE_OP_AFTER_EDIT are shell commands run
+packets; with $FAKE_OP_HANG_REF set, only `op read` of that reference
+sleeps. While $FAKE_OP_STORE.down exists, every call fails as with
+$FAKE_OP_FAIL. $FAKE_OP_AFTER_READ and $FAKE_OP_AFTER_EDIT are shell commands run
 once, after the first `op read` or `op item edit` that succeeds: what another
 process or machine does at that moment.
 """
@@ -51,8 +53,10 @@ def main(args: list[str]) -> None:
     with open(f"{STORE}.calls", "a") as calls:
         calls.write(json.dumps(args) + "\n")
     if hang := os.environ.get("FAKE_OP_HANG"):
-        time.sleep(float(hang))
-    if os.environ.get("FAKE_OP_FAIL"):
+        only = os.environ.get("FAKE_OP_HANG_REF")
+        if not only or args == ["read", only]:
+            time.sleep(float(hang))
+    if os.environ.get("FAKE_OP_FAIL") or Path(f"{STORE}.down").exists():
         fail("could not connect to 1Password: network unreachable")
     items = load()
     match args:

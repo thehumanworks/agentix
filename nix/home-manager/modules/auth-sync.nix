@@ -34,7 +34,7 @@ in
     files = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = {
-        "op://agentix/codex/auth" = "${codexHome}/auth.json";
+        "op://agentix/codex/auth" = cfg.codexFile;
         "op://agentix/pi/auth" = "${config.programs.pi-coding-agent.configDir}/auth.json";
       };
       defaultText = lib.literalExpression ''
@@ -50,12 +50,21 @@ in
       '';
     };
 
+    codexFile = lib.mkOption {
+      type = lib.types.str;
+      readOnly = true;
+      internal = true;
+      default = "${codexHome}/auth.json";
+      description = "Codex's auth.json, whose first sync the `codex` wrapper waits for.";
+    };
+
     startWithAgents = lib.mkOption {
       type = lib.types.bool;
       default = true;
       description = ''
         Whether `codex` and `pi` run `agent-auth-sync ensure` before they
-        start: unless a watcher runs, it syncs once and leaves one running.
+        start: unless a watcher runs, it starts one, and waits a few seconds
+        at most for the first sync of the agent's own file.
         It does nothing without a service account token, so `op` never asks
         to sign in from the background.
       '';
