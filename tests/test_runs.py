@@ -4,6 +4,7 @@ import json
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -12,7 +13,7 @@ import modal
 from support import ModalTestCase, _each
 
 from agentix import runner, store
-from agentix.errors import InvalidRequest, NotFound
+from agentix.errors import InvalidRequest, NotFound, OperationFailed
 
 RUN = "fc-run1"
 SB = "sb-test"
@@ -37,10 +38,14 @@ class RunsTestCase(ModalTestCase):
             run_id, self.make_call()
         )
 
-    def make_call(self, result=None, error=None, logs=()):
+    def make_call(self, result=None, error=None, logs=(), stored=None):
+        """A call whose stream yields `logs`, and whose stored log is `stored`."""
         call = Mock()
         call.get.aio = AsyncMock(return_value=result, side_effect=error)
         call.logs.stream.aio = Mock(side_effect=lambda **_: _each(list(logs)))
+        call.logs.fetch.aio = Mock(
+            side_effect=lambda **_: _each(list(logs if stored is None else stored))
+        )
         return call
 
     def store_run(self, run_id, sandbox_id=SB, started_at="2026-11-15T10:00:00+00:00"):
@@ -135,6 +140,25 @@ class LogsAndWaitTest(RunsTestCase):
         self.assertEqual(output, "one\ntwo\n")
         self.assertEqual(stderr.getvalue(), "oops\n")
 
+    def test_logs_adds_lines_stored_after_the_stream_stopped(self):
+        streamed = [entry("stdout", "one\n")]
+        self.calls[RUN] = self.make_call(
+            logs=streamed,
+            stored=[
+                entry("system", "started\n"),
+                *streamed,
+                entry("stdout", "two\n"),
+            ],
+        )
+        self.assertEqual(self.run_cli("sandbox", "logs", RUN), "one\ntwo\n")
+
+    def test_wait_on_a_call_that_reached_its_timeout_does_not_say_running(self):
+        self.calls[RUN] = self.make_call(
+            error=modal.exception.FunctionTimeoutError("limit")
+        )
+        with self.assertRaisesRegex(OperationFailed, "limit of 24 hours"):
+            self.run_cli("sandbox", "wait", RUN)
+
     def test_wait_prints_and_exits_with_the_exit_code(self):
         self.calls[RUN] = self.make_call({"exit_code": 7, "sandbox_ended": False})
         code, _ = self.run_exit("sandbox", "wait", RUN)
@@ -154,8 +178,9 @@ class LogsAndWaitTest(RunsTestCase):
 
     def test_a_run_id_must_be_a_call_id(self):
         for command in ("logs", "wait"):
-            with self.assertRaisesRegex(InvalidRequest, "Invalid run ID"):
-                self.run_cli("sandbox", command, "sb-123")
+            for run_id in ("sb-123", "fc-/../..", "fc-a b", "fc-"):
+                with self.assertRaisesRegex(InvalidRequest, "Invalid run ID"):
+                    self.run_cli("sandbox", command, run_id)
         self.call_lookup.assert_not_called()
 
 
@@ -222,6 +247,40 @@ class ListAndCleanTest(RunsTestCase):
         self.sandbox.exec.aio.assert_not_awaited()
         self.assertEqual(sorted(self.volume.files), [f"runs/{SB}/fc-b.json"])
 
+    def test_a_run_that_reached_its_timeout_has_ended(self):
+        self.calls["fc-b"] = self.make_call(
+            error=modal.exception.FunctionTimeoutError("limit")
+        )
+        listed = {run["run_id"]: run["state"] for run in self.runs_listed(SB)}
+        self.assertEqual(listed["fc-b"], "timed out")
+        self.runs_listed("--clean")
+        self.assertEqual(self.volume.files, {})
+
+    def test_clean_keeps_a_run_whose_state_is_unknown(self):
+        self.calls["fc-a"] = self.make_call(error=ConnectionError("lost"))
+        listed = {run["run_id"]: run for run in self.runs_listed(SB)}
+        self.assertEqual(listed["fc-a"]["state"], "unknown")
+        self.assertIn("lost", listed["fc-a"]["error"])
+        cleaned = self.runs_listed("--clean")
+        self.assertEqual([run["run_id"] for run in cleaned], ["fc-c"])
+        self.assertIn(f"runs/{SB}/fc-a.json", self.volume.files)
+        removed = [call.args for call in self.sandbox.exec.aio.await_args_list]
+        self.assertNotIn(("rm", "-rf", "--", f"{runner.RUNS_DIR}/fc-a"), removed)
+
+    def test_a_run_file_with_a_traversal_id_is_never_cleaned(self):
+        self.volume.files.clear()
+        self.store_run("fc-/../..")
+        listed = self.runs_listed()
+        self.assertEqual(listed[0]["state"], "invalid")
+        self.assertEqual(self.runs_listed("--clean"), [])
+        self.call_lookup.assert_not_called()
+        self.sandbox.exec.aio.assert_not_awaited()
+        self.assertEqual(len(self.volume.files), 1)
+
+    def test_a_bad_sandbox_id_is_refused(self):
+        with self.assertRaisesRegex(InvalidRequest, "Invalid sandbox ID"):
+            self.runs_listed("sb-../x")
+
     def test_no_runs_is_an_empty_list(self):
         self.volume.files.clear()
         self.assertEqual(self.runs_listed(), [])
@@ -266,6 +325,17 @@ class WrapperTest(unittest.TestCase):
             result = self.run_wrapper(run_dir, "sh", "-c", "kill -9 $PPID")
             self.assertEqual(result.returncode, runner.NO_EXIT_CODE)
             self.assertIn("without an exit code", result.stderr)
+
+    def test_a_run_that_never_wrote_its_pid_is_not_waited_for_long(self):
+        with tempfile.TemporaryDirectory() as home:
+            run_dir = Path(home, "fc-3")
+            # As a first call leaves it if it died right after mkdir.
+            run_dir.mkdir()
+            started = time.monotonic()
+            result = self.run_wrapper(run_dir, "true")
+            self.assertLess(time.monotonic() - started, 15)
+            self.assertEqual(result.returncode, runner.NO_EXIT_CODE)
+            self.assertIn("never started", result.stderr)
 
 
 if __name__ == "__main__":

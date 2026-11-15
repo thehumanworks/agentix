@@ -24,6 +24,9 @@ CALL_TIMEOUT = 24 * 60 * 60
 # The wrapper prints this, and exits with this code, if the command ended
 # without writing its exit code, for example because it was killed.
 NO_EXIT_CODE = 255
+# How many times, 0.2 s apart, a call looks for the pid file of a run that
+# another call started.
+PID_WAIT_TRIES = 25
 
 # Runs in the sandbox as `sh -c WRAPPER agentix-run DIR COMMAND...`. The first
 # call makes DIR and starts COMMAND in the background, with its output in
@@ -43,7 +46,17 @@ printf "%s\\n" "$code" > "$0/exit.tmp" && mv "$0/exit.tmp" "$0/exit"' \\
     "$dir" "$@" > /dev/null 2>&1 &
   printf '%s\\n' "$!" > "$dir/pid.tmp" && mv "$dir/pid.tmp" "$dir/pid"
 fi
-while [ ! -e "$dir/pid" ]; do sleep 0.2; done
+# The first call writes pid at once. A call that died before then leaves
+# none, and every later call would wait for it until the call's timeout.
+tries=0
+while [ ! -e "$dir/pid" ]; do
+  tries=$((tries + 1))
+  if [ "$tries" -gt {PID_WAIT_TRIES} ]; then
+    echo "agentix: the run in $dir never started: it has no pid file" >&2
+    exit {NO_EXIT_CODE}
+  fi
+  sleep 0.2
+done
 tail -n +1 -f --pid="$(cat "$dir/pid")" "$dir/output.log"
 if [ -e "$dir/exit" ]; then
   exit "$(cat "$dir/exit")"

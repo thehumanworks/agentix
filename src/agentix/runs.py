@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import io
 import json
+import re
 import shlex
 from collections.abc import Callable, Sequence
 from typing import Any
@@ -24,16 +25,31 @@ from .errors import InvalidRequest, NotFound, OperationFailed
 from .session import Session
 
 ROOT = "runs"
-_ID_PREFIX = "fc-"
+# IDs go into paths on the Volume and in the sandbox, `rm -rf` among them, so
+# they are checked whole, not by their prefix.
+_RUN_ID = re.compile(r"fc-[A-Za-z0-9]+")
+_SANDBOX_ID = re.compile(r"sb-[A-Za-z0-9]+")
+# States of a run that has surely ended, which --clean may forget. "unknown"
+# (Modal could not say) and "invalid" (a run file with bad IDs) are kept.
+ENDED = ("exited", "sandbox ended", "timed out", "expired")
 
 
 def check_run_id(run_id: str) -> str:
-    if not isinstance(run_id, str) or not run_id.startswith(_ID_PREFIX):
+    if not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id):
         raise InvalidRequest(
-            f"Invalid run ID: {run_id!r}. Run IDs start with {_ID_PREFIX}; "
-            "see agentix sandbox runs."
+            f"Invalid run ID: {run_id!r}. Run IDs are fc- and letters and "
+            "digits; see agentix sandbox runs."
         )
     return run_id
+
+
+def _valid(run: dict[str, Any]) -> bool:
+    return bool(
+        isinstance(run.get("run_id"), str)
+        and _RUN_ID.fullmatch(run["run_id"])
+        and isinstance(run.get("sandbox_id"), str)
+        and _SANDBOX_ID.fullmatch(run["sandbox_id"])
+    )
 
 
 async def deploy() -> dict[str, str]:
@@ -59,6 +75,8 @@ async def start(session: Session, target: str, args: Sequence[str]) -> dict[str,
     if not args:
         raise InvalidRequest("Provide a command to run.")
     sandbox_id = await lifecycle.resolve(session, target)
+    if not _SANDBOX_ID.fullmatch(sandbox_id):
+        raise InvalidRequest(f"Invalid sandbox ID: {sandbox_id!r}.")
     function, running = await asyncio.gather(
         _function(), sandbox.is_running(session, sandbox_id)
     )
@@ -92,14 +110,31 @@ async def follow(
 
     `source` is "stdout" or "stderr". Returns when the run has ended, or when
     nothing new came for `timeout` seconds.
+
+    The stream stops soon after the call ends, and lines that Modal stored
+    later would be missed. So once it stops, the whole log is read once more
+    and what comes after the entries already passed on is passed on too.
     """
     call = modal.FunctionCall.from_id(check_run_id(run_id))
+    shown = 0
     async for entry in call.logs.stream.aio(timeout=timeout):
         if entry.source in ("stdout", "stderr"):
+            shown += 1
             write(entry.source, entry.message)
+    if timeout is not None:
+        return
+    stored = [
+        entry
+        async for entry in call.logs.fetch.aio()
+        if entry.source in ("stdout", "stderr")
+    ]
+    for entry in stored[shown:]:
+        write(entry.source, entry.message)
 
 
-# A poll of a call that has not ended raises the built-in TimeoutError.
+# A poll of a call that has not ended raises the built-in TimeoutError. A call
+# that reached its own timeout raises modal.exception.FunctionTimeoutError,
+# which is not a built-in TimeoutError: that run has ended.
 
 
 async def wait(run_id: str, timeout: float | None = None) -> dict[str, Any]:
@@ -109,7 +144,13 @@ async def wait(run_id: str, timeout: float | None = None) -> dict[str, Any]:
         return await call.get.aio(timeout=timeout)
     except modal.exception.OutputExpiredError:
         raise NotFound(f"Modal no longer keeps the result of {run_id}.") from None
-    except TimeoutError, modal.exception.TimeoutError:
+    except modal.exception.FunctionTimeoutError:
+        raise OperationFailed(
+            f"{run_id} reached the runner's limit of {runner.CALL_TIMEOUT // 3600} "
+            "hours, so its exit code is not known. The command may still run "
+            "in the sandbox."
+        ) from None
+    except TimeoutError:
         raise OperationFailed(f"{run_id} is still running.") from None
 
 
@@ -117,18 +158,21 @@ async def status(run_id: str) -> dict[str, Any]:
     """Whether `run_id` runs, without waiting: `state` and, once ended, `exit_code`.
 
     `state` is "running", "exited", "sandbox ended" (the sandbox ended first),
-    "failed" (the call itself failed), or "expired" (Modal no longer keeps
-    the result).
+    "timed out" (the call reached its 24-hour limit), "expired" (Modal no
+    longer keeps the result), or "unknown" with `error`, when asking failed:
+    the run may still be going.
     """
     call = modal.FunctionCall.from_id(check_run_id(run_id))
     try:
         result = await call.get.aio(timeout=0)
     except modal.exception.OutputExpiredError:
         return {"state": "expired"}
-    except TimeoutError, modal.exception.TimeoutError:
+    except modal.exception.FunctionTimeoutError:
+        return {"state": "timed out"}
+    except TimeoutError:
         return {"state": "running"}
     except Exception as error:
-        return {"state": "failed", "error": f"{type(error).__name__}: {error}"}
+        return {"state": "unknown", "error": f"{type(error).__name__}: {error}"}
     ended = result.get("sandbox_ended") and result.get("exit_code") in (None, 128)
     return {
         "state": "sandbox ended" if ended else "exited",
@@ -142,14 +186,20 @@ async def ls(session: Session, target: str = "") -> list[dict[str, Any]]:
     if not target:
         folders = [ROOT]
     elif names.is_sandbox_id(target):
+        if not _SANDBOX_ID.fullmatch(target):
+            raise InvalidRequest(f"Invalid sandbox ID: {target!r}.")
         folders = [f"{ROOT}/{target}"]
     else:
         record = await store.load(session, names.check_name(target))
-        folders = [f"{ROOT}/{item['id']}" for item in record["sandboxes"]]
+        folders = [
+            f"{ROOT}/{item['id']}"
+            for item in record["sandboxes"]
+            if _SANDBOX_ID.fullmatch(item["id"])
+        ]
     listed = await asyncio.gather(*(_list(volume, folder) for folder in folders))
     paths = [path for found in listed for path in found]
     runs = await asyncio.gather(*(_read(volume, path) for path in paths))
-    states = await asyncio.gather(*(status(run["run_id"]) for run in runs))
+    states = await asyncio.gather(*(_status(run) for run in runs))
     found = [
         {**run, "command": shlex.join(run["command"]), **state}
         for run, state in zip(runs, states)
@@ -157,14 +207,25 @@ async def ls(session: Session, target: str = "") -> list[dict[str, Any]]:
     return sorted(found, key=lambda run: (run["started_at"], run["run_id"]))
 
 
+async def _status(run: dict[str, Any]) -> dict[str, Any]:
+    if not _valid(run):
+        return {"state": "invalid", "error": "the run file holds invalid IDs"}
+    return await status(run["run_id"])
+
+
 async def clean(session: Session, target: str = "") -> list[dict[str, Any]]:
     """Forget the runs of `target` (or all) that have ended; return them.
 
     Their files on the Volume go, and so do their log files in sandboxes that
-    still run. A run that still runs is kept. Modal keeps the call's log and
+    still run. A run that still runs, or whose state is not known, is kept.
+    Modal keeps the call's log and
     result for as long as it keeps them, whatever this does.
     """
-    ended = [run for run in await ls(session, target) if run["state"] != "running"]
+    ended = [
+        run
+        for run in await ls(session, target)
+        if run["state"] in ENDED and _valid(run)
+    ]
     volume = await session.record_volume()
     by_sandbox: dict[str, list[str]] = {}
     for run in ended:

@@ -35,13 +35,21 @@ the run ID. Nothing in agentix has to map one to the other:
 - `sandbox logs RUN` is `FunctionCall.from_id(RUN).logs.stream()`. Checked
   against Modal 1.6.4: it replays the call's log from its start, then
   follows it, and stops when the call has ended. Modal's own messages
-  (source `system`) are dropped.
+  (source `system`) are dropped. The stream stops about half a second
+  after the call ends, so lines Modal stores later could be missed; `logs`
+  then reads the stored log once with `logs.fetch()` and prints the entries
+  after those it already printed. Not seen to matter in the real runs; it
+  costs one read of the log.
 - `sandbox wait RUN` is `FunctionCall.from_id(RUN).get()`, which returns
   `{"exit_code": N, "sandbox_ended": bool}`. A run whose sandbox ended first
   (`sandbox down`, the timeout) reports exit code 128, or none if the exec
   failed, and `wait` exits with 128 and says so.
 - `sandbox runs` polls each run with `get(timeout=0)`. A call that has not
   ended raises the built-in `TimeoutError`, which is how "running" is told.
+  A call that reached its own 24-hour timeout raises
+  `modal.exception.FunctionTimeoutError`, which is not a built-in
+  `TimeoutError`: that run is "timed out". Any other failure of the poll
+  leaves the state "unknown", since the run may still be going.
 
 ## Credentials and reaching the sandbox
 
@@ -72,7 +80,11 @@ So the output lives in three places, each of which outlives the client:
   sandbox's snapshot. They are the source the function reads, and they make
   the call safe to retry: a call Modal retries after a preemption follows
   the command instead of starting it a second time, and a killed call
-  leaves the command running.
+  leaves the command running. Such a retry prints `output.log` from its
+  start again, so `logs` then shows the output up to the preemption twice.
+- A call that finds the run directory but no `pid` file (the call that
+  made it died before starting the command) waits 5 seconds for it, then
+  fails with "never started" rather than waiting until its timeout.
 
 Standard error is merged into the one log, in order; `logs` prints it on
 standard output. Modal keeps call logs and results for a limited time, set
@@ -92,10 +104,15 @@ stored; `runs` asks Modal each time.
 `sandbox runs` lists every run; `sandbox runs SANDBOX_ID` the runs of one
 sandbox; `sandbox runs NAME` the runs of every sandbox the name has had.
 Each line has `state`: `running`, `exited` (with `exit_code`), `sandbox
-ended`, `failed` (the call itself failed), or `expired`.
+ended`, `timed out` (the call reached 24 hours), `expired` (Modal no longer
+keeps the result), `unknown` (asking Modal failed; with `error`), or
+`invalid` (the run file's IDs are not well formed).
 
 Cleanup is explicit: `sandbox runs [TARGET] --clean` forgets every run of
-TARGET (or every run) that is no longer running. It deletes its file on the
+TARGET (or every run) that has surely ended: `exited`, `sandbox ended`,
+`timed out`, or `expired`. `running`, `unknown`, and `invalid` runs are
+kept. Run and sandbox IDs are matched whole (`fc-` or `sb-` and letters
+and digits) before they go into any path. It deletes its file on the
 Volume and, if its sandbox still runs, its directory with the log in the
 sandbox. Runs that still run are kept. Nothing is cleaned on its own: the
 files are small, and the log in a running sandbox is the user's to keep

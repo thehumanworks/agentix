@@ -65,8 +65,8 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox restore NAME [--snapshot=ID]` | Start a new sandbox under NAME from its latest or the given snapshot |
 | `sandbox resume NAME` | Restore NAME and continue the `exec --resume` commands its timeout cut off |
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
-| `runner deploy` | Deploy the Modal app that runs `exec --detach` commands; safe to repeat |
 | `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
+| `runner deploy` | Deploy the Modal app that runs `exec --detach` commands; safe to repeat |
 
 Each command is `uv run agentix ...`. `SANDBOX` is a sandbox name or a
 sandbox ID (`sb-...`); the snapshot commands take an ID only for a sandbox
@@ -212,8 +212,9 @@ for as long as a run goes. The function execs the command in the sandbox
 and follows it; the log and exit code stay with Modal, and a copy in
 `/root/.local/state/agentix/detached/RUN/` in the sandbox. Each run also
 leaves a small file in `runs/` on the record Volume, so that `sandbox runs`
-can list it; `--clean` removes those of ended runs, with their logs in
-sandboxes that still run. A run lasts at most 24 hours, there is no
+can list it; `--clean` removes those of runs that have surely ended, with
+their logs in sandboxes that still run, and keeps runs whose state is
+unknown. A run lasts at most 24 hours, there is no
 `stop` yet, and `--detach` does not go with `--resume`. Design and failure
 modes: [docs/detached-runs.md](docs/detached-runs.md).
 
