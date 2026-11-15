@@ -86,12 +86,14 @@ async def create(
     cpu: float = 0,
     name: str = "",
     snapshot_id: str = "",
+    exit_snapshot: bool = True,
 ) -> str:
     """Start a sandbox in the image's working directory, or in `workdir` if given.
 
     `memory` is the reservation in MiB. `cpu` reserves that many cores; zero
     keeps Modal's default. `snapshot_id` starts the sandbox from that snapshot
     instead of `image_name`. Modal refuses a `name` that a running sandbox has.
+    `exit_snapshot` makes Modal save the filesystem when the sandbox ends.
 
     Returns the sandbox ID when the sandbox runs and its files are in place,
     so a command sent immediately afterwards finds them.
@@ -126,7 +128,7 @@ async def create(
         runtime="vm",
         unencrypted_ports=[22],
         readiness_probe=modal.Probe.with_exec("test", "-e", READY_FILE),
-        experimental_options=_EXIT_SNAPSHOT,
+        experimental_options=_EXIT_SNAPSHOT if exit_snapshot else None,
     )
     try:
         await handle.wait_until_ready.aio(timeout=READY_TIMEOUT)
@@ -154,6 +156,7 @@ async def discard(session: Session, sandbox_id: str) -> None:
 async def _discard(handle: modal.Sandbox) -> None:
     with contextlib.suppress(Exception):
         await handle.terminate.aio()
+        # Raises at once for a sandbox started without an exit snapshot.
         image = await handle._experimental_get_exit_snapshot.aio(
             timeout=SNAPSHOT_TIMEOUT
         )

@@ -48,15 +48,20 @@ def _create_sandbox(
     name: str = "",
     tailscale: bool = False,
     hostname: str = "",
+    no_snapshot: bool = False,
+    ephemeral: bool = False,
 ):
     """Start a sandbox under NAME, or under a new name such as brisk-otter.
 
-    Its filesystem is saved when it ends, for `sandbox restore`. With
+    Its filesystem is saved when it ends, for `sandbox restore`, unless
+    --no-snapshot is given. --ephemeral starts a sandbox with no name, no
+    record, and no snapshot: `sandbox down ID` leaves nothing behind. With
     --tailscale, Tailscale SSH starts too, as with `sandbox ssh start`.
     """
     from . import names, ssh_input
 
     # Refuse before anything is created.
+    names.check_ephemeral(name, ephemeral)
     if name:
         names.check_name(name)
     ssh_input.check_tailscale_start(tailscale, hostname, secret_name)
@@ -70,6 +75,8 @@ def _create_sandbox(
         name=name,
         tailscale=tailscale,
         hostname=hostname,
+        exit_snapshot=not (no_snapshot or ephemeral),
+        ephemeral=ephemeral,
     )
 
 

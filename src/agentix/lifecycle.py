@@ -106,18 +106,19 @@ async def _started(
 ) -> dict[str, Any]:
     """Report a started sandbox, after starting Tailscale SSH if asked to.
 
-    The sandbox is recorded already. If Tailscale fails, the error names the
-    sandbox, so it is not lost.
+    The sandbox is recorded already, if it has a name. If Tailscale fails,
+    the error names the sandbox, so it is not lost.
     """
-    result = {"sandbox_id": sandbox_id, "name": name, **extra}
+    result = {"sandbox_id": sandbox_id, **({"name": name} if name else {}), **extra}
     if not tailscale:
         return result
     try:
         details = await ssh.manage(session, "start", sandbox_id, "tailscale", hostname)
     except Exception as error:
+        label = f"{sandbox_id} ({name})" if name else sandbox_id
         raise OperationFailed(
-            f"Sandbox {sandbox_id} ({name}) is running, but Tailscale SSH did not "
-            f"start ({error}). Retry with: agentix sandbox ssh start {name}"
+            f"Sandbox {label} is running, but Tailscale SSH did not start "
+            f"({error}). Retry with: agentix sandbox ssh start {name or sandbox_id}"
         ) from error
     details.pop("sandbox_id", None)
     return result | details
@@ -129,13 +130,20 @@ async def up(
     name: str = "",
     tailscale: bool = False,
     hostname: str = "",
+    ephemeral: bool = False,
 ) -> dict[str, Any]:
     """Start a sandbox under `name`, or under a new name if none is given.
 
     A name that has a record already is refused, whether its sandbox runs or
-    not: restore it, or purge it first.
+    not: restore it, or purge it first. An `ephemeral` sandbox has no name, no
+    record, and no exit snapshot, so stopping it leaves nothing behind.
     """
+    names.check_ephemeral(name, ephemeral)
     check_tailscale_start(tailscale, hostname, options["secret_name"])
+    if ephemeral:
+        options = {**options, "exit_snapshot": False}
+        sandbox_id = await sandbox.create(session, **options)
+        return await _started(session, sandbox_id, "", tailscale, hostname)
     if name:
         if await store.find(session, names.check_name(name)) is not None:
             raise InvalidRequest(_taken(name))
@@ -312,7 +320,7 @@ async def restore(
                 "Retry shortly, or choose a snapshot with --snapshot=ID."
             )
         if not record["snapshots"]:
-            raise NotFound(f"{name} has no snapshots.")
+            raise NotFound(_nothing_to_restore(record))
         snapshot_id = store.ordered(record)[-1]["id"]
     try:
         sandbox_id = await sandbox.create(
@@ -333,6 +341,17 @@ async def restore(
     await store.update(session, name, change)
     return await _started(
         session, sandbox_id, name, tailscale, hostname, snapshot=snapshot_id
+    )
+
+
+def _nothing_to_restore(record: store.Record) -> str:
+    name = record["name"]
+    if record["options"].get("exit_snapshot", True):
+        return f"{name} has no snapshots."
+    return (
+        f"{name} has no snapshots: it was started with --no-snapshot, so Modal "
+        "saves nothing when its sandbox ends. Save one while it runs with "
+        f"agentix sandbox snapshot {name}."
     )
 
 

@@ -405,6 +405,96 @@ class PurgeTests(LifecycleTestCase):
             self.run_core(lifecycle.purge, "sb-test")
 
 
+class NoSnapshotTests(LifecycleTestCase):
+    def no_snapshot_record(self, snaps=(), exit="pending"):
+        record = self.put_record(sandbox_id="sb-old", exit=exit, snaps=snaps)
+        record["options"]["exit_snapshot"] = False
+        self.write_record(record)
+
+    def test_default_sandbox_saves_an_exit_snapshot(self):
+        self.run_cli("sandbox", "up", "--name=dev")
+        options = self.create.aio.call_args.kwargs
+        self.assertEqual(
+            options["experimental_options"], {"enable_exit_snapshot": True}
+        )
+        self.assertTrue(self.stored("dev")["options"]["exit_snapshot"])
+
+    def test_no_snapshot_is_named_and_recorded_without_an_exit_snapshot(self):
+        output = self.run_cli("sandbox", "up", "--name=dev", "--no-snapshot")
+        self.assertIn("name:       dev", output)
+        options = self.create.aio.call_args.kwargs
+        self.assertIsNone(options["experimental_options"])
+        self.assertEqual(options["tags"], {NAME_TAG: "dev"})
+        self.assertFalse(self.stored("dev")["options"]["exit_snapshot"])
+
+    def test_down_records_that_nothing_was_saved(self):
+        self.no_snapshot_record()
+        self.sandboxes(sb_old=self.sandbox)
+        self.sandbox.poll.aio.side_effect = [None, 137]
+        self.sandbox._experimental_get_exit_snapshot.aio.side_effect = (
+            modal.exception.InvalidError("Exit snapshot is not enabled")
+        )
+        result = self.run_core(lifecycle.down, "dev")
+        self.assertEqual(result["snapshot"], "")
+        record = self.stored("dev")
+        self.assertEqual(record["sandboxes"][0]["exit"], "none")
+        self.assertEqual(record["snapshots"], [])
+        self.image_delete.aio.assert_not_called()
+
+    def test_restore_explains_why_there_is_nothing_to_restore(self):
+        self.no_snapshot_record(exit="none")
+        with self.assertRaisesRegex(NotFound, "started with --no-snapshot"):
+            self.run_core(lifecycle.restore, "dev")
+        self.create.aio.assert_not_called()
+
+    def test_a_manual_snapshot_restores_without_an_exit_snapshot(self):
+        self.no_snapshot_record(exit="none", snaps=[("im-1", "2026-11-01")])
+        self.run_core(lifecycle.restore, "dev")
+        self.snapshot_image.assert_called_once_with("im-1")
+        self.assertIsNone(self.create.aio.call_args.kwargs["experimental_options"])
+
+
+class EphemeralTests(LifecycleTestCase):
+    def test_ephemeral_has_no_name_record_or_snapshot(self):
+        output = self.run_cli("sandbox", "up", "--ephemeral", "--secret-name=")
+        self.assertEqual(output.strip(), "sandbox_id: sb-test")
+        options = self.create.aio.call_args.kwargs
+        self.assertEqual(
+            (options["name"], options["tags"], options["experimental_options"]),
+            (None, None, None),
+        )
+        self.volume_lookup.assert_not_called()
+        self.dict_lookup.assert_not_called()
+
+    def test_no_snapshot_with_ephemeral_is_accepted(self):
+        self.run_cli("sandbox", "up", "--ephemeral", "--no-snapshot")
+        self.assertIsNone(self.create.aio.call_args.kwargs["experimental_options"])
+
+    def test_a_name_is_refused_before_anything_starts(self):
+        with self.assertRaisesRegex(InvalidRequest, "--ephemeral keeps no record"):
+            self.run_cli("sandbox", "up", "--ephemeral", "--name=dev")
+        with self.assertRaisesRegex(InvalidRequest, "--ephemeral keeps no record"):
+            self.run_core(lifecycle.up, OPTIONS, "dev", ephemeral=True)
+        self.app_lookup.aio.assert_not_called()
+        self.create.aio.assert_not_called()
+        self.volume_lookup.assert_not_called()
+
+    def test_down_leaves_nothing_behind(self):
+        self.run_cli("sandbox", "up", "--ephemeral")
+        output = self.run_cli("sandbox", "down", "sb-test")
+        self.assertNotIn("snapshot", output)
+        self.sandbox.terminate.aio.assert_awaited_once_with(wait=True)
+        self.volume_lookup.assert_not_called()
+        self.image_delete.aio.assert_not_called()
+
+    def test_failed_tailscale_names_the_sandbox_id(self):
+        self.sandbox.process.wait.aio.return_value = 1
+        with self.assertRaisesRegex(
+            OperationFailed, "sb-test is running.*ssh start sb-test"
+        ):
+            self.run_core(lifecycle.up, OPTIONS, tailscale=True, ephemeral=True)
+
+
 class NameResolutionTests(LifecycleTestCase):
     def test_exec_and_ssh_accept_a_name(self):
         self.put_record("dev", "sb-01M7DN105MG5PTYJHDWFFWCH54")

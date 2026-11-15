@@ -199,6 +199,14 @@ refuses while the sandbox runs; `--terminate` stops it first and also deletes
 the snapshot that this leaves. `sandbox up --name=NAME` refuses a name that
 exists already: restore it, or purge it first.
 
+`sandbox up --no-snapshot` starts a sandbox that Modal saves nothing of when
+it ends. It has a name and a record as usual, and `sandbox snapshot` still
+saves it on request; without such a snapshot, `sandbox restore` explains
+that there is nothing to restore. `sandbox up --ephemeral` keeps no record
+either: the sandbox has only its ID, `sandbox ls` lists it among the
+sandboxes without a name, and `sandbox down ID` leaves nothing behind. It
+refuses `--name`, because a name is found through its record.
+
 The names and their snapshot IDs are kept on the Modal Volume
 `agentix-sandboxes`, in `records/NAME/`. That is the only record of the
 snapshots, because Modal cannot list them. A Volume keeps its files until

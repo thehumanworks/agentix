@@ -34,17 +34,18 @@ required image behavior.
    `image_id`. Keep normal layer caching; use `--force-build` only when an
    uncached build is necessary.
 2. Start a fresh verification sandbox from that published image with
-   `uv run agentix sandbox up --timeout=600` and record its `sandbox_id`. Use the
-   same image target as the build. Use the configured runtime secret when the
-   check needs it; `--secret-name=''` is available for checks that need no secrets.
+   `uv run agentix sandbox up --ephemeral --timeout=600` and record its
+   `sandbox_id`. Use the same image target as the build. Use the configured
+   runtime secret when the check needs it; `--secret-name=''` is available for
+   checks that need no secrets.
 3. Verify the affected behavior inside the fresh sandbox. Use
    `uv run agentix sandbox exec SANDBOX_ID 'COMMAND'` for command checks. Exercise
    the actual terminal or SSH flow when the change affects interactive behavior.
    A successful build, syntax check, or version command alone does not prove a
    behavioral fix. Do not print secret values in commands, logs, or reports.
-4. Remove only the verification sandbox you created, and the snapshots it
-   leaves, with `uv run agentix sandbox purge SANDBOX_ID --terminate`,
-   including after a failed check.
+4. Remove only the verification sandbox you created with
+   `uv run agentix sandbox down SANDBOX_ID`, including after a failed check.
+   An ephemeral sandbox leaves no snapshot or record behind.
    Existing sandboxes retain their old image. Do not terminate or replace them
    without user authorization. Applying Home Manager inside an existing sandbox
    does not update the published image.

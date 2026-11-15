@@ -40,7 +40,8 @@ class Options(TypedDict):
     workdir: str
     memory: int
     cpu: float
-    # False after `sandbox up --no-snapshot`. Older records lack it.
+    # False after `sandbox up --no-snapshot`: Modal saves nothing when a
+    # sandbox of the name ends. Older records lack it.
     exit_snapshot: NotRequired[bool]
 
 
