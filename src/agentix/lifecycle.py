@@ -146,9 +146,10 @@ async def up(
     names.check_ephemeral(name, ephemeral)
     check_tailscale_start(tailscale, hostname, options["secret_name"])
     if clone:
+        workdir = repo.parse(clone)[1]
         if options["workdir"]:
             raise InvalidRequest("--repo sets the workdir; leave out --workdir.")
-        options = {**options, "workdir": repo.parse(clone)[1]}
+        options = {**options, "workdir": workdir}
     if ephemeral:
         options = {**options, "exit_snapshot": False}
         sandbox_id = await sandbox.create(session, **options)
@@ -194,7 +195,7 @@ async def _clone(session: Session, sandbox_id: str, spec: str) -> None:
         raise
     if result["exit_code"] != 0:
         await sandbox.discard(session, sandbox_id)
-        raise repo.failed(spec, result["stderr"])
+        raise repo.failed(spec, result["exit_code"], result["stderr"])
 
 
 async def down(session: Session, target: str) -> dict[str, Any]:

@@ -16,22 +16,24 @@ _SPEC = re.compile(r"(?P<owner>[A-Za-z0-9-]+)/(?P<name>[A-Za-z0-9._-]+)(@(?P<ref
 
 # $1 is the URL, $2 the directory, $3 the ref or "". The directory is the
 # sandbox's workdir, which Modal creates empty. Git must not prompt: there is
-# no terminal, and a repository without access should fail at once.
+# no terminal, and a repository without access should fail at once. A failed
+# step after the clone exits with its code in _STEPS.
 CLONE = """set -eu
 export GIT_TERMINAL_PROMPT=0
 git clone --quiet -- "$1" "$2"
 if [ -n "$3" ]; then
-  git -C "$2" -c advice.detachedHead=false checkout --quiet "$3" --
+  git -C "$2" -c advice.detachedHead=false checkout --quiet "$3" -- || exit 3
 fi
 if [ -e "$2/.envrc" ]; then
-  direnv allow "$2"
+  direnv allow "$2" || exit 4
 fi
 """
+_STEPS = {3: "check out {ref} in", 4: "run direnv allow in"}
 
 
 def parse(spec: str) -> tuple[str, str, str]:
     """The clone URL, the directory under the working directory, and the ref."""
-    match = _SPEC.fullmatch(spec)
+    match = _SPEC.fullmatch(spec) if isinstance(spec, str) else None
     name = match["name"].removesuffix(".git") if match else ""
     if name in ("", ".", "..") or (match["ref"] or "").startswith("-"):
         raise InvalidRequest(
@@ -48,11 +50,18 @@ def command(spec: str) -> list[str]:
     return ["sh", "-c", CLONE, "agentix-clone", url, path, ref]
 
 
-def failed(spec: str, stderr: str) -> OperationFailed:
+def failed(spec: str, exit_code: int, stderr: str) -> OperationFailed:
+    """The error for a clone command that exited with `exit_code`."""
     # Git's own lines; a credential helper that fails explains at length.
     lines = stderr.strip().splitlines()
     git = [line for line in lines if line.startswith(("fatal:", "error:", "remote:"))]
     detail = "\n".join(git or lines[-3:]) or "no output"
+    if exit_code in _STEPS:
+        step = _STEPS[exit_code].format(ref=parse(spec)[2])
+        return OperationFailed(
+            f"Cloned {spec}, but could not {step} it, so the sandbox was "
+            f"removed.\n{detail}"
+        )
     return OperationFailed(
         f"Could not clone {spec}, so the sandbox was removed. Check the name "
         f"and that the sandbox's GitHub credentials can read it.\n{detail}"

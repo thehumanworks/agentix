@@ -27,6 +27,20 @@ class ParseTests(unittest.TestCase):
         for spec in ("agentix", "a/b/c", "a/..", "a/.git", "a/b@", "a/b@-x", "a b/c"):
             with self.subTest(spec=spec), self.assertRaises(InvalidRequest):
                 repo.parse(spec)
+        for spec in (True, 123):
+            with self.subTest(spec=spec), self.assertRaises(InvalidRequest):
+                repo.parse(spec)
+
+    def test_error_names_the_step_that_failed(self):
+        clone = str(repo.failed("o/r@v1", 128, "fatal: not found"))
+        self.assertIn("Could not clone o/r@v1", clone)
+        self.assertIn("credentials", clone)
+        for code, step in ((3, "check out v1"), (4, "run direnv allow")):
+            with self.subTest(code=code):
+                message = str(repo.failed("o/r@v1", code, "error: x"))
+                self.assertIn(f"Cloned o/r@v1, but could not {step}", message)
+                self.assertNotIn("credentials", message)
+                self.assertIn("error: x", message)
 
 
 class CloneScriptTests(unittest.TestCase):
@@ -52,7 +66,10 @@ class CloneScriptTests(unittest.TestCase):
         # direnv is stubbed: the test checks only that it is called.
         bin_dir = self.tmp / "bin"
         bin_dir.mkdir(exist_ok=True)
-        (bin_dir / "direnv").write_text('#!/bin/sh\necho "$@" > "$DIRENV_LOG"\n')
+        status = getattr(self, "direnv_exit", 0)
+        (bin_dir / "direnv").write_text(
+            f'#!/bin/sh\necho "$@" > "$DIRENV_LOG"\nexit {status}\n'
+        )
         (bin_dir / "direnv").chmod(0o755)
         env = {
             "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -94,8 +111,17 @@ class CloneScriptTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(self.head(), subject)
 
-    def test_unknown_ref_fails(self):
-        self.assertNotEqual(self.clone("nope").returncode, 0)
+    def test_each_failed_step_has_its_exit_code(self):
+        self.assertEqual(self.clone("nope").returncode, 3)
+        subprocess.run(["rm", "-rf", self.target], check=True)
+        self.target.mkdir()
+        (self.tmp / "bin").mkdir(exist_ok=True)
+        self.direnv_exit = 1
+        self.assertEqual(self.clone().returncode, 4)
+        subprocess.run(["rm", "-rf", self.target], check=True)
+        self.target.mkdir()
+        self.origin = self.tmp / "missing"
+        self.assertNotIn(self.clone().returncode, (0, 3, 4))
 
     def test_no_envrc_no_direnv(self):
         subprocess.run(["git", "-C", self.origin, "rm", "-q", ".envrc"], check=True)
@@ -182,4 +208,9 @@ class RepoAndConfigTests(ModalTestCase):
         self.create.aio.reset_mock()
         with self.assertRaisesRegex(InvalidRequest, "--workdir"):
             self.run_cli("sandbox", "up", "--ephemeral", "--repo=o/r", "--workdir=/x")
+        self.create.aio.assert_not_called()
+
+    def test_bare_repo_flag_is_refused_before_anything_starts(self):
+        with self.assertRaisesRegex(InvalidRequest, "is not OWNER/NAME"):
+            self.run_cli("sandbox", "up", "--ephemeral", "--repo")
         self.create.aio.assert_not_called()
