@@ -683,7 +683,10 @@ Root's Home Manager generation, activated at build time, with:
   brief that tells Claude how the sandbox works;
 - the Codex CLI (`codex`) and the pi coding agent (`pi`), from nixpkgs,
   signed in from 1Password through `agent-auth-sync`, with the same brief as
-  `AGENTS.md`; Codex runs without approval prompts, as Claude does;
+  `AGENTS.md`; Codex runs without approval prompts, as Claude does; pi
+  starts on `openai/gpt-6-astra`, cycles with Ctrl+P between it and
+  `openai/gpt-6.1-sol`, both with a 400000-token context window, and has six
+  pi packages installed already (see [nix/README.md](nix/README.md));
 - Git with `gh` and `gh-lf`, the 1Password CLI, direnv with nix-direnv,
   Neovim (Nixvim), Rex and herdr, Tailscale, and OpenSSH;
 - Nix itself, with `nixpkgs` in the registry pinned to the image's revision,
@@ -830,7 +833,8 @@ secret or contacts Modal.
   `nix flake check --all-systems --no-build`, which evaluates the x86_64,
   ARM, and Mac outputs, then `nix flake check` on x86_64 Linux: formatting,
   statix, deadnix, the `modal` and `linux` profiles, the OCI image's root
-  and layer list, and each SSH engine module on and off. `Nix flake check
+  and layer list, each SSH engine module on and off, and that the harness
+  wrappers keep the 1Password token from the harness. `Nix flake check
   (ARM)` runs the same `nix flake check` beside it on an `ubuntu-24.04-arm`
   runner, which builds `modal-arm`, the ARM image's root and layer list, and
   the SSH engine checks. That job has not yet been seen green on GitHub. To

@@ -280,9 +280,16 @@ class ModuleCheckTests(unittest.TestCase):
             (",", "nix-locate"),
             ("codex", "codex --version"),
             ("pi", "pi --version"),
+            ("pi", "pi package not installed"),
         ):
             (check,) = [check for check in checks if marker in check]
             self.assertTrue(check.startswith(f"if jq -e --arg name {command} "), check)
+
+    def test_no_login_file_is_in_the_image(self):
+        self.assertIn(
+            "test ! -e /root/.codex/auth.json && test ! -e /root/.pi/agent/auth.json",
+            image._checks(),
+        )
 
     def test_the_playwright_path_must_name_a_browser(self):
         (check,) = [c for c in image._checks() if "PLAYWRIGHT_BROWSERS_PATH names" in c]

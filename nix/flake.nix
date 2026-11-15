@@ -318,6 +318,12 @@
         // self.packages.${system} or { }
         // lib.optionalAttrs (sandboxHomes ? ${system}) (sshEngineChecks system)
         // lib.optionalAttrs (system == "x86_64-linux") { home-linux = linuxCheck; }
+        // lib.optionalAttrs (sandboxHomes ? ${system}) {
+          wrapper-token = import ./checks/wrapper-token.nix {
+            inherit pkgs;
+            home = self.homeConfigurations.${sandboxHomes.${system}};
+          };
+        }
       );
     };
 }
