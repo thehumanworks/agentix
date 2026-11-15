@@ -47,8 +47,10 @@ of the idle stop) it reads `/proc`. Each process counts as use except: PID 1
 (Modal's agent), kernel threads, zombies, the watcher and what it starts, the
 SSH listeners (an `sshd` that PID 1 holds, and `tailscaled` itself, but not
 its `be-child` session processes), the agents a login can leave behind
-(`ssh-agent`, `gpg-agent` and the like), and Modal's readiness probe. After
-the idle stop with nothing counted, it exits with code 75. The clock is
+(`ssh-agent`, `gpg-agent` and the like), and Modal's readiness probe. Idle
+time counts from the first look that sees nothing, so the sandbox stops
+between the idle stop and one poll later after the last use ended, never
+sooner. Then it exits with code 75. The clock is
 `/proc/uptime`.
 
 This covers each kind of use without asking it to report in. Checked in a

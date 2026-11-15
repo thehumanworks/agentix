@@ -85,14 +85,18 @@ if [ "$mode" = check ]; then
   if busy; then echo busy; else echo idle; fi
   exit 0
 fi
+# Idle time counts from the first look that saw nothing, so the stop comes
+# between SECONDS and SECONDS + POLL after the last use ended, never sooner.
 clock
-last=$now
+since=$now
 while :; do
   sleep "$interval"
   clock
   if busy; then
-    last=$now
-  elif [ $((now - last)) -ge "$limit" ]; then
+    since=
+  elif [ -z "$since" ]; then
+    since=$now
+  elif [ $((now - since)) -ge "$limit" ]; then
     echo "agentix: nothing ran for ${limit}s; stopping the sandbox" >&2
     exit @IDLE_EXIT_CODE@
   fi
