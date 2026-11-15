@@ -60,6 +60,7 @@ def _create_sandbox(
     no_snapshot: bool | None = None,
     ephemeral: bool = False,
     repo: str = "",
+    idle_stop: str | None = None,
 ):
     """Start a sandbox under NAME, or under a new name such as brisk-otter.
 
@@ -75,8 +76,12 @@ def _create_sandbox(
     credentials into NAME in the image's working directory, checks out REF,
     runs `direnv allow` if it has an .envrc, and starts commands and logins
     there. It replaces --workdir.
+    --idle-stop=DURATION, such as 20m, stops the sandbox by itself, with its
+    exit snapshot, once no SSH session and no command started through
+    agentix has run in it for that long; --idle-stop=off turns off a
+    config-file default. See docs/idle-stop.md.
     """
-    from . import config, names, ssh_input
+    from . import config, idle, names, ssh_input
 
     options = config.up_options(
         image_name=image_name,
@@ -87,6 +92,7 @@ def _create_sandbox(
         cpu=cpu,
         tailscale=tailscale,
         no_snapshot=no_snapshot,
+        idle_stop=idle_stop,
         ignore_file=("workdir",) if repo else (),
     )
     # Refuse before anything is created.
@@ -109,6 +115,7 @@ def _create_sandbox(
         exit_snapshot=not (options["no_snapshot"] or ephemeral),
         ephemeral=ephemeral,
         repo=repo,
+        idle_stop=idle.seconds(options["idle_stop"]),
     )
 
 
@@ -259,13 +266,22 @@ def _snapshots(name: str):
 
 
 def _restore(
-    name: str, snapshot: str = "", tailscale: bool = False, hostname: str = ""
+    name: str,
+    snapshot: str = "",
+    tailscale: bool = False,
+    hostname: str = "",
+    idle_stop: str | None = None,
 ):
     """Start a new sandbox for NAME from its latest snapshot, or from --snapshot=ID.
 
     The sandbox NAME has now must have ended; stop it with `sandbox down`.
+    It keeps the idle stop NAME had; --idle-stop=DURATION or off changes it,
+    also for later restores.
     """
-    return _backend().restore(name, snapshot, tailscale, hostname)
+    from . import idle
+
+    limit = None if idle_stop is None else idle.seconds(idle_stop)
+    return _backend().restore(name, snapshot, tailscale, hostname, limit)
 
 
 def _purge(name: str, terminate: bool = False):
@@ -603,6 +619,13 @@ def _cli():
                             help="Seconds. " + from_config("timeout", SANDBOX_TIMEOUT),
                         ),
                         opt(
+                            "--idle-stop",
+                            default=None,
+                            metavar="DURATION",
+                            help="Stop by itself after this long unused, such as "
+                            "20m; off for never. " + from_config("idle_stop", "off"),
+                        ),
+                        opt(
                             "--workdir",
                             "-w",
                             default=None,
@@ -666,6 +689,13 @@ def _cli():
                         opt("--snapshot", "-s"),
                         switch("--tailscale", "-t", off="--no-tailscale"),
                         hostname,
+                        opt(
+                            "--idle-stop",
+                            default=None,
+                            metavar="DURATION",
+                            help="A new idle stop, such as 20m, or off, for this and "
+                            "later restores. [default: the one NAME had]",
+                        ),
                     ),
                     "resume": command(_resume, arg("name")),
                     "purge": command(_purge, arg("name"), switch("--terminate", "-t")),

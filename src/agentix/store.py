@@ -23,6 +23,7 @@ from typing import Literal, NotRequired, TypedDict
 
 from . import recordfiles
 from .errors import NotFound, OperationFailed
+from .idle import IDLE_EXIT_CODE
 from .session import Session
 
 # Modal ends a sandbox at its timeout with this exit code.
@@ -52,6 +53,11 @@ class SandboxRecord(TypedDict):
     restored_from: str
     # "pending" until Modal reports the exit snapshot, then "saved" or "none".
     exit: Literal["pending", "saved", "none"]
+    # Seconds with nothing running after which the sandbox stops itself
+    # (`--idle-stop`); 0 for never. Kept here, not in the options, so that
+    # `sandbox restore --idle-stop` can change it for later restores, and so
+    # that older versions, which pass the options on, can still restore.
+    idle_stop: NotRequired[int]
 
 
 class SnapshotRecord(TypedDict):
@@ -59,9 +65,10 @@ class SnapshotRecord(TypedDict):
     created_at: str
     sandbox_id: str
     # "manual" from `sandbox snapshot`; "down" when agentix ended the sandbox;
-    # "timeout" when it reached its timeout; "exit" when it ended otherwise,
-    # and `created_at` is when agentix first saw it had ended.
-    kind: Literal["manual", "down", "timeout", "exit"]
+    # "timeout" when it reached its timeout; "idle" when it stopped itself
+    # after its idle stop; "exit" when it ended otherwise. For "idle" and
+    # "exit", `created_at` is when agentix first saw it had ended.
+    kind: Literal["manual", "down", "timeout", "idle", "exit"]
 
 
 class Record(TypedDict):
@@ -231,7 +238,9 @@ def merge(record: Record | None, other: Record) -> Record:
     return merged
 
 
-def add_sandbox(record: Record, sandbox_id: str, restored_from: str = "") -> None:
+def add_sandbox(
+    record: Record, sandbox_id: str, restored_from: str = "", idle_stop: int = 0
+) -> None:
     record["sandbox_id"] = sandbox_id
     record["sandboxes"].append(
         {
@@ -239,15 +248,23 @@ def add_sandbox(record: Record, sandbox_id: str, restored_from: str = "") -> Non
             "started_at": now(),
             "restored_from": restored_from,
             "exit": "pending",
+            "idle_stop": idle_stop,
         }
     )
+
+
+def idle_stop(record: Record) -> int:
+    """The idle stop of the sandbox of `record` that started last, in seconds."""
+    started = sorted(record["sandboxes"], key=lambda item: item["started_at"])
+    current = [item for item in started if item["id"] == record["sandbox_id"]]
+    return (current or started or [{}])[-1].get("idle_stop", 0)
 
 
 def add_snapshot(
     record: Record,
     snapshot_id: str,
     sandbox_id: str,
-    kind: Literal["manual", "down", "timeout", "exit"],
+    kind: Literal["manual", "down", "timeout", "idle", "exit"],
     created_at: str = "",
 ) -> SnapshotRecord:
     snapshot: SnapshotRecord = {
@@ -319,6 +336,8 @@ def record_exit(
         started = dt.datetime.fromisoformat(sandbox["started_at"])
         deadline = started + dt.timedelta(seconds=record["options"]["timeout"])
         kind, created_at = "timeout", min(deadline.isoformat(timespec="seconds"), now())
+    elif exit_code == IDLE_EXIT_CODE and sandbox.get("idle_stop"):
+        kind, created_at = "idle", now()
     else:
         kind, created_at = "exit", now()
     add_snapshot(record, snapshot_id, sandbox["id"], kind, created_at)

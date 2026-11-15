@@ -53,6 +53,7 @@ SURFACE = [
             ("--name", None, "dev", "dev"),
             ("--hostname", "-h", "box", "box"),
             ("--repo", "-r", "o/r", "o/r"),
+            ("--idle-stop", None, "20m", "20m"),
         ],
         [("--tailscale", None), ("--no-snapshot", None), ("--ephemeral", "-e")],
     ),
@@ -74,7 +75,11 @@ SURFACE = [
         "sandbox restore",
         "_restore",
         [("name", "dev", None)],
-        [("--snapshot", "-s", "im-1", "im-1"), ("--hostname", "-h", "box", "box")],
+        [
+            ("--snapshot", "-s", "im-1", "im-1"),
+            ("--hostname", "-h", "box", "box"),
+            ("--idle-stop", None, "off", "off"),
+        ],
         [("--tailscale", "-t")],
     ),
     ("sandbox resume", "_resume", [("name", "dev", None)], [], []),
@@ -276,10 +281,30 @@ class OldSurfaceTest(CliTestCase):
                 "None",
                 "--timeout=None",
                 "-m=None",
+                "--idle-stop=None",
             ],
             "_create_sandbox",
         )
         self.assertEqual(up, self.defaults("_create_sandbox"))
+
+    def test_idle_stop_takes_a_duration_or_off_and_none_is_not_given(self):
+        for command, function in (
+            (["sandbox", "up"], "_create_sandbox"),
+            (["sandbox", "restore", "dev"], "_restore"),
+        ):
+            for argv, value in (
+                (["--idle-stop=20m"], "20m"),
+                (["--idle-stop", "1h30m"], "1h30m"),
+                (["--idle_stop=off"], "off"),
+                (["--idle-stop=None"], None),
+                ([], None),
+            ):
+                with self.subTest(argv=command + argv):
+                    called = self.call(command + argv, function)
+                    self.assertEqual(called["idle_stop"], value)
+            code, output = self.exit_code(*command, "--idle-stop")
+            self.assertEqual(code, 2)
+            self.assertIn("requires an argument", output)
 
     def test_none_is_not_given_for_every_flag_that_takes_a_value(self):
         up = self.call(
@@ -354,6 +379,8 @@ class OldSurfaceTest(CliTestCase):
         self.assertIn("--tailscale / --no-tailscale", output)
         self.assertIn("--no-snapshot / --snapshot", output)
         self.assertIn("[default: 3600, or timeout in [sandbox.up]", output)
+        self.assertIn("--idle-stop DURATION", output)
+        self.assertIn("[default: 'off', or idle_stop in [sandbox.up]", output)
         self.assertNotIn("None", output)
 
 

@@ -217,6 +217,7 @@ class LegacyTests(StoreTestCase):
                     "sandbox_id": "sb-1",
                     "status": "stopped",
                     "snapshots": 1,
+                    "idle_stop": "off",
                 }
             ],
         )

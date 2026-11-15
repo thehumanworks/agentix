@@ -6,6 +6,7 @@ import modal
 from support import ModalTestCase, fake_sandbox
 
 from agentix import lifecycle, store
+from agentix import sandbox as sandbox_module
 from agentix.errors import InvalidRequest, NotFound, OperationFailed
 from agentix.sandbox import NAME_TAG
 
@@ -20,6 +21,13 @@ OPTIONS: store.Options = {
 TAILSCALE = json.dumps(
     {"status": "running", "magicdns": "dev.test.ts.net", "ipv4": "100.64.0.1"}
 )
+
+
+def lifecycle_rows(test, name):
+    """The idle_stop that `sandbox ls` shows for `name`."""
+    test.listing.aio.side_effect = lambda **_: _each([])
+    rows = test.run_core(lifecycle.ls)
+    return {row["name"]: row["idle_stop"] for row in rows}[name]
 
 
 class LifecycleTestCase(ModalTestCase):
@@ -225,23 +233,58 @@ class ListTests(LifecycleTestCase):
                     "sandbox_id": "sb-test",
                     "status": "running",
                     "snapshots": 0,
+                    "idle_stop": "off",
                 },
                 {
                     "name": "old",
                     "sandbox_id": "sb-old",
                     "status": "stopped",
                     "snapshots": 1,
+                    "idle_stop": "off",
                 },
                 {
                     "name": "",
                     "sandbox_id": "sb-other",
                     "status": "running",
                     "snapshots": 0,
+                    "idle_stop": "off",
                 },
             ],
         )
         # Running sandboxes and recorded snapshots need no further questions.
         self.lookup.aio.assert_not_called()
+
+    def test_idle_stop_is_listed(self):
+        record = store.new_record("dev", dict(OPTIONS))
+        store.add_sandbox(record, "sb-test", idle_stop=1200)
+        self.write_record(record)
+        other = fake_sandbox("sb-other")
+        other.get_tags.aio.return_value = {"agentix-idle-stop": "300"}
+        self.listing.aio.side_effect = lambda **_: _each([self.sandbox, other])
+        rows = self.run_core(lifecycle.ls)
+        self.assertEqual(
+            [(row["name"], row["idle_stop"]) for row in rows],
+            [("dev", "20m"), ("", "5m")],
+        )
+
+    def test_a_sandbox_that_stopped_itself_when_idle_is_recorded(self):
+        record = store.new_record("dev", dict(OPTIONS))
+        store.add_sandbox(record, "sb-old", idle_stop=120)
+        self.write_record(record)
+        ended = fake_sandbox("sb-old")
+        ended.poll.aio.return_value = 75
+        self.sandboxes(sb_old=ended)
+        self.run_core(lifecycle.ls)
+        [snapshot] = self.stored("dev")["snapshots"]
+        self.assertEqual((snapshot["id"], snapshot["kind"]), ("im-exit", "idle"))
+
+    def test_exit_code_75_without_an_idle_stop_is_a_plain_exit(self):
+        self.put_record("old", "sb-old")
+        ended = fake_sandbox("sb-old")
+        ended.poll.aio.return_value = 75
+        self.sandboxes(sb_old=ended)
+        self.run_core(lifecycle.ls)
+        self.assertEqual(self.stored("old")["snapshots"][0]["kind"], "exit")
 
     def test_snapshot_of_a_sandbox_that_timed_out_is_recorded(self):
         self.put_record("old", "sb-old")
@@ -304,13 +347,41 @@ class RestoreTests(LifecycleTestCase):
             (options["memory"], options["cpu"], options["workdir"], options["name"]),
             (16384, 2, "/srv/app", "dev"),
         )
-        self.assertEqual(self.create.aio.call_args.args[-1], "/srv/app")
+        self.assertEqual(self.create.aio.call_args.args[4], "/srv/app")
         record = self.stored("dev")
         self.assertEqual(record["sandbox_id"], "sb-new")
         self.assertEqual(
             [item["id"] for item in record["sandboxes"]], ["sb-old", "sb-new"]
         )
         self.assertEqual(record["sandboxes"][-1]["restored_from"], "im-new")
+
+    def put_idle_record(self):
+        record = store.new_record("lazy", dict(OPTIONS))
+        store.add_sandbox(record, "sb-lazy", idle_stop=1200)
+        record["sandboxes"][-1]["exit"] = "saved"
+        store.add_snapshot(record, "im-lazy", "sb-lazy", "idle", "2026-02-01")
+        self.write_record(record)
+
+    def test_restore_keeps_the_idle_stop(self):
+        self.put_idle_record()
+        self.run_core(lifecycle.restore, "lazy")
+        self.snapshot_image.assert_called_once_with("im-lazy")
+        self.assertEqual(self.create.aio.call_args.args[5], "1200")
+        self.assertEqual(store.idle_stop(self.stored("lazy")), 1200)
+
+    def test_restore_can_change_the_idle_stop_for_later_restores(self):
+        self.put_idle_record()
+        self.run_cli("sandbox", "restore", "lazy", "--idle-stop=off")
+        self.assertEqual(self.create.aio.call_args.args[2], sandbox_module._INIT)
+        record = self.stored("lazy")
+        self.assertEqual(store.idle_stop(record), 0)
+        self.assertEqual(lifecycle_rows(self, "lazy"), "off")
+
+    def test_restore_refuses_a_bad_idle_stop_before_anything(self):
+        self.put_idle_record()
+        with self.assertRaisesRegex(Exception, "idle-stop"):
+            self.run_cli("sandbox", "restore", "lazy", "--idle-stop=5")
+        self.create.aio.assert_not_called()
 
     def test_chosen_snapshot_is_used(self):
         self.run_cli("sandbox", "restore", "dev", "--snapshot=im-older")

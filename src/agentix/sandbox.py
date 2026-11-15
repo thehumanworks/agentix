@@ -2,7 +2,7 @@
 
 import asyncio
 import contextlib
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from typing import Literal, NotRequired, TypedDict
 
 import modal
@@ -10,11 +10,14 @@ import modal.experimental
 
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import InvalidRequest, OperationFailed
+from .idle import FLAG, IDLE_TAG, MARKS, SSHD_LOG, WATCHER, poll_interval, wrap
 from .layout import OP_TOKEN_FILE, READY_FILE, WORKDIR_FILE
 from .session import Session
 
 # The start command writes the token file, the --workdir override, and, last,
-# the ready file, which `create` waits for. The paths are in layout.py.
+# the ready file, which `create` waits for. The paths are in layout.py. Then it
+# sleeps, or, with an idle stop (_INIT_IDLE), runs the watcher of idle.py,
+# which ends the sandbox once nothing has run for that long.
 
 # A sandbox is normally ready in about a second.
 READY_TIMEOUT = 60
@@ -50,6 +53,16 @@ fi
 : > {READY_FILE}
 exec sleep infinity
 """
+# With an idle stop, $2 is its seconds, $3 how often to look, $4 the watcher.
+# The flag is made before the ready file, so the first command is marked.
+_INIT_IDLE = _INIT.replace(
+    f": > {READY_FILE}\nexec sleep infinity\n",
+    f""": > {FLAG}
+: > {READY_FILE}
+exec sh -c "$4" agentix-idle watch "$2" "$3" "test -e {READY_FILE}" {MARKS} \\
+  {SSHD_LOG}
+""",
+)
 
 
 class ExecResult(TypedDict):
@@ -87,6 +100,7 @@ async def create(
     name: str = "",
     snapshot_id: str = "",
     exit_snapshot: bool = True,
+    idle_stop: int = 0,
 ) -> str:
     """Start a sandbox in the image's working directory, or in `workdir` if given.
 
@@ -94,6 +108,8 @@ async def create(
     keeps Modal's default. `snapshot_id` starts the sandbox from that snapshot
     instead of `image_name`. Modal refuses a `name` that a running sandbox has.
     `exit_snapshot` makes Modal save the filesystem when the sandbox ends.
+    `idle_stop`, in seconds, ends the sandbox once nothing has run in it for
+    that long; zero never does.
 
     Returns the sandbox ID when the sandbox runs and its files are in place,
     so a command sent immediately afterwards finds them.
@@ -103,15 +119,18 @@ async def create(
         if snapshot_id
         else modal.Image.from_name(image_name)
     )
+    command = ["sh", "-c", _INIT, "agentix-init", workdir]
+    if idle_stop:
+        command[2] = _INIT_IDLE
+        command += [str(idle_stop), str(poll_interval(idle_stop)), WATCHER]
+    tags = {NAME_TAG: name} if name else {}
+    if idle_stop:
+        tags[IDLE_TAG] = str(idle_stop)
     handle = await modal.Sandbox.create.aio(
-        "sh",
-        "-c",
-        _INIT,
-        "agentix-init",
-        workdir,
+        *command,
         app=await session.app(),
         name=name or None,
-        tags={NAME_TAG: name} if name else None,
+        tags=tags or None,
         image=image,
         env={"IS_SANDBOX": "1"},
         secrets=[
@@ -171,6 +190,26 @@ async def list_ids(session: Session) -> list[str]:
     ]
 
 
+async def idle_stops(session: Session, sandbox_ids: Collection[str]) -> dict[str, int]:
+    """The idle stop, in seconds, of each running sandbox of `sandbox_ids`.
+
+    It is read from the sandbox's tags, for sandboxes that have no record.
+    """
+    app = await session.app()
+    handles = [
+        handle
+        async for handle in modal.Sandbox.list.aio(app_id=app.app_id)
+        if handle.object_id in sandbox_ids
+    ]
+    tags = await asyncio.gather(*(handle.get_tags.aio() for handle in handles))
+    return {
+        handle.object_id: int(value)
+        if (value := found.get(IDLE_TAG, "")).isdigit()
+        else 0
+        for handle, found in zip(handles, tags)
+    }
+
+
 async def running_named(session: Session, name: str) -> list[str]:
     """IDs of the running sandboxes of the app that carry the name `name`."""
     app = await session.app()
@@ -187,7 +226,7 @@ async def execute(session: Session, sandbox_id: str, args: Sequence[str]) -> Exe
     if not args:
         raise InvalidRequest("Provide a command to run.")
     async with session.sandbox(sandbox_id) as handle:
-        process = await handle.exec.aio(*args)
+        process = await handle.exec.aio(*wrap(args))
         stdout, stderr, exit_code = await asyncio.gather(
             process.stdout.read.aio(), process.stderr.read.aio(), process.wait.aio()
         )
@@ -202,7 +241,8 @@ async def execute_bytes(
 ) -> tuple[int, bytes, bytes]:
     """Run a command with `stdin` as its input; its exit code and raw output."""
     async with session.sandbox(sandbox_id) as handle:
-        process = await handle.exec.aio(*args, text=False)
+        # Wrapped as in `execute`, so that an idle stop sees it.
+        process = await handle.exec.aio(*wrap(args), text=False)
 
         async def feed() -> None:
             # In pieces, each sent before the next is buffered.

@@ -105,6 +105,7 @@ that has a name. The command line uses
 | `--tailscale` | off | Also start Tailscale SSH and print its address |
 | `--hostname=NAME` | the sandbox name | Tailscale hostname; only with `--tailscale` |
 | `--no-snapshot` | off | Modal saves nothing when the sandbox ends |
+| `--idle-stop=DURATION` | off | Stop by itself, with its snapshot, after this long unused; see below |
 | `--ephemeral` | off | No name, no record, no snapshot |
 
 Every flag above except `--name`, `--hostname`, and `--ephemeral` can get
@@ -132,6 +133,23 @@ uv run agentix sandbox up --name=dev --repo=thehumanworks/agentix@main
 uv run agentix sandbox shell dev   # lands in /workdir/agentix
 ```
 
+`--idle-stop=20m` stops the sandbox by itself once no SSH session (such as
+`sandbox shell`) and no command started through agentix (`sandbox exec`,
+with `--resume` or `--detach` too) has run in it for 20 minutes. It stops
+as `sandbox down` does, with its exit snapshot, so `sandbox restore`
+continues it, and the restored sandbox stops when idle again. A watcher in
+the sandbox does it, so the laptop that started it may be offline. Any
+process left running, such as a server, also counts as use. The duration is
+at least `1m`; `--idle-stop=off` turns off a config-file default.
+`sandbox restore NAME --idle-stop=1h` (or `off`) changes it for that and
+later restores. Over OpenSSH even a short `ssh dev cmd`, scp or rsync
+counts; over Tailscale SSH a session counts only while it lasts, so one
+shorter than the watcher's poll (5 to 30 s) can be missed. With a public
+OpenSSH port, a scanner's connection that never logs in counts as use for
+up to 120 s. `sandbox ls` shows the setting.
+How it works:
+[docs/idle-stop.md](docs/idle-stop.md).
+
 ### Defaults for `sandbox up`
 
 To stop retyping the same flags, put them in `~/.config/agentix/config.toml`
@@ -154,6 +172,7 @@ tailscale = true
 | `workdir` | string | `""`, which is `/workdir` | `--workdir` |
 | `tailscale` | boolean | `false` | `--tailscale` |
 | `no_snapshot` | boolean | `false` | `--no-snapshot` |
+| `idle_stop` | duration string, such as `"20m"` | `"off"` | `--idle-stop` |
 
 A flag on the command line wins over the file, and the file wins over the
 built-in default, also when the flag gives the built-in default: with
@@ -304,8 +323,8 @@ snapshots, and the options it was created with.
 
 ```sh
 $ uv run agentix sandbox ls
-{"name": "dev", "sandbox_id": "sb-...", "status": "stopped", "snapshots": 2}
-{"name": "", "sandbox_id": "sb-...", "status": "running", "snapshots": 0}
+{"name": "dev", "sandbox_id": "sb-...", "status": "stopped", "snapshots": 2, "idle_stop": "20m"}
+{"name": "", "sandbox_id": "sb-...", "status": "running", "snapshots": 0, "idle_stop": "off"}
 ```
 
 ### Snapshots and restore
@@ -322,16 +341,17 @@ $ uv run agentix sandbox snapshots dev
 {"id": "im-...", "created_at": "2026-11-15T09:12:40+00:00", "sandbox_id": "sb-...", "kind": "down", "expires_at": "2026-12-15T09:12:40+00:00", "expired": false}
 ```
 
-`kind` is `down`, `manual` (from `sandbox snapshot`), `timeout`, or `exit`
-for a sandbox that ended another way; an `exit` snapshot is dated when
-agentix noticed it, so it can be older than it says. Modal deletes every
+`kind` is `down`, `manual` (from `sandbox snapshot`), `timeout`, `idle`
+(after `--idle-stop`), or `exit` for a sandbox that ended another way; an
+`idle` or `exit` snapshot is dated when agentix noticed it, so it can be older than it says. Modal deletes every
 snapshot 30 days after it was taken and cannot say whether one still exists,
 so `expires_at` and `expired` are computed from the date.
 
 `sandbox restore NAME` starts a new sandbox under the name, from the latest
 snapshot or from `--snapshot=ID`, with the options the name was created
-with. The current sandbox of the name must have ended. It accepts
-`--tailscale` and `--hostname` as `sandbox up` does. The new sandbox has the
+with, and the idle stop it had. The current sandbox of the name must have
+ended. It accepts `--tailscale`, `--hostname` and `--idle-stop` as `sandbox
+up` does. The new sandbox has the
 saved files, including `/workdir`, `/root`, and `/tmp`, but no processes:
 SSH and Tailscale run again once started, for example by `sandbox shell`.
 `/run` is not saved, so no snapshot holds the 1Password token; the new
@@ -723,6 +743,7 @@ image.
 │   ├── store.py            the record of a name and how copies merge
 │   ├── recordfiles.py      records as files on the Volume, cached in a Dict
 │   ├── sandbox.py          Modal sandbox calls and the sandbox start command
+│   ├── idle.py             the idle-stop watcher, run as the start command's last step
 │   ├── session.py          shared Modal handles and error mapping
 │   ├── ssh.py              SSH engines, sandbox shell, host keys
 │   ├── ssh_input.py        checks on SSH flags and keys, made before Modal
