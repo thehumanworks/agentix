@@ -1,23 +1,27 @@
 # Portable Home Manager
 
 Standalone Home Manager manages user packages and settings for the Modal
-sandboxes and for a Mac. Each profile is one output of `flake.nix`.
+sandboxes, for any user on any Linux machine or container, and for a Mac.
+Each profile is one output of `flake.nix`.
 
 | Profile | System | User | Entry point |
 | --- | --- | --- | --- |
 | `modal` | x86_64 Linux | root | `home-manager/profiles/sandbox.nix` |
 | `modal-arm` | ARM64 Linux | root | `home-manager/profiles/sandbox.nix` |
+| `linux` | x86_64 Linux | agent, an example | `home-manager/profiles/linux.nix`, through `lib.mkLinuxHome` |
 | `mac` | Apple Silicon macOS | tomas | `home-manager/profiles/mac.nix` |
+
+`linux` is an example; for your own user, see [Any Linux user](#any-linux-user).
 
 ## Layout
 
 | Path | Contents |
 | --- | --- |
-| `flake.nix` | Pinned inputs, the profile table, the exported modules, the OCI images, the formatter, and the checks |
+| `flake.nix` | Pinned inputs, the profile table, `lib.mkLinuxHome`, the exported modules, the OCI images, the formatter, and the checks |
 | `sandbox.toml` | The paths that the agentix command on the host and the image share, where the manifest goes, and the image's environment |
 | `home-manager/exports.nix` | The modules the flake exports as `homeManagerModules`, and `default`, which imports them all |
 | `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
-| `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
+| `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs. `linux.nix` holds what every Linux machine gets, and `sandbox.nix` builds on it |
 | `home-manager/users/` | One file per person: the Git name and emails |
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
 | `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, OpenSSH, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
@@ -26,7 +30,8 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 
 Each home in `flake.nix` combines every module, a profile, and a user file.
 To add a tool everywhere, add it to the list in `modules/tools.nix`. To add it
-to sandboxes only, add it to `profiles/sandbox.nix`. To add a kind of machine,
+to every Linux home, add it to `profiles/linux.nix`; to sandboxes only, to
+`profiles/sandbox.nix`. To add a kind of machine,
 add a profile file and one entry to `homes` in `flake.nix`. All profiles use
 one nixpkgs revision, including the editor, so a package appears in the image
 once.
@@ -190,6 +195,87 @@ and Rex; do not import those again. The gh wrappers, the Claude login, and
 Tailscale read secrets from the `agentix` vault in 1Password; turn off the
 modules you have no such items for.
 
+## Any Linux user
+
+`lib.mkLinuxHome` gives a Home Manager configuration for one user on any
+Linux machine or container, with no Modal and no root. It takes the user name
+and home directory, and optionally the system and extra modules:
+
+```nix
+agentix.lib.mkLinuxHome {
+  username = "ada";
+  homeDirectory = "/home/ada";
+  system = "x86_64-linux"; # the default; "aarch64-linux" evaluates too
+  modules = [
+    {
+      agentix.identity = {
+        name = "Ada Lovelace";
+        email = "ada@example.com";
+      };
+    }
+  ];
+}
+```
+
+In a flake of your own, with this flake as the input `agentix`, set
+`homeConfigurations.ada` to that and run
+`home-manager switch --flake .#ada`. Without a flake of your own, build and
+activate it for the current user straight from this one:
+
+```sh
+nix build --impure --out-link /tmp/agentix-home --expr '
+  ((builtins.getFlake "github:thehumanworks/agentix?dir=nix").lib.mkLinuxHome {
+    username = builtins.getEnv "USER";
+    homeDirectory = builtins.getEnv "HOME";
+  }).activationPackage'
+HOME_MANAGER_BACKUP_EXT=bak /tmp/agentix-home/activate
+```
+
+`USER` and `HOME` must be set; a container's shell may lack `USER`
+(`export USER=$(id -un)`). From a checkout, use `path:/PATH/TO/agentix/nix`
+in place of the GitHub URL.
+`homeConfigurations.linux` is the same function for a user `agent` in
+`/home/agent`, which `nix flake check` builds.
+
+The configuration manages `~/.bashrc` and `~/.profile`. Home Manager will not
+replace files it did not write, so on a distribution, whose new users get
+both from `/etc/skel`, set `HOME_MANAGER_BACKUP_EXT=bak` (or pass
+`home-manager switch -b bak`) once, and it moves them aside.
+
+`profiles/linux.nix` holds what every Linux home gets, the sandbox included:
+the shared modules, `ps` and `strace`, the Bash setup that loads the session
+variables in login shells and `ssh HOST COMMAND`, the C.UTF-8 locale, a
+headless editor, and `nixpkgs` pinned to this flake's revision. Of the sandbox
+modules it turns on the ones that work for any user: the base commands, the
+manifest, Rex, and OpenSSH. On a distribution, the base commands shadow its
+own `tar`, `less`, `which`, `flock`, and the rest, because
+`~/.nix-profile/bin` comes before `/usr/bin` on PATH; their low priority only
+decides between packages within the profile. Set
+`agentix.sandbox.baseCommands.enable = false` to keep the distribution's. The
+rest depend on what `agentix sandbox up` sets up in a Modal sandbox, or on
+root, and stay off:
+
+| Module | In a sandbox | Without it |
+| --- | --- | --- |
+| `opToken` | `op` loads the token that `sandbox up` writes to `/run/agentix/op-token`, and Claude may not read the file | The stock `op`: it signs in as usual, or uses `OP_SERVICE_ACCOUNT_TOKEN` from the environment |
+| `workdir` | SSH sessions start in `/workdir`, or in the directory `/run/agentix/workdir` names | Sessions start in the home directory |
+| `claude` | `~/.claude/CLAUDE.md` describes the sandbox, and Claude trusts the home and `/workdir` | No sandbox brief; Claude asks before trusting a directory |
+| `tailscale` | `ts`, which runs `tailscaled` as root | Run Tailscale the way the machine does |
+
+The manifest still lists the shared paths from `sandbox.toml`, which nothing
+reads outside a sandbox. Turn any module on in `modules`, or all of them with
+`agentix.sandbox.enable = true`, as for root in a container that the agentix
+command does not start. `nix flake check` fails if the `linux` example loads
+the token file, starts in the working directory, has the sandbox brief or
+`ts`, or lacks `claude`, `git`, `nvim`, `op`, `rex`, or `ssh`.
+
+The secrets that the `claude`, `gh`, and `gh-lf` wrappers read come from the
+`agentix` vault in 1Password, as in a sandbox. With no access to it, sign `op`
+in to an account that has the items, or turn those modules off:
+`agentix.claude.enable = false` removes Claude Code, and
+`agentix.git.enable = false` removes Git itself and its configuration along
+with the `gh` and `gh-lf` wrappers.
+
 ## What a sandbox gets
 
 - Tools for search, data, networking, archives, builds, Python, JavaScript,
@@ -242,8 +328,10 @@ nix flake check
 
 `nix fmt` formats every Nix file with nixfmt. `nix flake check` verifies the
 formatting, runs statix and deadnix, and builds the profiles of the current
-system. On Linux it also evaluates the sandbox profile with each SSH engine's
-module turned off in turn, and both off; see [SSH engines](#ssh-engines). On Linux it also builds the OCI image's activated root and layer list,
+system, the `linux` example included on x86_64. On Linux it also evaluates
+the sandbox profile with each SSH engine's module turned off in turn, and both
+off; see [SSH engines](#ssh-engines). On Linux it also builds the OCI image's
+activated root and layer list,
 which takes seconds once the profile is built, but not the image stream itself.
 Add `--all-systems --no-build` to evaluate the Mac and ARM profiles and the ARM
 image too; without `--no-build`, Nix stops at the first check it cannot build

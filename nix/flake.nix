@@ -1,5 +1,5 @@
 {
-  description = "Portable Home Manager environments for Modal sandboxes and macOS";
+  description = "Portable Home Manager environments for Modal sandboxes, any Linux user, and macOS";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
@@ -81,14 +81,39 @@
           modules ? [ ],
         }:
         home-manager.lib.homeManagerConfiguration {
-          pkgs = pkgsFor.${system};
+          pkgs = nixpkgs.legacyPackages.${system};
           extraSpecialArgs = { inherit inputs; };
           modules = [
             self.homeManagerModules.default
+          ]
+          # Every Linux profile imports the generic one. Naming it here too
+          # puts its settings where they were when they lived in
+          # profiles/sandbox.nix, so the modal generation stayed the same.
+          ++ lib.optional (lib.hasSuffix "-linux" system) ./home-manager/profiles/linux.nix
+          ++ [
             profile
             user
           ]
           ++ modules;
+        };
+
+      # Any Linux user: the profile in home-manager/profiles/linux.nix for the
+      # given user name and home directory. MODULES add settings on top, such as
+      # `agentix.identity` for Git, or `agentix.sandbox.enable = true` for the
+      # root-only and sandbox modules. See README.md.
+      mkLinuxHome =
+        {
+          username,
+          homeDirectory,
+          system ? "x86_64-linux",
+          modules ? [ ],
+        }:
+        mkHome {
+          inherit system modules;
+          profile = ./home-manager/profiles/linux.nix;
+          user = {
+            home = { inherit username homeDirectory; };
+          };
         };
 
       # The sandbox home of each Linux system, which the OCI image holds.
@@ -183,9 +208,51 @@
           ssh-tailscale-only = check "tailscale-only" [ "tailscale" ] (variant [ "tailscale" ]);
           ssh-none = check "none" [ ] (variant [ ]);
         };
+
+      # Builds the example generic Linux home, and fails when it still depends
+      # on what only a sandbox that `agentix sandbox up` started provides: the
+      # files that sandbox.toml names, the working directory, Claude's sandbox brief,
+      # and the root-only `ts`.
+      linuxCheck =
+        let
+          home = self.homeConfigurations.linux;
+          inherit (home.config.agentix) commands op sandbox;
+          problems =
+            lib.optional (op.tokenFile != null) "op loads ${op.tokenFile}"
+            ++ lib.optional sandbox.opToken.enable "the sandbox token file is on"
+            ++ lib.optional sandbox.workdir.enable "logins start in ${sandbox.paths.workdir}"
+            ++ lib.optional sandbox.claude.enable "Claude has the sandbox brief"
+            ++ lib.optional sandbox.tailscale.enable "the root-only ts is on"
+            ++ map (command: "the command ${command} is missing") (
+              lib.subtractLists commands [
+                "claude"
+                "git"
+                "nvim"
+                "op"
+                "rex"
+                "ssh"
+              ]
+            );
+        in
+        assert lib.assertMsg (problems == [ ]) (
+          "the generic Linux profile: " + lib.concatStringsSep "; " problems
+        );
+        home.activationPackage;
     in
     {
-      homeConfigurations = lib.mapAttrs (_: mkHome) homes;
+      homeConfigurations = lib.mapAttrs (_: mkHome) homes // {
+        # An example of the generic Linux profile, which `nix flake check`
+        # builds. For a real user, call lib.mkLinuxHome with their name and
+        # home directory; see README.md.
+        linux = mkLinuxHome {
+          username = "agent";
+          homeDirectory = "/home/agent";
+        };
+      };
+
+      # `mkLinuxHome { username; homeDirectory; system ? "x86_64-linux";
+      # modules ? [ ]; }` gives a Home Manager configuration for any Linux user.
+      lib = { inherit mkLinuxHome; };
 
       # For other flakes; see README.md.
       homeManagerModules = import ./home-manager/exports.nix { inherit inputs lib; };
@@ -233,6 +300,7 @@
         # Builds the image's activated root and layer list, not its layers.
         // self.packages.${system} or { }
         // lib.optionalAttrs (sandboxHomes ? ${system}) (sshEngineChecks system)
+        // lib.optionalAttrs (system == "x86_64-linux") { home-linux = linuxCheck; }
       );
     };
 }
