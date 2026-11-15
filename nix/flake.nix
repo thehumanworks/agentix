@@ -20,14 +20,18 @@
       url = "github:thehumanworks/claude-mods";
       flake = false;
     };
-    # Rex, the terminal multiplexer: the published release binary, on the
+    # Rex, the terminal multiplexer: the published release binary, from the
     # snapshot channel the nixos box uses. Both the flake and the binary
     # download without credentials. Rex's flake allows its own unfree licence.
     # It needs only glibc, PAM, and patchelf from nixpkgs, so it follows this
     # flake's pin instead of bringing a second package set into the image.
-    # Move to the newest snapshot with `uv run agentix flake update rex`.
+    # The URL names one snapshot, and the server never changes what it holds.
+    # The channel's own URL, snapshot.tar.gz, would lock as whatever its Link
+    # header names, which has been an older snapshot than the one it served.
+    # `nix flake update` leaves Rex here; `uv run agentix flake update rex`
+    # moves this URL to the newest snapshot.
     rex = {
-      url = "https://pkgs.superlogical.com/rex/nix/snapshot.tar.gz";
+      url = "https://pkgs.superlogical.com/rex/nix/snapshot/0.0.1794719511-gf91cd7.tar.gz";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };

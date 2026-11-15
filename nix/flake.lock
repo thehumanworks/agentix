@@ -103,14 +103,14 @@
         ]
       },
       "locked": {
-        "lastModified": 1794692212,
-        "narHash": "sha256-GTlEb9ChSbpxIh+faIcAvq12saSYmy2uR3jSQqURgik=",
+        "lastModified": 1794719511,
+        "narHash": "sha256-oEAjNRNlUu9IWrbDXlLFtyPGNxogGmAIFaSWFCUwZI0=",
         "type": "tarball",
-        "url": "https://pkgs.superlogical.com/rex/nix/snapshot/0.0.1794692212-g3cf0c1.tar.gz"
+        "url": "https://pkgs.superlogical.com/rex/nix/snapshot/0.0.1794719511-gf91cd7.tar.gz"
       },
       "original": {
         "type": "tarball",
-        "url": "https://pkgs.superlogical.com/rex/nix/snapshot.tar.gz"
+        "url": "https://pkgs.superlogical.com/rex/nix/snapshot/0.0.1794719511-gf91cd7.tar.gz"
       }
     },
     "root": {

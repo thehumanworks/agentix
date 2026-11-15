@@ -26,8 +26,11 @@ def _flake_update(*inputs: str, build: bool = False, image_name: str = IMAGE_NAM
     """Run `nix flake update` in a sandbox and write nix/flake.lock on this host.
 
     Name inputs to move only those, for example `flake update claude-mods`;
-    with no names every input moves. With `--build`, the image is built and
-    published if an input moved; otherwise run `image build` afterwards.
+    with no names every input moves except Rex, which moves only when named,
+    as in `flake update rex`: it then points nix/flake.nix at the newest Rex
+    snapshot. The lock is written only once the image's home profile
+    evaluates with it. With `--build`, the image is built and published if an
+    input moved; otherwise run `image build` afterwards.
     """
     from .flake import update
     from .image import get_app

@@ -399,12 +399,16 @@ flakes only include files known to Git. Intel Macs are not supported.
 ## Updates
 
 From the repository root, `uv run agentix flake update` moves every pinned
-input to its newest revision, and `uv run agentix flake update claude-mods`
-moves only the named ones. The command runs `nix flake update` in a sandbox, so
-the host needs no Nix, then writes the new `flake.lock` to this directory and
-lists the inputs that moved. Add `--build` to build and publish the image in
-the same run when an input moved; otherwise rebuild afterwards. Commit the
-lock.
+input to its newest revision except Rex, and `uv run agentix flake update
+claude-mods` moves only the named ones. Rex moves only when named, as in
+`uv run agentix flake update rex`; see [Rex in sandboxes](#rex-in-sandboxes).
+The command runs `nix flake update` in a sandbox, so the host needs no Nix,
+and evaluates the `modal` profile with the new lock there, which fetches every
+input from the URL the lock records. Only when that succeeds does it write the
+new `flake.lock`, and `flake.nix` when Rex moved, to this directory and list
+the inputs that moved. Add `--build` to build and publish the image in the
+same run when an input moved; otherwise rebuild afterwards. Commit what
+changed.
 
 Keep `home.stateVersion` unchanged unless deliberately migrating its
 compatibility settings. The base image and the Nix version are pinned by
@@ -472,11 +476,37 @@ sandbox replacement.
 `modules/sandbox/rex.nix` sets up Rex with the Home Manager module from Rex's
 own flake, as on the nixos box: the `rex` command, the `xterm-rex` terminfo
 entry in `~/.terminfo`, and Rex's ssh guard in `~/.ssh/config`, which Home
-Manager now writes for root. The flake input follows the snapshot channel and
-this flake's nixpkgs. The flake and the release binary download without
-credentials, so the image build needs no secret. Move to the newest snapshot
-with `uv run agentix flake update rex`, then rebuild. The Mac profile leaves
-the module off; the Rex app installs `rex` and runs the server there.
+Manager now writes for root. The flake input is one build from the snapshot
+channel, and follows this flake's nixpkgs. The flake and the release binary
+download without credentials, so the image build needs no secret. The Mac
+profile leaves the module off; the Rex app installs `rex` and runs the server
+there.
+
+The input names a snapshot by its versioned URL,
+`https://pkgs.superlogical.com/rex/nix/snapshot/VERSION.tar.gz`, which always
+serves the same files, so `nix flake update` leaves it where it is. The
+channel's URL, `snapshot.tar.gz`, serves the newest snapshot, but Nix locks it
+as the versioned URL that the server's `Link` header names, and that header
+has named an older snapshot than the one served: the lock then paired one
+snapshot's URL with another's hash, and every evaluation failed with a
+`narHash` mismatch. To move to the newest snapshot:
+
+```sh
+uv run agentix flake update rex     # with other names, those move as well
+uv run agentix image build          # then verify, as AGENTS.md says
+```
+
+It reads the version from `sources.json` in the channel's tarball, checks that
+the versioned tarball holds the same version, and points the `rex` URL in
+`flake.nix` at it. It writes `flake.nix` and `flake.lock` only when Nix locked
+exactly that URL and the `modal` profile evaluates. If the versioned tarball is
+not published yet, it stops and changes nothing; try again later. Old
+versioned tarballs have stayed available so far: in November 2026, snapshot
+and preview tarballs from September, and their release binaries, still
+downloaded. The weekly
+update job does not move Rex. The same works for the preview channel: change `snapshot/VERSION` in the
+URL to a preview version, such as `preview/0.1.0-preview.19`. In November
+2026 the stable channel served nothing yet.
 
 The nixos box runs its server as a systemd user service with its own Tailscale
 node. A sandbox has no systemd, so nothing starts at boot. The first `rex`
