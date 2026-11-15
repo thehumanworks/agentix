@@ -271,3 +271,37 @@ class ModuleCheckTests(unittest.TestCase):
         # Rex's ssh guard is checked with the client that OpenSSH installs.
         (guard,) = [check for check in checks if "ssh -G" in check]
         self.assertTrue(guard.startswith("if jq -e --arg name ssh "))
+
+    def test_the_new_tool_checks_run_only_with_their_modules(self):
+        checks = image._checks()
+        for command, marker in (
+            ("cc", "cc -o /tmp/agentix-check"),
+            ("chrome-headless-shell", "--dump-dom"),
+            (",", "nix-locate"),
+        ):
+            (check,) = [check for check in checks if marker in check]
+            self.assertTrue(check.startswith(f"if jq -e --arg name {command} "), check)
+
+    def test_the_playwright_path_must_name_a_browser(self):
+        (check,) = [c for c in image._checks() if "PLAYWRIGHT_BROWSERS_PATH names" in c]
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+
+        def run(env):
+            environment = {"PATH": "/usr/bin:/bin", **env}
+            return subprocess.run(
+                ["sh", "-c", check], env=environment, capture_output=True
+            ).returncode
+
+        self.assertEqual(run({}), 0)
+        self.assertEqual(run({"PLAYWRIGHT_BROWSERS_PATH": directory.name}), 1)
+        binary = (
+            Path(directory.name)
+            / "chromium_headless_shell-1"
+            / "chrome-headless-shell-linux64"
+            / "chrome-headless-shell"
+        )
+        binary.parent.mkdir(parents=True)
+        binary.write_text("")
+        binary.chmod(0o755)
+        self.assertEqual(run({"PLAYWRIGHT_BROWSERS_PATH": directory.name}), 0)

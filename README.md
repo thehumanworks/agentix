@@ -368,8 +368,13 @@ build creates it first. See [Modal](nix/README.md#modal) for the details.
 
 Root's Home Manager generation, activated at build time, with:
 
-- search and data tools (ripgrep, fd, fzf, ast-grep, jq, yq, sqlite),
-  network and archive tools, make and just;
+- search and data tools (ripgrep, fd, fzf, ast-grep, jq, yq, sqlite,
+  psql), network and archive tools, make and just, hyperfine, watchexec,
+  difftastic (`difft`), and nix-output-monitor (`nom`);
+- a C and C++ compiler (`cc`, `gcc`, `g++`) with binutils;
+- a headless Chromium, `chrome-headless-shell`, which Playwright finds too;
+- comma, so `, COMMAND` runs a command that is not installed, with a prebuilt
+  nix-index database, and `nix-locate`;
 - Python 3 with uv, Bun, and Node; ruff, ty, shellcheck, shfmt, nixfmt,
   statix, and deadnix; language servers for Python, TypeScript, Bash, Nix,
   and more, used by Neovim and by Claude Code's LSP tool;
@@ -385,13 +390,14 @@ The image build checks that every command in the manifest,
 `/root/.nix-profile/share/agentix/manifest.json`, resolves in root's
 profile.
 
-The image has no `apt` or `dpkg`, no C compiler (`gcc`, `cc`), no `sudo`
-(you are root), no `pip` (use `uv`), and no `perl`, `gpg`, or `useradd`.
-Run anything missing from nixpkgs, at the image's revision:
+The image has no `apt` or `dpkg`, no `sudo` (you are root), no `pip` (use
+`uv`), and no `perl`, `gpg`, or `useradd`. Run anything missing from nixpkgs,
+at the image's revision:
 
 ```sh
-nix shell nixpkgs#gcc -c gcc --version
+, hello                       # comma finds the package in its index
 nix run nixpkgs#hello
+nix shell nixpkgs#gnupg -c gpg --version
 ```
 
 ### Rebuilding

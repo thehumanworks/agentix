@@ -33,6 +33,10 @@ readyFile = "/run/agentix/ready"
 # SSL_CERT_DIR=/etc/ssl/certs for the commands it starts, and the curl command
 # then looks only there unless SSL_CERT_FILE names the bundle too; the image
 # keeps the bundle in that directory, not one file per certificate.
+# PLAYWRIGHT_* point Playwright at the image's headless Chromium, and
+# home-manager/modules/sandbox/browser.nix sets the same for login shells.
+# With agentix.sandbox.browser off, remove them: the image build fails while
+# PLAYWRIGHT_BROWSERS_PATH names no browser.
 [env]
 PATH = "/root/.nix-profile/bin:/nix/var/nix/profiles/default/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 HOME = "/root"
@@ -44,3 +48,5 @@ LANG = "C.UTF-8"
 NIX_PATH = "nixpkgs=flake:nixpkgs"
 IS_SANDBOX = "1"
 SSL_CERT_FILE = "/etc/ssl/certs/ca-certificates.crt"
+PLAYWRIGHT_BROWSERS_PATH = "/root/.nix-profile/share/playwright-browsers"
+PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS = "1"

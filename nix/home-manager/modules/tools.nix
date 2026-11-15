@@ -31,12 +31,13 @@ in
     home.packages = cfg.packages;
 
     # The main command of each tool, so a tool added to or removed from the
-    # list is checked with it. bind (dig) and coreutils name none, and
-    # Python's is versioned.
+    # list is checked with it. bind (dig), coreutils, and PostgreSQL (psql)
+    # name none, and Python's is versioned.
     agentix.commands =
       lib.concatMap (pkg: lib.optional (pkg.meta ? mainProgram) pkg.meta.mainProgram) cfg.packages
       ++ [
         "dig"
+        "psql"
         "python3"
         "direnv"
       ];
@@ -62,6 +63,9 @@ in
       jq
       yq-go
       sqlite
+      # psql, with the server's commands; initdb and postgres refuse to run
+      # as root.
+      postgresql
 
       # Network and transfer.
       curl
@@ -80,6 +84,11 @@ in
       just
       pkg-config
 
+      # Benchmarks, rerunning on change, and structural diffs (difft).
+      hyperfine
+      watchexec
+      difftastic
+
       # Python, JavaScript, and shell.
       python3
       uv
@@ -89,9 +98,11 @@ in
       shfmt
 
       # Nix formatting and linting; the flake's checks run the same tools.
+      # nom shows a build's progress: `nom build`, or `nix build ... |& nom`.
       nixfmt
       statix
       deadnix
+      nix-output-monitor
 
       herdr
     ];
