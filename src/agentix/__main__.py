@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
-from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
+from .defaults import IMAGE_NAME
 from .errors import PublicKeyRequired
 
 
@@ -47,45 +47,73 @@ def _flake_update(*inputs: str, build: bool = False, image_name: str = IMAGE_NAM
 
 
 def _create_sandbox(
-    image_name: str = IMAGE_NAME,
-    secret_name: str = SECRET_NAME,
-    timeout: int = SANDBOX_TIMEOUT,
-    workdir: str = "",
-    memory: int = SANDBOX_MEMORY_MIB,
-    cpu: float = 0,
+    image_name: str | None = None,
+    secret_name: str | None = None,
+    timeout: int | None = None,
+    workdir: str | None = None,
+    memory: int | None = None,
+    cpu: float | None = None,
     name: str = "",
-    tailscale: bool = False,
+    tailscale: bool | None = None,
     hostname: str = "",
-    no_snapshot: bool = False,
+    no_snapshot: bool | None = None,
     ephemeral: bool = False,
 ):
     """Start a sandbox under NAME, or under a new name such as brisk-otter.
+
+    A flag not given takes its value from [sandbox.up] in
+    ~/.config/agentix/config.toml, else the built-in default; see
+    `agentix config show`.
 
     Its filesystem is saved when it ends, for `sandbox restore`, unless
     --no-snapshot is given. --ephemeral starts a sandbox with no name, no
     record, and no snapshot: `sandbox down ID` leaves nothing behind. With
     --tailscale, Tailscale SSH starts too, as with `sandbox ssh start`.
     """
-    from . import names, ssh_input
+    from . import config, names, ssh_input
 
-    # Refuse before anything is created.
-    names.check_ephemeral(name, ephemeral)
-    if name:
-        names.check_new_name(name)
-    ssh_input.check_tailscale_start(tailscale, hostname, secret_name)
-    return _backend().create_sandbox(
+    options = config.up_options(
         image_name=image_name,
         secret_name=secret_name,
         timeout=timeout,
         workdir=workdir,
         memory=memory,
         cpu=cpu,
-        name=name,
         tailscale=tailscale,
+        no_snapshot=no_snapshot,
+    )
+    # Refuse before anything is created.
+    names.check_ephemeral(name, ephemeral)
+    if name:
+        names.check_new_name(name)
+    ssh_input.check_tailscale_start(
+        options["tailscale"], hostname, options["secret_name"]
+    )
+    return _backend().create_sandbox(
+        image_name=options["image_name"],
+        secret_name=options["secret_name"],
+        timeout=options["timeout"],
+        workdir=options["workdir"],
+        memory=options["memory"],
+        cpu=options["cpu"],
+        name=name,
+        tailscale=options["tailscale"],
         hostname=hostname,
-        exit_snapshot=not (no_snapshot or ephemeral),
+        exit_snapshot=not (options["no_snapshot"] or ephemeral),
         ephemeral=ephemeral,
     )
+
+
+def _config_show():
+    """The defaults `sandbox up` uses, and where each comes from.
+
+    Each key is a `sandbox up` flag. A flag given on the command line wins
+    over [sandbox.up] in the config file, which wins over the built-in
+    default. Prints one JSON object per key, with the file's path.
+    """
+    from . import config
+
+    return config.show()
 
 
 def _terminate_sandbox(sandbox_id: str):
@@ -265,6 +293,9 @@ def main(argv: Sequence[str] | None = None):
             },
             "flake": {
                 "update": _flake_update,
+            },
+            "config": {
+                "show": _config_show,
             },
             "sandbox": {
                 "up": _create_sandbox,

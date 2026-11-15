@@ -51,6 +51,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | --- | --- |
 | `image build [--force-build]` | Build the image from `nix/` and publish it; prints `image_id` |
 | `flake update [INPUT...] [--build]` | Move pinned Nix inputs in `nix/flake.lock`; `--build` also rebuilds when one moved |
+| `config show` | The defaults `sandbox up` uses, and where each comes from |
 | `sandbox up [FLAGS]` | Start a sandbox; prints `sandbox_id` and `name` |
 | `sandbox ls` | Every name with its current sandbox, and running sandboxes without a name |
 | `sandbox exec SANDBOX 'COMMAND'` | Run one command and print its output |
@@ -91,9 +92,63 @@ that has a name. The command line uses
 | `--no-snapshot` | off | Modal saves nothing when the sandbox ends |
 | `--ephemeral` | off | No name, no record, no snapshot |
 
+Every flag above except `--name`, `--hostname`, and `--ephemeral` can get
+its default from your config file instead; see
+[Defaults for `sandbox up`](#defaults-for-sandbox-up).
+
 `sandbox up` returns once the sandbox is ready for commands, about a second
 after Modal accepts it. It does not build the image. Sandboxes run in
 Modal's VM runtime and reserve TCP port 22 for the OpenSSH tunnel.
+
+### Defaults for `sandbox up`
+
+To stop retyping the same flags, put them in `~/.config/agentix/config.toml`
+(or `$XDG_CONFIG_HOME/agentix/config.toml`), under `[sandbox.up]`:
+
+```toml
+[sandbox.up]
+timeout = 7200
+memory = 16384
+tailscale = true
+```
+
+| Key | Type | Built-in default | Flag |
+| --- | --- | --- | --- |
+| `image_name` | string | `"determinate-nix:latest"` | `--image-name` |
+| `secret_name` | string | `"1password"`; `""` attaches none | `--secret-name` |
+| `timeout` | integer, seconds | `3600` | `--timeout` |
+| `memory` | integer, MiB | `8192` | `--memory` |
+| `cpu` | number, cores | `0`, Modal's default share | `--cpu` |
+| `workdir` | string | `""`, which is `/workdir` | `--workdir` |
+| `tailscale` | boolean | `false` | `--tailscale` |
+| `no_snapshot` | boolean | `false` | `--no-snapshot` |
+
+A flag on the command line wins over the file, and the file wins over the
+built-in default, also when the flag gives the built-in default: with
+`timeout = 7200` in the file, `--timeout=3600` starts a sandbox for an hour.
+Turn a boolean off with `--notailscale` or `--tailscale=False`, and
+`--no-snapshot=False`; a value such as `false` in lower case is refused.
+`--ephemeral` still saves no snapshot, whatever the file says. Only
+`sandbox up` reads the file; `sandbox restore` uses the options the name was
+created with.
+
+Without the file, nothing changes. A key that is not in the table above, a
+value of the wrong type, invalid TOML, or a file that cannot be read stops
+`sandbox up` before anything starts, with a message that names the file and
+the key. Keys are written with underscores, as help prints the flags.
+
+`config show` prints each key with the value `sandbox up` would use and its
+source, `default` or `config PATH`:
+
+```sh
+$ uv run agentix config show
+{"key": "timeout", "value": 7200, "source": "config /home/me/.config/agentix/config.toml", "type": "integer"}
+{"key": "memory", "value": 8192, "source": "default", "type": "integer"}
+...
+```
+
+Because the flags of `sandbox up` default to the file, its help shows
+`Default: None` for them; `config show` has the values.
 
 ### Running commands
 
@@ -471,6 +526,7 @@ image.
 │   ├── flake.py            flake update and the Rex pin
 │   ├── layout.py           paths and environment from nix/sandbox.toml
 │   ├── defaults.py         default image, secret, timeout, memory, store
+│   ├── config.py           defaults for sandbox up from ~/.config/agentix/config.toml
 │   └── scripts/            tailscale-ssh.sh and openssh-ssh.sh, run in the sandbox
 ├── nix/                    the flake; see nix/README.md
 │   ├── flake.nix           inputs, profiles, exported modules, OCI packages, checks
