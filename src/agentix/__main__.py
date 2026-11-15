@@ -404,6 +404,39 @@ def _cost(json: bool = False):
     return None
 
 
+def _auth(*args: str):
+    from .auth import run
+
+    run(*args)
+
+
+def _auth_install():
+    """Keep Codex's and pi's sign-in files on this computer in step with 1Password.
+
+    Runs agent-auth-sync install: it saves OP_SERVICE_ACCOUNT_TOKEN from this
+    shell (export it first), copies the script to ~/.local/bin, and starts it
+    as a launchd agent on macOS or a systemd user service on Linux. Each
+    sandbox runs the same script, so a token one machine refreshes reaches
+    the others. See nix/packages/agent-auth-sync/README.md.
+    """
+    _auth("install")
+
+
+def _auth_uninstall():
+    """Stop agent-auth-sync's service and remove it, its copy, and the saved token."""
+    _auth("uninstall")
+
+
+def _auth_status():
+    """Whether each sign-in file here and its 1Password field agree. Prints no secrets."""
+    _auth("status")
+
+
+def _auth_sync():
+    """Bring each sign-in file here and its 1Password field together once."""
+    _auth("sync")
+
+
 def _sync(name: str = "", pull: bool = False, path: str = ""):
     """Copy this checkout's uncommitted changes into a sandbox, or back with --pull.
 
@@ -568,6 +601,15 @@ def _cli():
                         image_name,
                         call=lambda inputs, **flags: _flake_update(*inputs, **flags),
                     ),
+                },
+            ),
+            "auth": group(
+                "Keep Codex's and pi's sign-in files in step with 1Password.",
+                {
+                    "install": command(_auth_install),
+                    "uninstall": command(_auth_uninstall),
+                    "status": command(_auth_status),
+                    "sync": command(_auth_sync),
                 },
             ),
             "config": group(

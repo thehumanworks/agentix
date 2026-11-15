@@ -13,10 +13,12 @@
 # commands it runs get secrets through `op`. A different exported token is an
 # override and stays.
 #
-# With SECRETS empty, the wrapper starts the harness without `op`.
+# With SECRETS empty, the wrapper starts the harness without `op`, and still
+# without the token when the token file has it.
 #
 # A call with exactly one argument from BYPASS, such as `--version`, starts
-# the harness directly, so it answers without 1Password.
+# the harness directly, so it answers without 1Password. BEFORE_LAUNCH runs
+# after that check, so `--version` skips it too.
 {
   config,
   lib,
@@ -30,6 +32,8 @@
   bypass ? [ ],
   # Shell lines that run first.
   preamble ? "",
+  # Shell lines that run just before the harness starts.
+  beforeLaunch ? "",
 }:
 
 let
@@ -42,17 +46,21 @@ let
   );
 
   # Each variable is exported as its reference, which `op run` resolves.
-  viaOp = ''
-    ${exports}
-    launch=(${lib.getExe config.agentix.op.package} run --no-masking --)
-    ${lib.optionalString (tokenFile != null) ''
-      token_file=''${AGENTIX_OP_TOKEN_FILE:-${tokenFile}}
-      if [[ -r $token_file ]] &&
-        [[ -z ''${OP_SERVICE_ACCOUNT_TOKEN:-} || $OP_SERVICE_ACCOUNT_TOKEN == "$(<"$token_file")" ]]; then
-        launch+=(${lib.getExe' pkgs.coreutils "env"} -u OP_SERVICE_ACCOUNT_TOKEN)
-      fi
-    ''}
-    exec "''${launch[@]}" ${program} "$@"
+  launch =
+    if secrets == { } then
+      "launch=()"
+    else
+      ''
+        ${exports}
+        launch=(${lib.getExe config.agentix.op.package} run --no-masking --)
+      '';
+
+  withoutToken = lib.optionalString (tokenFile != null) ''
+    token_file=''${AGENTIX_OP_TOKEN_FILE:-${tokenFile}}
+    if [[ -r $token_file ]] &&
+      [[ -z ''${OP_SERVICE_ACCOUNT_TOKEN:-} || $OP_SERVICE_ACCOUNT_TOKEN == "$(<"$token_file")" ]]; then
+      launch+=(${lib.getExe' pkgs.coreutils "env"} -u OP_SERVICE_ACCOUNT_TOKEN)
+    fi
   '';
 in
 pkgs.writeShellApplication {
@@ -66,6 +74,9 @@ pkgs.writeShellApplication {
         esac
       fi
     ''}
-    ${if secrets == { } then ''exec ${program} "$@"'' else viaOp}
+    ${beforeLaunch}
+    ${launch}
+    ${withoutToken}
+    exec "''${launch[@]}" ${program} "$@"
   '';
 }

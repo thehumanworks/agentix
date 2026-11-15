@@ -46,20 +46,23 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | --- | --- | --- |
 | `agentix.op.enable` | `1password.nix` | `op` on PATH |
 | `agentix.claude.enable` | `claude-code.nix` | Claude Code, its settings and plugins, and the `claude` wrapper |
-| `agentix.codex.enable` | `codex.nix` | The Codex CLI and the `codex` wrapper, which gets `agentix.codex.secrets` from 1Password |
+| `agentix.authSync.enable` | `auth-sync.nix` | `agent-auth-sync`, which keeps Codex's and pi's sign-in files in step with 1Password; `codex` and `pi` start its watcher, and `agentix.authSync.service.enable` runs it as a launchd agent or systemd user service |
+| `agentix.codex.enable` | `codex.nix` | The Codex CLI, signed in with `~/.codex/auth.json` (kept in the file, not a keyring), and the `codex` wrapper |
 | `agentix.git.enable` | `git.nix` | Git, with `gh` and `gh-lf` as HTTPS credential helpers |
 | `agentix.languageServers.enable` | `language-servers.nix` | The language servers, on PATH and in Claude's LSP tool |
 | `agentix.nixIndex.enable` | `nix-index.nix` | comma (`, COMMAND`) and `nix-locate`, with the prebuilt index from nix-index-database, and the shell's command-not-found hook |
 | `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
-| `agentix.pi.enable` | `pi.nix` | The pi coding agent and the `pi` wrapper, which gets `agentix.pi.secrets` from 1Password |
+| `agentix.pi.enable` | `pi.nix` | The pi coding agent, signed in with `~/.pi/agent/auth.json`, and the `pi` wrapper |
 | `agentix.sync.enable` | `sync.nix` | `agentix-sync`, which `agentix sandbox sync` runs on both sides to copy uncommitted changes between checkouts with Git |
 | `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
 | `agentix.sandbox.baseCommands.enable` | `sandbox/base-commands.nix` | `tar`, `gzip`, `xz`, `less`, `which`, `flock`, `locale`, `infocmp`, and the other commands a Debian base would provide |
 | `agentix.sandbox.browser.enable` | `sandbox/browser.nix` | `chrome-headless-shell`, Playwright's headless Chromium, run with `--no-sandbox` for root, and `PLAYWRIGHT_BROWSERS_PATH` for Playwright clients |
 | `agentix.sandbox.cc.enable` | `sandbox/cc.nix` | GCC as `cc`, `gcc`, `c++`, and `g++`, and binutils (`ld`, `ar`, `nm`) |
 | `agentix.sandbox.claude.enable` | `sandbox/claude.nix` | Claude's sandbox brief and trusted directories |
+| `agentix.sandbox.codex.enable` | `sandbox/codex.nix` | Codex without approval prompts or its own sandbox (`danger-full-access`), the home and working directories trusted, and the brief |
 | `agentix.sandbox.manifest.enable` | `sandbox/manifest.nix` | The manifest of commands and shared paths |
 | `agentix.sandbox.opToken.enable` | `sandbox/op-token.nix` | An `op` that loads the token file a sandbox stores |
+| `agentix.sandbox.pi.enable` | `sandbox/pi.nix` | pi's sandbox brief |
 | `agentix.sandbox.openssh.enable` | `sandbox/openssh.nix` | `sshd` and `ssh-keygen` for `sandbox ssh start --engine=openssh`, the `ssh`, `scp`, and `sftp` clients, and the image's `sshd` account |
 | `agentix.sandbox.rex.enable` | `sandbox/rex.nix` | Rex, its terminfo entry, and its ssh guard |
 | `agentix.sandbox.tailscale.enable` | `sandbox/tailscale.nix` | Tailscale, for `sandbox ssh start --engine=tailscale`, and the `ts` wrapper |
@@ -86,12 +89,17 @@ Settings that a person or another module provides:
   `agentix.claude.trustedDirectories`, which the sandbox modules set.
 - `agentix.codex.secrets` and `agentix.pi.secrets`: environment variables
   that `codex` and `pi` get from 1Password, as op:// references that
-  `op run` resolves at start. Both default to `op://agentix/openai/api/key`,
-  as `CODEX_API_KEY` (what `codex exec` reads) and `OPENAI_API_KEY`. For pi
-  with Anthropic instead, set
+  `op run` resolves at start. Both are empty: the harnesses sign in with
+  their auth files. An API key can be added, such as
   `agentix.pi.secrets = { ANTHROPIC_API_KEY = "op://..."; }`; `pi --help`
   lists each provider's variable. A wrapper started with only `--version` or
-  `--help` skips 1Password.
+  `--help` skips 1Password and agent-auth-sync.
+- `agentix.authSync.files`: the auth files agent-auth-sync keeps, by the
+  op:// reference of the field that holds each. They default to
+  `op://agentix/codex/auth` for `~/.codex/auth.json` and
+  `op://agentix/pi/auth` for `~/.pi/agent/auth.json`.
+- `agentix.sandbox.brief`: what the sandbox modules load into each
+  harness's sessions, from `modules/sandbox/agent-context.md`.
 
 To add a module here:
 
@@ -368,13 +376,18 @@ with the `gh` and `gh-lf` wrappers.
   and locale as `sandbox exec`. This holds for an interactive login, for
   `ssh HOST COMMAND`, and for `ssh HOST 'bash -lc COMMAND'`. All three start in
   the working directory. The image sets `LANG=C.UTF-8`.
-- `~/.claude/CLAUDE.md`, generated from `modules/sandbox/claude-context.md`. It
-  tells Claude how the sandbox works: where to work, how to get a missing tool,
+- `~/.claude/CLAUDE.md`, `~/.codex/AGENTS.md`, and `~/.pi/agent/AGENTS.md`,
+  generated from `modules/sandbox/agent-context.md`. The brief tells each
+  harness how the sandbox works: where to work, how to get a missing tool,
   how secrets are reached, and how the environment is changed.
-- Claude starts without the 1Password token in its environment, so the
-  commands it runs do not inherit it and get secrets through `op`. A rule also
-  stops Claude reading the token file. The commands still run as root, so this
-  prevents accidental exposure and is not a security boundary.
+- Codex and pi signed in: their auth files come from 1Password through
+  agent-auth-sync, which the `codex` and `pi` wrappers start. Codex runs
+  without approval prompts or its own sandbox, as Claude runs in auto mode.
+- Claude, Codex, and pi start without the 1Password token in their
+  environment, so the commands they run do not inherit it and get secrets
+  through `op`. A rule also stops Claude reading the token file. The commands
+  still run as root, so this prevents accidental exposure and is not a
+  security boundary.
 - OpenSSH and Tailscale, for the two SSH engines of `agentix sandbox ssh`,
   each in a module of its own. See [SSH engines](#ssh-engines).
 - Rex, the terminal multiplexer, with its terminfo entry and ssh guard. See

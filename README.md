@@ -67,6 +67,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox resume NAME` | Restore NAME and continue the `exec --resume` commands its timeout cut off |
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
 | `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
+| `auth install\|uninstall\|status\|sync` | Keep Codex's and pi's sign-in files on this computer in step with 1Password; see [Codex and pi sign-in](#codex-and-pi-sign-in) |
 | `cost [--json]` | This month's Modal spend: billed per app, estimated per sandbox name, image builds, snapshots; see [docs/cost.md](docs/cost.md) |
 | `runner deploy` | Deploy the Modal app that runs `exec --detach` commands; safe to repeat |
 
@@ -582,23 +583,60 @@ that `op`, and read these items from a 1Password vault named `agentix`:
 | Item | Used by |
 | --- | --- |
 | `op://agentix/claude/oauth/token` | `claude`, which starts Claude Code logged in |
-| `op://agentix/openai/api/key` | `codex`, as `CODEX_API_KEY`, and `pi`, as `OPENAI_API_KEY` |
+| `op://agentix/codex/auth` | `codex`: Codex's ChatGPT login, `~/.codex/auth.json`, as one line of JSON; see [Codex and pi sign-in](#codex-and-pi-sign-in) |
+| `op://agentix/pi/auth` | `pi`: pi's providers, `~/.pi/agent/auth.json`, as one line of JSON |
 | `op://agentix/gh/dev/host`, `op://agentix/gh/dev/token` | `gh`, and Git's credential helper for github.com |
 | `op://agentix/gh/work/host`, `op://agentix/gh/work/token` | `gh-lf`, the same for a second GitHub host |
 | `op://agentix/tailscale/auth/key` | `ts`, when a sandbox enrolls in the tailnet |
 
 A missing item breaks only the command that reads it; `codex --version` and
 `pi --version` (and `--help`) skip 1Password. `agentix.codex.secrets` and
-`agentix.pi.secrets` name other items or variables, such as
-`ANTHROPIC_API_KEY` for pi; see [nix/README.md](nix/README.md). `codex exec`
-uses `CODEX_API_KEY`; an interactive `codex` uses the login that
-`codex login` keeps in `~/.codex`, which a named sandbox's snapshots keep.
+`agentix.pi.secrets` can add API keys as environment variables, such as
+`ANTHROPIC_API_KEY` for pi; see [nix/README.md](nix/README.md).
 Claude, Codex, and pi start without the token in their environment, so the
 commands they run do not inherit it, and a permission rule stops Claude
 reading the token file. Its commands still run as
 root and can run `op`: this prevents accidental exposure and is not a
 security boundary. Anyone with a root session in the sandbox can use the
 token. A sandbox started with `--secret-name=''` has no token file.
+
+### Codex and pi sign-in
+
+Codex and pi sign in with OAuth logins that they keep in files:
+`~/.codex/auth.json` (ChatGPT) and `~/.pi/agent/auth.json` (one entry per
+provider). Both refresh their tokens on their own, and a refresh token works
+once: when one machine refreshes, the copy on every other machine stops
+working. [agent-auth-sync](nix/packages/agent-auth-sync/README.md) keeps
+each file in step with its 1Password field on every machine that runs it.
+It pushes a file when it changes, and pulls the field when another machine
+changed it. When both changed, the newer tokens win.
+
+- In a sandbox, `codex` and `pi` run `agent-auth-sync ensure` before they
+  start. If no watcher runs, it pulls both files and leaves one running in
+  the background, which pushes the sandbox's refreshes back.
+  `agent-auth-sync status` shows whether the files and fields agree. Without
+  a token, as with `--secret-name=''`, it does nothing.
+- On your computer, sign in once with `codex login` and pi's `/login`, then
+  keep the files in step from a shell that has the service account token:
+
+  ```sh
+  export OP_SERVICE_ACCOUNT_TOKEN=...   # with write access to the vault
+  uv run agentix auth install
+  ```
+
+  This saves the token in `~/.config/agent-auth-sync/op-token` (mode 600),
+  copies the script to `~/.local/bin`, and starts it as a launchd agent on
+  macOS or a systemd user service on Linux. It needs only `op` and `jq`, so
+  it runs without Nix too. Home Manager users can set
+  `agentix.authSync.service.enable = true` instead, then run
+  `agent-auth-sync save-token` once. `uv run agentix auth status`,
+  `auth sync`, and `auth uninstall` do the rest.
+
+The service account needs write access to the vault for these pushes. A new
+login on one machine (`codex login`, pi's `/login`) reaches the others.
+Signing out does not: a deleted file is pulled back, and a cleared field is
+pushed back by any machine that still has the file. To end a login
+everywhere, revoke it with the provider.
 
 ## The image
 
@@ -643,8 +681,9 @@ Root's Home Manager generation, activated at build time, with:
   and more, used by Neovim and by Claude Code's LSP tool;
 - Claude Code with its settings and plugins, and `~/.claude/CLAUDE.md`, a
   brief that tells Claude how the sandbox works;
-- the Codex CLI (`codex`) and the pi coding agent (`pi`), from nixpkgs, with
-  their API key from 1Password;
+- the Codex CLI (`codex`) and the pi coding agent (`pi`), from nixpkgs,
+  signed in from 1Password through `agent-auth-sync`, with the same brief as
+  `AGENTS.md`; Codex runs without approval prompts, as Claude does;
 - Git with `gh` and `gh-lf`, the 1Password CLI, direnv with nix-direnv,
   Neovim (Nixvim), Rex and herdr, Tailscale, and OpenSSH;
 - Nix itself, with `nixpkgs` in the registry pinned to the image's revision,
@@ -736,6 +775,7 @@ image.
 │   ├── ssh.py              SSH engines, sandbox shell, host keys
 │   ├── ssh_input.py        checks on SSH flags and keys, made before Modal
 │   ├── sync.py             sandbox sync: runs agentix-sync on both sides
+│   ├── auth.py             auth install/uninstall/status/sync: runs agent-auth-sync here
 │   ├── names.py            sandbox name rules and generated names
 │   ├── image.py            the image build, its checks, and NIX_BUILDER
 │   ├── flake.py            flake update and the Rex pin
@@ -744,9 +784,10 @@ image.
 │   ├── config.py           defaults for sandbox up from ~/.config/agentix/config.toml
 │   └── scripts/            tailscale-ssh.sh and openssh-ssh.sh, run in the sandbox
 ├── nix/                    the flake; see nix/README.md
-│   ├── flake.nix           inputs, profiles, exported modules, OCI and agentix-sync packages, checks
+│   ├── flake.nix           inputs, profiles, exported modules, OCI, agentix-sync, and agent-auth-sync packages, checks
 │   ├── sandbox.toml        paths and environment shared by the CLI and the image
 │   ├── home-manager/       profiles/, users/, modules/, home.nix, exports.nix
+│   ├── packages/           agentix-sync, and agent-auth-sync, which also runs without Nix
 │   └── oci/                the OCI image the Modal image is made from
 ├── docs/                   design notes, such as resume.md
 ├── tests/                  unit tests; Modal is faked, nothing reaches it
@@ -836,6 +877,13 @@ token and no secrets; neither workflow uses `pull_request_target`.
   from the default branch. While the repository's default branch is not
   `main` and lacks `.github/`, the weekly lock update and Dependabot do not
   run.
+- agent-auth-sync reads 1Password every 2 minutes. Two machines that
+  refresh the same login within that window still collide, and one of them
+  must sign in again; pi's short-lived tokens make this likelier with
+  several sandboxes. A sandbox that refreshes and ends before its watcher
+  pushes takes the only valid token with it. Its launchd and systemd paths
+  are tested with stand-ins only, not on a real Mac or systemd, and not
+  under bash 3.2.
 - The profiles carry the owner's Git identity and GitHub hosts
   (`nix/home-manager/users/`, `nix/home-manager/modules/git.nix`). Change
   them before building an image for someone else.

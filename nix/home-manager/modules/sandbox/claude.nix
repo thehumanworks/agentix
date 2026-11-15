@@ -21,8 +21,6 @@ in
     ];
 
     # Loaded into every session as ~/.claude/CLAUDE.md.
-    programs.claude-code.context = builtins.replaceStrings [ "@workdir@" ] [ workdir ] (
-      builtins.readFile ./claude-context.md
-    );
+    programs.claude-code.context = config.agentix.sandbox.brief;
   };
 }

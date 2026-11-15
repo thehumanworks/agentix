@@ -1,5 +1,7 @@
-# The Codex CLI from nixpkgs, as a `codex` wrapper that gets its API key from
-# 1Password each time it starts; see ./op-run.nix.
+# The Codex CLI from nixpkgs, behind a `codex` wrapper; see ./op-run.nix.
+# Codex signs in with the ChatGPT login in ~/.codex/auth.json, which
+# agent-auth-sync keeps in step with 1Password (./auth-sync.nix); the
+# wrapper starts its watcher. agentix.codex.secrets can add an API key.
 {
   config,
   lib,
@@ -10,6 +12,7 @@
 let
   cfg = config.agentix.codex;
   opRun = import ./op-run.nix { inherit config lib pkgs; };
+  authSync = config.agentix.authSync;
 
   # nixpkgs' build leaves the symbol tables in the binaries. Stripping them
   # takes about 155 MiB off; logs_client, a log viewer for Codex's
@@ -31,7 +34,10 @@ let
       pkgs.codex;
 in
 {
-  imports = [ ./1password.nix ];
+  imports = [
+    ./1password.nix
+    ./auth-sync.nix
+  ];
 
   options.agentix.codex = {
     enable = lib.mkEnableOption "the Codex CLI, with its settings and `codex` wrapper" // {
@@ -40,13 +46,13 @@ in
 
     secrets = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
-      default.CODEX_API_KEY = "op://agentix/openai/api/key";
+      default = { };
       example.CODEX_API_KEY = "op://Private/OpenAI/credential";
       description = ''
         Environment variables that `codex` gets from 1Password, as op://
-        references that `op run` resolves when it starts. `codex exec` reads
-        its API key from CODEX_API_KEY; an interactive `codex` uses the
-        login that `codex login` stores in ~/.codex.
+        references that `op run` resolves when it starts. None by default:
+        Codex uses the ChatGPT login in ~/.codex/auth.json. A CODEX_API_KEY
+        here makes `codex exec` bill that API key instead.
       '';
     };
   };
@@ -62,6 +68,9 @@ in
       settings = {
         # Nix installs and updates it.
         check_for_update_on_startup = false;
+        # The login stays in ~/.codex/auth.json, not a keyring, so
+        # agent-auth-sync can keep it in step on every machine.
+        cli_auth_credentials_store = "file";
       };
       # The version is kept so Home Manager picks the settings format for it.
       package =
@@ -75,6 +84,9 @@ in
             "--help"
             "-h"
           ];
+          beforeLaunch = lib.optionalString (authSync.enable && authSync.startWithAgents) ''
+            ${lib.getExe authSync.package} ensure || true
+          '';
         }).overrideAttrs
           { inherit (codex) version; };
     };

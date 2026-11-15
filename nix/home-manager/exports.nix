@@ -20,6 +20,7 @@ let
 in
 {
   "1password" = ./modules/1password.nix;
+  auth-sync = ./modules/auth-sync.nix;
   codex = ./modules/codex.nix;
   inherit
     claude-code
@@ -39,6 +40,8 @@ in
     claude-code
   ];
   sandbox-base-commands = ./modules/sandbox/base-commands.nix;
+  sandbox-codex = ./modules/sandbox/codex.nix;
+  sandbox-pi = ./modules/sandbox/pi.nix;
   sandbox-browser = ./modules/sandbox/browser.nix;
   sandbox-cc = ./modules/sandbox/cc.nix;
   sandbox-manifest = ./modules/sandbox/manifest.nix;
@@ -52,13 +55,16 @@ in
     ./modules/sandbox/browser.nix
     ./modules/sandbox/cc.nix
     ./modules/sandbox/claude.nix
+    ./modules/sandbox/codex.nix
     ./modules/sandbox/manifest.nix
     ./modules/sandbox/op-token.nix
     ./modules/sandbox/openssh.nix
+    ./modules/sandbox/pi.nix
     sandbox-rex
     ./modules/sandbox/tailscale.nix
     ./modules/sandbox/workdir.nix
     ./modules/1password.nix
+    ./modules/auth-sync.nix
     claude-code
     ./modules/codex.nix
     ./modules/git.nix

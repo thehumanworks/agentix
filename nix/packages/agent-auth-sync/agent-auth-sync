@@ -1,0 +1,826 @@
+#!/bin/sh
+# agent-auth-sync: keeps the sign-in files of coding agents, such as Codex's
+# ~/.codex/auth.json and pi's ~/.pi/agent/auth.json, in step with fields in
+# 1Password, on every machine that runs it.
+#
+# Codex and pi refresh their OAuth tokens on their own, and a refresh token
+# works once: after one machine refreshes, every other copy of the file is
+# dead. So each machine pushes its file to 1Password when it changes and
+# pulls the field when another machine changed it. A three-way comparison
+# against the content both sides last agreed on tells which side changed;
+# when both did, the newer tokens win.
+#
+# Needs only a POSIX shell (macOS's /bin/sh, bash 3.2, dash, busybox), `op`
+# (the 1Password CLI), and `jq`. See README.md next to this file, or run
+# `agent-auth-sync help`.
+
+# jq programs and the config lines are single-quoted on purpose.
+# shellcheck disable=SC2016
+
+set -u
+umask 077
+
+PROG=agent-auth-sync
+VERSION=1.0.0
+LABEL=dev.agentix.agent-auth-sync
+
+usage() {
+  cat <<EOF
+$PROG $VERSION: keep coding agents' auth files in step with 1Password.
+
+Usage: $PROG COMMAND
+
+  sync        Compare each file with its 1Password field once and copy the
+              newer one over the other
+  watch       Sync now, then whenever a file changes, and every
+              AGENT_AUTH_SYNC_REMOTE_INTERVAL seconds for remote changes;
+              needs a service account token
+  ensure      Unless a watcher runs, sync once and start one in the
+              background; does nothing without a service account token
+  status      Show whether each file and its field agree; prints no secrets
+  stop        Stop the watcher that runs here
+  save-token  Keep OP_SERVICE_ACCOUNT_TOKEN from this shell for the service
+  install     save-token, copy this script to ~/.local/bin, and start it as a
+              launchd agent (macOS) or a systemd user service (Linux)
+  uninstall   Stop and remove the service, the copy, the token, and the config
+  version     Print the version
+
+Settings come from the environment, then from the config file that install
+writes ($config_file):
+
+  AGENT_AUTH_SYNC_FILES     One "op://VAULT/ITEM/FIELD PATH" per line
+  AGENT_AUTH_SYNC_OP        The op command (default: op)
+  AGENT_AUTH_SYNC_JQ        The jq command (default: jq)
+  AGENT_AUTH_SYNC_INTERVAL  Seconds between checks of the files (default: 5)
+  AGENT_AUTH_SYNC_REMOTE_INTERVAL
+                            Seconds between reads of 1Password (default: 120)
+  AGENT_AUTH_SYNC_TOKEN_FILE
+                            The saved service account token, read when
+                            OP_SERVICE_ACCOUNT_TOKEN is not set
+  AGENT_AUTH_SYNC_STATE_DIR Where it keeps what both sides last agreed on
+  AGENT_AUTH_SYNC_CONFIG_DIR
+                            The directory of config and the token
+EOF
+}
+
+# --- settings ---------------------------------------------------------------
+
+config_dir=${AGENT_AUTH_SYNC_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/agent-auth-sync}
+config_file=$config_dir/config
+
+# Whether AGENT_AUTH_SYNC_FILES came from the environment; install records it.
+files_given=${AGENT_AUTH_SYNC_FILES:+1}
+
+# The config file sets only what the environment does not.
+if [ -r "$config_file" ]; then
+  # shellcheck source=/dev/null
+  . "$config_file"
+fi
+
+: "${AGENT_AUTH_SYNC_OP:=op}"
+: "${AGENT_AUTH_SYNC_JQ:=jq}"
+: "${AGENT_AUTH_SYNC_INTERVAL:=5}"
+: "${AGENT_AUTH_SYNC_REMOTE_INTERVAL:=120}"
+: "${AGENT_AUTH_SYNC_TOKEN_FILE:=$config_dir/op-token}"
+: "${AGENT_AUTH_SYNC_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/agent-auth-sync}"
+if [ -z "${AGENT_AUTH_SYNC_FILES:-}" ]; then
+  AGENT_AUTH_SYNC_FILES="op://agentix/codex/auth ${CODEX_HOME:-$HOME/.codex}/auth.json
+op://agentix/pi/auth ${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/auth.json"
+fi
+
+OP=$AGENT_AUTH_SYNC_OP
+JQ=$AGENT_AUTH_SYNC_JQ
+state=$AGENT_AUTH_SYNC_STATE_DIR
+
+# This script's own path, so that ensure can start it again in the background.
+case $0 in
+  */*) self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0") ;;
+  *) self=$(command -v "$0" 2>/dev/null || printf '%s' "$0") ;;
+esac
+
+# --- small helpers ----------------------------------------------------------
+
+# A line on stderr for something that happened.
+note() {
+  printf '%s %s: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$PROG" "$*" >&2
+}
+
+# A failure. The watcher reports each one once until a pass succeeds, not on
+# every pass.
+warn() {
+  if [ "${quiet_repeats:-}" = 1 ] && [ -n "$work" ]; then
+    if [ -f "$work/warned" ] && grep -qxF -- "$*" "$work/warned"; then
+      return 0
+    fi
+    printf '%s\n' "$*" >>"$work/warned"
+  fi
+  note "$@"
+}
+
+die() {
+  printf '%s: %s\n' "$PROG" "$*" >&2
+  exit 1
+}
+
+need() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 not found; $2"
+}
+
+# SHA-256 of stdin, in hex.
+sha() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | cut -d' ' -f1
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | cut -d' ' -f1
+  else
+    openssl dgst -sha256 | sed 's/^.* //'
+  fi
+}
+
+# A cheap fingerprint of a file's bytes, or - when it is missing.
+fingerprint() {
+  if [ -e "$1" ]; then
+    cksum <"$1" 2>/dev/null || printf '%s\n' -
+  else
+    printf '%s\n' -
+  fi
+}
+
+# Quote a value for the shell, in single quotes.
+squote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Escape a value for XML text.
+xml() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
+
+load_token() {
+  if [ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] && [ -r "$AGENT_AUTH_SYNC_TOKEN_FILE" ]; then
+    OP_SERVICE_ACCOUNT_TOKEN=$(cat "$AGENT_AUTH_SYNC_TOKEN_FILE")
+    export OP_SERVICE_ACCOUNT_TOKEN
+  fi
+}
+
+# The scratch directory: root-only, removed on exit.
+work=
+setup() {
+  need "$JQ" "install jq, or set AGENT_AUTH_SYNC_JQ"
+  need "$OP" "install the 1Password CLI, or set AGENT_AUTH_SYNC_OP"
+  mkdir -p "$state" || die "cannot create $state"
+  if [ -z "$work" ]; then
+    work=$(mktemp -d "${TMPDIR:-/tmp}/$PROG.XXXXXX") || die "cannot create a scratch directory"
+    trap 'rm -rf "$work"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+  fi
+}
+
+# op never gets this script's stdin: with a pipe there, `op item edit` would
+# read it as the item.
+run_op() {
+  "$OP" "$@" </dev/null
+}
+
+# The first line of op's last complaint, without its timestamp.
+op_error() {
+  sed -n '1s/^\[ERROR\] [0-9/]* [0-9:]* //p' "$work/err"
+}
+
+# What op says when an item or field does not exist.
+op_missing() {
+  grep -qE "isn't an item|could not find item|does not have a field|no item found" "$work/err"
+}
+
+# A key for the state files of one reference.
+key_of() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_'
+}
+
+expand_path() {
+  case $1 in
+    \~) printf '%s' "$HOME" ;;
+    \~/*) printf '%s/%s' "$HOME" "${1#??}" ;;
+    *) printf '%s' "$1" ;;
+  esac
+}
+
+# Sets vault, item, and field from op://VAULT/ITEM/FIELD.
+parse_ref() {
+  case $1 in
+    op://?*/?*/?*) ;;
+    *) return 1 ;;
+  esac
+  rest=${1#op://}
+  vault=${rest%%/*}
+  rest=${rest#*/}
+  item=${rest%%/*}
+  field=${rest#*/}
+  case $field in
+    */*) return 1 ;;
+  esac
+}
+
+# Runs FUNCTION REF PATH for each configured file; fails if any did.
+each_file() {
+  each_rc=0
+  while read -r each_ref each_path; do
+    case $each_ref in
+      '' | '#'*) continue ;;
+    esac
+    if [ -z "$each_path" ]; then
+      warn "$each_ref: no path after the reference; skipped"
+      each_rc=1
+      continue
+    fi
+    "$1" "$each_ref" "$(expand_path "$each_path")" || each_rc=1
+  done <<EOF
+$AGENT_AUTH_SYNC_FILES
+EOF
+  return "$each_rc"
+}
+
+# --- locks ------------------------------------------------------------------
+
+# Whether PID runs and is this program, not a later process with its number.
+# A zombie has ended: in a container whose init does not reap, an ended
+# watcher stays one.
+alive() {
+  [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+  # Where ps cannot look up one PID (busybox's lacks -p), kill -0 has to do.
+  info=$(ps -p "$1" -o stat= -o command= 2>/dev/null) || return 0
+  info=${info#"${info%%[! ]*}"}
+  case $info in
+    Z*) return 1 ;;
+    *"$PROG"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# A lock is a directory holding the owner's PID. try_lock takes it at once or
+# fails; a lock whose owner died is taken over.
+try_lock() {
+  if mkdir "$1" 2>/dev/null; then
+    printf '%s\n' "$$" >"$1/pid"
+    return 0
+  fi
+  owner=$(cat "$1/pid" 2>/dev/null) || owner=
+  if [ -n "$owner" ] && ! alive "$owner"; then
+    rm -rf "$1"
+    if mkdir "$1" 2>/dev/null; then
+      printf '%s\n' "$$" >"$1/pid"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+# Waits up to 30 seconds for the lock.
+lock() {
+  tries=0
+  until try_lock "$1"; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge 30 ]; then
+      # A lock without a PID after 30 seconds was left by a process that died
+      # between mkdir and writing it.
+      [ -s "$1/pid" ] || rm -rf "$1"
+      return 1
+    fi
+    sleep 1
+  done
+}
+
+unlock() {
+  rm -rf "$1"
+}
+
+watcher_pid() {
+  pid=$(cat "$state/watch.lock/pid" 2>/dev/null) || return 1
+  alive "$pid" || return 1
+  printf '%s\n' "$pid"
+}
+
+# --- the two sides ----------------------------------------------------------
+
+# Writes the canonical form of a JSON file (compact, keys sorted) to OUT.
+# Returns 0 when it holds credentials, 2 when it is missing or holds none
+# (pi writes {} before anyone signs in), and 1 when it is not JSON.
+canon() {
+  if [ ! -s "$1" ]; then
+    : >"$2"
+    return 2
+  fi
+  "$JQ" -cS 'if type == "object" and length > 0 then . else empty end' "$1" >"$2" 2>/dev/null || return 1
+  [ -s "$2" ] || return 2
+  return 0
+}
+
+# Reads REF into OUT. Returns 0, 2 when the item or field does not exist, and
+# 1 on any other failure.
+read_remote() {
+  if run_op read "$1" >"$2" 2>"$work/err"; then
+    return 0
+  fi
+  if op_missing; then
+    : >"$2"
+    return 2
+  fi
+  warn "$1: reading 1Password failed: $(op_error)"
+  return 1
+}
+
+# Puts the JSON in FILE into the field of vault/item/field (set by parse_ref)
+# as one line, creating the field or the item when missing. The value goes
+# through files, never the command line.
+push_remote() {
+  "$JQ" -cj . "$1" >"$work/value" || return 1
+  if run_op item get "$item" --vault "$vault" --format json >"$work/item.json" 2>"$work/err"; then
+    # The template is the whole item: op deletes a field it leaves out and
+    # writes an empty date as 0, the epoch, so empty dates are left out
+    # (an API Credential has two). Every other field goes back as it was.
+    "$JQ" --rawfile v "$work/value" --arg f "$field" '
+      .fields |= map(select(.type != "DATE" or ((.value // "") != ""))) |
+      if any(.fields[]?; .label == $f or .id == $f)
+      then .fields |= map(if .label == $f or .id == $f then .value = $v else . end)
+      else .fields += [{label: $f, type: "CONCEALED", value: $v}]
+      end' "$work/item.json" >"$work/edit.json" || return 1
+    rm -f "$work/item.json"
+    if ! run_op item edit "$item" --vault "$vault" --template "$work/edit.json" >/dev/null 2>"$work/err"; then
+      warn "op://$vault/$item/$field: writing 1Password failed: $(op_error)"
+      rm -f "$work/edit.json" "$work/value"
+      return 1
+    fi
+    rm -f "$work/edit.json" "$work/value"
+  elif op_missing; then
+    "$JQ" -n --rawfile v "$work/value" --arg t "$item" --arg f "$field" '{
+      title: $t,
+      category: "API_CREDENTIAL",
+      fields: [{label: $f, type: "CONCEALED", value: $v}]
+    }' >"$work/new.json" || return 1
+    if ! run_op item create --vault "$vault" --template "$work/new.json" >/dev/null 2>"$work/err"; then
+      warn "op://$vault/$item/$field: creating the item failed: $(op_error)"
+      rm -f "$work/new.json" "$work/value"
+      return 1
+    fi
+    rm -f "$work/new.json" "$work/value"
+  else
+    warn "op://$vault/$item/$field: reading the item failed: $(op_error)"
+    rm -f "$work/item.json" "$work/value"
+    return 1
+  fi
+}
+
+# Replaces PATH with the JSON in FILE, pretty-printed and readable only by
+# its owner, in one rename.
+write_local() {
+  dir=$(dirname "$2")
+  mkdir -p "$dir" || return 1
+  tmp=$dir/.$(basename "$2").$PROG.$$
+  if "$JQ" . "$1" >"$tmp" && chmod 600 "$tmp" && mv -f "$tmp" "$2"; then
+    return 0
+  fi
+  rm -f "$tmp"
+  return 1
+}
+
+# When both sides changed: the newer credentials of the two. Codex's file is
+# one login, newer by last_refresh. pi's holds one entry per provider, each
+# newer by its expires; an entry on one side only is kept.
+merge() {
+  "$JQ" -cS -n --slurpfile l "$1" --slurpfile r "$2" '
+    $l[0] as $l | $r[0] as $r |
+    if ($l | has("last_refresh")) or ($r | has("last_refresh")) then
+      if (($r.last_refresh // "") > ($l.last_refresh // "")) then $r else $l end
+    else
+      reduce (($l + $r) | keys_unsorted[]) as $k ({};
+        .[$k] =
+          if ($l | has($k)) and ($r | has($k)) then
+            if (($r[$k] | .expires? // 0) > ($l[$k] | .expires? // 0)) then $r[$k] else $l[$k] end
+          elif ($l | has($k)) then $l[$k]
+          else $r[$k]
+          end)
+    end'
+}
+
+set_base() {
+  printf '%s\n' "$2" >"$state/$1.base.tmp" && mv -f "$state/$1.base.tmp" "$state/$1.base"
+}
+
+# Brings one file and its field together.
+sync_one() {
+  ref=$1
+  path=$2
+  if ! parse_ref "$ref"; then
+    warn "$ref: not an op://VAULT/ITEM/FIELD reference; skipped"
+    return 1
+  fi
+  key=$(key_of "$ref")
+
+  # pi holds auth.json.lock (a directory) while it changes the file.
+  if [ -d "$path.lock" ]; then
+    return 0
+  fi
+
+  canon "$path" "$work/local"
+  local_rc=$?
+  if [ "$local_rc" = 1 ]; then
+    warn "$path: not JSON; left alone"
+    return 1
+  fi
+  read_remote "$ref" "$work/remote.raw"
+  case $? in
+    1) return 1 ;;
+  esac
+  canon "$work/remote.raw" "$work/remote"
+  remote_rc=$?
+  rm -f "$work/remote.raw"
+  if [ "$remote_rc" = 1 ]; then
+    warn "$ref: not JSON in 1Password; left alone"
+    return 1
+  fi
+
+  L=-
+  R=-
+  [ "$local_rc" = 0 ] && L=$(sha <"$work/local")
+  [ "$remote_rc" = 0 ] && R=$(sha <"$work/remote")
+  B=$(cat "$state/$key.base" 2>/dev/null) || B=-
+
+  if [ "$L" = "$R" ]; then
+    [ "$L" = - ] || set_base "$key" "$L"
+    rm -f "$work/local" "$work/remote"
+    return 0
+  fi
+
+  if [ "$L" = - ] || { [ "$R" != - ] && [ "$L" = "$B" ]; }; then
+    action=pull
+  elif [ "$R" = - ] || [ "$R" = "$B" ]; then
+    action=push
+  else
+    action=merge
+  fi
+
+  rc=0
+  case $action in
+    pull)
+      if write_local "$work/remote" "$path"; then
+        set_base "$key" "$R"
+        note "$path: updated from $ref"
+      else
+        warn "$path: writing failed"
+        rc=1
+      fi
+      ;;
+    push)
+      if push_remote "$work/local"; then
+        set_base "$key" "$L"
+        note "$ref: updated from $path"
+      else
+        rc=1
+      fi
+      ;;
+    merge)
+      if merge "$work/local" "$work/remote" >"$work/merged"; then
+        M=$(sha <"$work/merged")
+        if [ "$M" != "$L" ] && ! write_local "$work/merged" "$path"; then
+          warn "$path: writing failed"
+          rc=1
+        fi
+        if [ "$rc" = 0 ] && [ "$M" != "$R" ] && ! push_remote "$work/merged"; then
+          rc=1
+        fi
+        if [ "$rc" = 0 ]; then
+          set_base "$key" "$M"
+          note "$path and $ref both changed; kept the newer tokens of each"
+        fi
+      else
+        warn "$path: merging with $ref failed"
+        rc=1
+      fi
+      ;;
+  esac
+  rm -f "$work/local" "$work/remote" "$work/merged"
+  return "$rc"
+}
+
+# sync_one under the file's lock, then note the file's fingerprint.
+sync_locked() {
+  key=$(key_of "$1")
+  if ! lock "$state/$key.lock"; then
+    warn "$1: another sync holds the lock; skipped"
+    return 1
+  fi
+  sync_one "$1" "$2"
+  sync_rc=$?
+  fingerprint "$2" >"$state/$key.seen"
+  unlock "$state/$key.lock"
+  return "$sync_rc"
+}
+
+# sync_locked when the file changed since the last look.
+sync_if_changed() {
+  key=$(key_of "$1")
+  now_seen=$(fingerprint "$2")
+  last_seen=$(cat "$state/$key.seen" 2>/dev/null) || last_seen=
+  [ "$now_seen" = "$last_seen" ] && return 0
+  sync_locked "$1" "$2"
+}
+
+# --- commands ---------------------------------------------------------------
+
+cmd_sync() {
+  load_token
+  setup
+  each_file sync_locked
+}
+
+# The watcher runs unattended, so it uses a service account token only: an
+# op signed in as a person would ask for approval from the background.
+need_token() {
+  load_token
+  [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]
+}
+
+cmd_watch() {
+  need_token ||
+    die "no service account token: export OP_SERVICE_ACCOUNT_TOKEN, or run '$PROG save-token' from a shell that has it"
+  setup
+  quiet_repeats=1
+  # One watcher per state directory. A second one, such as a service started
+  # while `ensure` had started one, waits and takes over when that one ends.
+  waiting=
+  until try_lock "$state/watch.lock"; do
+    if [ -z "$waiting" ]; then
+      note "another watcher runs (PID $(cat "$state/watch.lock/pid" 2>/dev/null)); waiting for it to stop"
+      waiting=1
+    fi
+    sleep "$AGENT_AUTH_SYNC_INTERVAL"
+  done
+  trap 'rm -rf "$work"; [ "$(cat "$state/watch.lock/pid" 2>/dev/null)" = "$$" ] && rm -rf "$state/watch.lock"' EXIT
+  note "watching (PID $$)"
+  last_remote=0
+  while :; do
+    # Its state directory removed, a watcher has nothing to keep.
+    [ -d "$state" ] || exit 0
+    now=$(date +%s)
+    if [ $((now - last_remote)) -ge "$AGENT_AUTH_SYNC_REMOTE_INTERVAL" ]; then
+      # After a clean pass, a failure that comes back is reported again.
+      each_file sync_locked && rm -f "$work/warned"
+      last_remote=$now
+    else
+      each_file sync_if_changed
+    fi
+    sleep "$AGENT_AUTH_SYNC_INTERVAL"
+  done
+}
+
+cmd_ensure() {
+  # Without a token there is nothing to do: agents start as if it were not here.
+  need_token || return 0
+  mkdir -p "$state" || die "cannot create $state"
+  watcher_pid >/dev/null && return 0
+  cmd_sync
+  ensure_rc=$?
+  log_file=$state/watch.log
+  # Keep the log small: it holds only changes and failures.
+  if [ -f "$log_file" ] && [ "$(wc -c <"$log_file")" -gt 1048576 ]; then
+    mv -f "$log_file" "$log_file.1"
+  fi
+  # A session of its own, and no terminal or pipe: the watcher outlives the
+  # command that started it, which does not wait for its output.
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$self" watch </dev/null >>"$log_file" 2>&1 &
+  else
+    nohup "$self" watch </dev/null >>"$log_file" 2>&1 &
+  fi
+  return "$ensure_rc"
+}
+
+cmd_status() {
+  load_token
+  setup
+  if pid=$(watcher_pid); then
+    printf 'watcher: running (PID %s)\n' "$pid"
+  else
+    printf 'watcher: not running\n'
+  fi
+  each_file status_one
+}
+
+status_one() {
+  printf '%s\n  file: %s\n' "$1" "$2"
+  if ! parse_ref "$1"; then
+    printf '  state: not an op://VAULT/ITEM/FIELD reference\n'
+    return 1
+  fi
+  canon "$2" "$work/local"
+  lrc=$?
+  read_remote "$1" "$work/remote.raw"
+  rrc=$?
+  if [ "$rrc" = 1 ]; then
+    printf '  state: 1Password unreadable\n'
+    return 1
+  fi
+  canon "$work/remote.raw" "$work/remote"
+  rrc=$?
+  L=-
+  R=-
+  [ "$lrc" = 0 ] && L=$(sha <"$work/local")
+  [ "$rrc" = 0 ] && R=$(sha <"$work/remote")
+  B=$(cat "$state/$(key_of "$1").base" 2>/dev/null) || B=-
+  if [ "$lrc" = 1 ]; then
+    s="the file is not JSON"
+  elif [ "$rrc" = 1 ]; then
+    s="the field is not JSON"
+  elif [ "$L" = "$R" ]; then
+    s=$([ "$L" = - ] && echo "empty on both sides" || echo "in step")
+  elif [ "$L" = - ]; then
+    s="only in 1Password; sync pulls it"
+  elif [ "$R" = - ]; then
+    s="only in the file; sync pushes it"
+  elif [ "$L" = "$B" ]; then
+    s="1Password is newer; sync pulls it"
+  elif [ "$R" = "$B" ]; then
+    s="the file is newer; sync pushes it"
+  else
+    s="both changed; sync keeps the newer tokens"
+  fi
+  printf '  state: %s\n' "$s"
+  rm -f "$work/local" "$work/remote" "$work/remote.raw"
+}
+
+cmd_stop() {
+  if pid=$(watcher_pid); then
+    kill "$pid" && printf 'stopped the watcher (PID %s)\n' "$pid"
+  else
+    printf 'no watcher runs\n'
+  fi
+}
+
+cmd_save_token() {
+  [ -n "${OP_SERVICE_ACCOUNT_TOKEN:-}" ] ||
+    die "OP_SERVICE_ACCOUNT_TOKEN is not set in this shell. Export the 1Password service account token, then run this again."
+  need "$OP" "install the 1Password CLI, or set AGENT_AUTH_SYNC_OP"
+  "$OP" whoami </dev/null >/dev/null 2>&1 ||
+    die "op does not accept OP_SERVICE_ACCOUNT_TOKEN; check the token"
+  mkdir -p "$(dirname "$AGENT_AUTH_SYNC_TOKEN_FILE")" || die "cannot create the token's directory"
+  if ! { printf '%s' "$OP_SERVICE_ACCOUNT_TOKEN" >"$AGENT_AUTH_SYNC_TOKEN_FILE.tmp" &&
+    chmod 600 "$AGENT_AUTH_SYNC_TOKEN_FILE.tmp" &&
+    mv -f "$AGENT_AUTH_SYNC_TOKEN_FILE.tmp" "$AGENT_AUTH_SYNC_TOKEN_FILE"; }; then
+    rm -f "$AGENT_AUTH_SYNC_TOKEN_FILE.tmp"
+    die "cannot write $AGENT_AUTH_SYNC_TOKEN_FILE"
+  fi
+  printf 'saved the token in %s\n' "$AGENT_AUTH_SYNC_TOKEN_FILE"
+}
+
+bin_dir=${AGENT_AUTH_SYNC_BIN_DIR:-$HOME/.local/bin}
+program=$bin_dir/$PROG
+plist=$HOME/Library/LaunchAgents/$LABEL.plist
+unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+unit=$unit_dir/$PROG.service
+
+cmd_install() {
+  op_path=$(command -v "$OP" 2>/dev/null) || die "op not found; install the 1Password CLI, or set AGENT_AUTH_SYNC_OP"
+  jq_path=$(command -v "$JQ" 2>/dev/null) || die "jq not found; install jq, or set AGENT_AUTH_SYNC_JQ"
+  cmd_save_token
+
+  # A copy of its own, with a shebang that every system has, so the service
+  # does not depend on a checkout or a store path that may go away.
+  mkdir -p "$bin_dir" || die "cannot create $bin_dir"
+  if [ "$self" != "$program" ]; then
+    if ! { sed '1s|^#!.*|#!/bin/sh|' "$self" >"$program.tmp" &&
+      chmod 755 "$program.tmp" &&
+      mv -f "$program.tmp" "$program"; }; then
+      rm -f "$program.tmp"
+      die "cannot write $program"
+    fi
+  fi
+
+  mkdir -p "$config_dir" || die "cannot create $config_dir"
+  {
+    printf '# Written by %s install. The environment wins over these.\n' "$PROG"
+    printf '[ -n "${AGENT_AUTH_SYNC_OP:-}" ] || AGENT_AUTH_SYNC_OP=%s\n' "$(squote "$op_path")"
+    printf '[ -n "${AGENT_AUTH_SYNC_JQ:-}" ] || AGENT_AUTH_SYNC_JQ=%s\n' "$(squote "$jq_path")"
+    printf '[ -n "${AGENT_AUTH_SYNC_TOKEN_FILE:-}" ] || AGENT_AUTH_SYNC_TOKEN_FILE=%s\n' "$(squote "$AGENT_AUTH_SYNC_TOKEN_FILE")"
+    printf '[ -n "${AGENT_AUTH_SYNC_STATE_DIR:-}" ] || AGENT_AUTH_SYNC_STATE_DIR=%s\n' "$(squote "$AGENT_AUTH_SYNC_STATE_DIR")"
+    if [ -n "$files_given" ]; then
+      printf '[ -n "${AGENT_AUTH_SYNC_FILES:-}" ] || AGENT_AUTH_SYNC_FILES=%s\n' "$(squote "$AGENT_AUTH_SYNC_FILES")"
+    fi
+  } >"$config_file" || die "cannot write $config_file"
+
+  # A watcher that ensure started gives way to the service.
+  cmd_stop >/dev/null
+
+  case $(uname -s) in
+    Darwin) install_launchd ;;
+    Linux)
+      if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        install_systemd
+      else
+        die "no systemd user session here; run '$program ensure' from your shell profile instead"
+      fi
+      ;;
+    *) die "no service manager known for $(uname -s); run '$program watch' yourself" ;;
+  esac
+}
+
+install_launchd() {
+  logs=$HOME/Library/Logs/$PROG.log
+  mkdir -p "$(dirname "$plist")" "$(dirname "$logs")"
+  cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$(xml "$program")</string>
+    <string>watch</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AGENT_AUTH_SYNC_CONFIG_DIR</key>
+    <string>$(xml "$config_dir")</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>$(xml "$logs")</string>
+  <key>StandardErrorPath</key>
+  <string>$(xml "$logs")</string>
+</dict>
+</plist>
+EOF
+  domain=gui/$(id -u)
+  launchctl bootout "$domain/$LABEL" >/dev/null 2>&1 || :
+  launchctl bootstrap "$domain" "$plist" || die "launchctl bootstrap failed"
+  printf 'started the launchd agent %s; log: %s\n' "$LABEL" "$logs"
+}
+
+install_systemd() {
+  mkdir -p "$unit_dir"
+  cat >"$unit" <<EOF
+[Unit]
+Description=Keep coding agents' auth files in step with 1Password
+
+[Service]
+Environment="AGENT_AUTH_SYNC_CONFIG_DIR=$config_dir"
+ExecStart="$program" watch
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target
+EOF
+  if ! { systemctl --user daemon-reload &&
+    systemctl --user enable "$PROG.service" >/dev/null 2>&1 &&
+    systemctl --user restart "$PROG.service"; }; then
+    die "systemctl could not start $PROG.service"
+  fi
+  printf 'started the systemd user service %s; log: journalctl --user -u %s\n' "$PROG.service" "$PROG"
+  printf 'to keep it running while you are logged out: loginctl enable-linger %s\n' "$(id -un)"
+}
+
+cmd_uninstall() {
+  case $(uname -s) in
+    Darwin)
+      launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || :
+      rm -f "$plist"
+      ;;
+    Linux)
+      if [ -f "$unit" ]; then
+        systemctl --user disable --now "$PROG.service" >/dev/null 2>&1 || :
+        rm -f "$unit"
+        systemctl --user daemon-reload >/dev/null 2>&1 || :
+      fi
+      ;;
+  esac
+  cmd_stop >/dev/null
+  rm -f "$program" "$config_file" "$AGENT_AUTH_SYNC_TOKEN_FILE"
+  printf 'removed the service, %s, %s, and the saved token\n' "$program" "$config_file"
+}
+
+case ${1:-help} in
+  sync) cmd_sync ;;
+  watch) cmd_watch ;;
+  ensure) cmd_ensure ;;
+  status) cmd_status ;;
+  stop) cmd_stop ;;
+  save-token) cmd_save_token ;;
+  install) cmd_install ;;
+  uninstall) cmd_uninstall ;;
+  version | --version | -V) printf '%s %s\n' "$PROG" "$VERSION" ;;
+  help | --help | -h) usage ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
