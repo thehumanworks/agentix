@@ -618,18 +618,31 @@ changed it. When both changed, the newer tokens win.
   starts anyway (`AGENT_AUTH_SYNC_ENSURE_WAIT` changes the wait).
   `agent-auth-sync status` shows whether the files and fields agree. Without
   a token, as with `--secret-name=''`, it does nothing.
-- On your computer, sign in once with `codex login` and pi's `/login`, then
-  keep the files in step from a shell that has the service account token:
+- On your Mac (or a Linux computer), run one command from the root of a
+  clone of this repository:
 
   ```sh
-  export OP_SERVICE_ACCOUNT_TOKEN=...   # with write access to the vault
+  export OP_SERVICE_ACCOUNT_TOKEN=...   # the service account token
   uv run agentix auth install
   ```
 
+  What it needs first:
+
+  - A clone of this repository and [uv](https://docs.astral.sh/uv/); run it
+    from the clone with `uv run`, as every agentix command. agentix does not
+    need to be installed, and no Modal account or Nix is needed for this.
+  - `OP_SERVICE_ACCOUNT_TOKEN` exported in that same shell, for a service
+    account with read and write access to the `agentix` vault. `install`
+    checks it with `op whoami` and stops if `op` refuses it.
+  - `op` (the 1Password CLI) and `jq` on PATH. macOS 15 and later include
+    `jq`; otherwise `brew install jq` (and `brew install 1password-cli`).
+  - Optionally, `codex login` and pi's `/login` first. If the files are
+    missing here, it pulls them from 1Password instead.
+
   This saves the token in `~/.config/agent-auth-sync/op-token` (mode 600),
   copies the script to `~/.local/bin`, and starts it as a launchd agent on
-  macOS or a systemd user service on Linux. It needs only `op` and `jq`, so
-  it runs without Nix too. Home Manager users can set
+  macOS or a systemd user service on Linux; afterwards the clone and the
+  shell's token are no longer needed. Home Manager users can set
   `agentix.authSync.service.enable = true` instead, then run
   `agent-auth-sync save-token` once. `uv run agentix auth status`,
   `auth sync`, and `auth uninstall` do the rest.
