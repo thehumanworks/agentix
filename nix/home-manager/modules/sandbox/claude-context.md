@@ -13,6 +13,8 @@ sandbox ends, so push or hand back anything that must survive.
   binary cache in seconds. Find names with `nix search nixpkgs TERM`.
 - There is no `sudo`; you are already root. Prefer Nix to `apt-get`: packages
   installed with apt are invisible to Nix-built tools and are not reproducible.
+- There is no C compiler. Build native code inside
+  `nix shell nixpkgs#gcc -c COMMAND`, or in a project's own Nix shell.
 - Python: use `uv` (`uv run`, `uv sync`, `uv tool run`); do not `pip install`
   into the system interpreter. JavaScript and TypeScript: `bun` and `node`.
 - Installed for checks: `ruff`, `ty`, `shellcheck`, `shfmt`, `nixfmt`, `statix`,

@@ -20,7 +20,7 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
 | `home-manager/users/` | One file per person: the Git name and emails |
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
-| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
+| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: the base commands, Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
 | `oci/` | The sandbox profile as an OCI image; see [OCI image](#oci-image) |
 
@@ -44,6 +44,7 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | `agentix.languageServers.enable` | `language-servers.nix` | The language servers, on PATH and in Claude's LSP tool |
 | `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
 | `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
+| `agentix.sandbox.baseCommands.enable` | `sandbox/base-commands.nix` | `tar`, `gzip`, `xz`, `less`, `which`, `flock`, `locale`, `infocmp`, and the other commands a Debian base would provide |
 | `agentix.sandbox.claude.enable` | `sandbox/claude.nix` | Claude's sandbox brief and trusted directories |
 | `agentix.sandbox.manifest.enable` | `sandbox/manifest.nix` | The manifest of commands and shared paths |
 | `agentix.sandbox.opToken.enable` | `sandbox/op-token.nix` | An `op` that loads the token file a sandbox stores |
@@ -110,14 +111,16 @@ generation, `/opt/agentix/home-generation/home-path/share/agentix/manifest.json`
 }
 ```
 
-The image build fails if a listed command is not on PATH, or if the paths
+The image build fails if a listed command does not resolve to the Nix
+profile, ahead of any copy in the base image, or if the paths
 differ from the ones `sandbox.toml` gives the host.
 
 ## Use from another flake
 
 The flake exports `homeManagerModules.default`, which imports every module,
 and one module per concern: `"1password"`, `claude-code`, `git`,
-`language-servers`, `nixvim`, `tools`, `sandbox-claude`, `sandbox-op-token`,
+`language-servers`, `nixvim`, `tools`, `sandbox-base-commands`,
+`sandbox-claude`, `sandbox-op-token`,
 `sandbox-rex`, and `sandbox-tailscale`. Each brings the modules it depends on.
 The modules use this flake's pinned inputs, not those of the flake that imports
 them.
@@ -182,6 +185,12 @@ modules you have no such items for.
 
 - Tools for search, data, networking, archives, builds, Python, JavaScript,
   shell, and Nix, listed in `modules/tools.nix`.
+- The commands of a Debian system that agents and the scripts here use:
+  `tar`, `gzip`, `xz`, `bzip2`, `less`, `which`, `flock` and the rest of
+  util-linux, `locale`, `iconv`, `infocmp`, `tput`, `openssl`, `hostname`, and
+  `getent`, listed in `modules/sandbox/base-commands.nix`. They come from the
+  pinned nixpkgs and win over the base image's copies. There is no C compiler;
+  use `nix shell nixpkgs#gcc`.
 - Language servers for Python (ty and Ruff), TypeScript, Bash, Lua, HTML, CSS,
   JSON, YAML, and Nix, listed in `modules/language-servers.nix`. The editor and
   Claude's LSP tool run the same builds. Claude has the Python, TypeScript,
@@ -249,6 +258,17 @@ Modal commands do not load shell startup files. The image therefore sets
 `PATH`, `EDITOR`, `VISUAL`, `LANG`, and `NIX_PATH` itself, in
 `src/agentix/image.py`.
 
+The image starts from `buildpack-deps:bookworm-curl`, pinned by digest as
+`BASE_IMAGE` in `src/agentix/image.py`: Debian 12 with curl and CA
+certificates, which is what the Nix installer needs, so the build runs no apt.
+The installer is a release checked against its SHA-256. From the base, a
+sandbox still uses `/bin/sh`, root's login shell `/bin/bash`, `/usr/bin/env`,
+the system loader, the files in `/etc`, the CA certificates, `apt` and `dpkg`,
+`perl`, `gpg`, `ldd`, `su`, the `useradd` the build runs to create the `sshd`
+account, and the other Debian commands that nothing in the profile replaces.
+The image build checks that every command in the manifest resolves to the Nix
+profile.
+
 ## OCI image
 
 `packages.x86_64-linux.oci` and `packages.aarch64-linux.oci` build the same
@@ -311,8 +331,9 @@ The image holds:
   it calls; see `oci/activation-shim.sh`. A Home Manager update that needs
   more from Nix fails the build.
 - Root's Nix profile, laid out as in the Modal image: Nix, the Home Manager
-  packages, CA certificates, and the commands the Modal image gets from
-  Debian, such as `tar`, `less`, `flock`, and `locale`. The Nix database
+  packages, which include the base commands such as `tar`, `less`, `flock`,
+  and `locale`, CA certificates, and glibc's other commands, such as `ldd`,
+  which the Modal image gets from Debian. The Nix database
   registers every store path in the image, so `nix run`, `nix profile`,
   `home-manager switch`, and `nix store gc` work and keep the image intact.
 - This flake in `/root/.config/home-manager`, as on Modal.
@@ -328,8 +349,8 @@ root's profile.
 It differs from the Modal image in these ways:
 
 - Nix comes from the pinned nixpkgs, not the Determinate installer.
-- Debian's own tools are absent, including `apt`, `gcc`, `perl`, and
-  `useradd`. Run a compiler with `nix shell nixpkgs#gcc`.
+- Debian's own tools are absent, including `apt`, `perl`, `gpg`, and
+  `useradd`.
 - `~/.claude/CLAUDE.md` still describes a Modal sandbox.
 
 A minimal `.devcontainer/devcontainer.json` for the loaded image:
@@ -386,8 +407,10 @@ the same run when an input moved; otherwise rebuild afterwards. Commit the
 lock.
 
 Keep `home.stateVersion` unchanged unless deliberately migrating its
-compatibility settings. The Nix version itself is pinned by `NIX_INSTALLER` in
-`src/agentix/image.py`.
+compatibility settings. The base image and the Nix version are pinned by
+`BASE_IMAGE`, `NIX_INSTALLER_VERSION`, and `NIX_INSTALLER_SHA256` in
+`src/agentix/image.py`, whose comments say how to move them. Moving either
+rebuilds every layer of the image.
 
 See the [Home Manager manual](https://nix-community.github.io/home-manager/nix-flakes.html).
 

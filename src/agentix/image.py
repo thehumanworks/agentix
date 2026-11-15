@@ -14,8 +14,31 @@ GENERATION = "/opt/agentix/home-generation"
 # the Home Manager configuration provides and the paths it shares with the
 # host; see nix/sandbox.toml.
 MANIFEST_FILE = f"{GENERATION}/home-path/{MANIFEST}"
-# A pinned release, so a rebuild months later installs the same Nix.
-NIX_INSTALLER = "https://install.determinate.systems/nix/tag/v3.24.2"
+
+# What the build uses before Nix exists, pinned so that two builds from one
+# flake.lock start from the same files; everything after Nix follows the lock.
+#
+# The base image, by digest: Debian 12 (bookworm) of 2026-11-04 with the curl
+# and CA certificates that the Nix installer needs to download itself, so the
+# build runs no apt. To move it, look up the tag's current digest, for example
+# in a sandbox with `nix run nixpkgs#crane -- digest buildpack-deps:bookworm-curl`,
+# replace the digest here, and rebuild.
+BASE_IMAGE = (
+    "buildpack-deps:bookworm-curl"
+    "@sha256:58021c2a0204361b62a23d2e0244d144d74c29af2d678e2a1f7e6611885d6949"
+)
+# The Nix installer: a release, checked against its digest, so a rebuild
+# months later installs the same Nix. To move it, take a version and the
+# SHA-256 of its nix-installer-x86_64-linux from
+# https://github.com/DeterminateSystems/nix-installer/releases.
+NIX_INSTALLER_VERSION = "v3.24.2"
+NIX_INSTALLER_SHA256 = (
+    "22ed14ee1b24d100d388f1fc245e3062bd5982433d159cffa6dec34c0eb15dab"
+)
+NIX_INSTALLER_URL = (
+    "https://install.determinate.systems/nix/tag/"
+    f"{NIX_INSTALLER_VERSION}/nix-installer-x86_64-linux"
+)
 
 
 @functools.cache
@@ -34,14 +57,18 @@ def _ensure_lockfile(image: modal.Image):
 
 def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
     with modal.enable_output():
-        image = modal.Image.debian_slim("3.14", force_build=force_build)
+        # A sandbox runs no Python of the image's, so the base needs none.
+        image = modal.Image.from_registry(BASE_IMAGE, force_build=force_build)
         image = image.env({"DEBIAN_FRONTEND": "noninteractive", "HOME": "/root"})
-        image = image.apt_install("curl", "git", "coreutils", "gnupg")
-        # Modal containers have no systemd to manage the Nix daemon.
+        # Modal containers have no systemd to manage the Nix daemon. One layer,
+        # so the installer does not stay in the image.
         image = image.run_commands(
-            f"curl -fsSL {NIX_INSTALLER} | "
-            "sh -s -- install linux --no-confirm --init none "
-            '--extra-conf "sandbox = false"'
+            f"curl -fsSL --retry 3 -o /tmp/nix-installer {NIX_INSTALLER_URL} "
+            f"&& echo '{NIX_INSTALLER_SHA256}  /tmp/nix-installer' | sha256sum -c - "
+            "&& chmod +x /tmp/nix-installer "
+            "&& /tmp/nix-installer install linux --no-confirm --init none "
+            '--extra-conf "sandbox = false" '
+            "&& rm /tmp/nix-installer"
         )
         # Build steps and Sandbox.exec do not source the installer's shell profile.
         image = image.dockerfile_commands(
@@ -76,7 +103,13 @@ def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
             'ENV EDITOR="nvim" VISUAL="nvim" LANG="C.UTF-8"',
             'ENV NIX_PATH="nixpkgs=flake:nixpkgs"',
         )
-        image = image.run_commands(f"mkdir -p {WORKDIR}")
+        # The account sshd runs as, so `agentix sandbox ssh start
+        # --engine=openssh` needs no useradd in a sandbox.
+        image = image.run_commands(
+            f"mkdir -p {WORKDIR}",
+            "useradd --system --no-create-home --home-dir /run/sshd "
+            "--shell /bin/false sshd",
+        )
         image = image.workdir(WORKDIR)
         image = image.run_commands(*_checks())
         image = image.build(app=get_app())
@@ -94,9 +127,13 @@ def _checks() -> list[str]:
         f"jq -e --argjson paths {shlex.quote(json.dumps(PATHS))} "
         f"'.paths == $paths and (.commands | length > 0)' {MANIFEST_FILE} > /dev/null",
         f"test -s /root/.nix-profile/{MANIFEST}",
+        # Each listed command resolves to the Nix profile, not to a copy in
+        # the base image.
         f"commands=$(jq -er '.commands | join(\" \")' {MANIFEST_FILE}) && "
-        'for name in $commands; do command -v "$name" > /dev/null '
-        '|| { echo "missing: $name"; exit 1; }; done',
+        'for name in $commands; do test "$(command -v "$name")" = '
+        '"/root/.nix-profile/bin/$name" '
+        '|| { echo "not in the Nix profile: $name"; exit 1; }; done',
+        "id sshd > /dev/null",
         "home-manager --version",
         "nvim --headless '+lua assert(vim.lsp.config.ty)' +qa",
         "op --version && git --version && uv --version && bun --version",

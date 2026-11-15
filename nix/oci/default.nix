@@ -22,31 +22,15 @@ let
   # Where other distributions keep the dynamic loader.
   loaderDir = if pkgs.stdenv.hostPlatform.isx86_64 then "lib64" else "lib";
 
-  # Commands the Modal image gets from Debian and that agents, the Home
-  # Manager scripts, and `agentix sandbox ssh` expect. Most are in the closure
-  # already. A Home Manager package of the same name wins.
-  base = lib.lowPrio (
-    pkgs.buildEnv {
-      name = "oci-base";
-      paths = [
-        pkgs.bzip2
-        pkgs.getent
-        pkgs.glibc.bin # iconv, ldd, locale
-        pkgs.gnutar
-        pkgs.gzip
-        pkgs.hostname
-        pkgs.less
-        pkgs.ncurses # clear, infocmp, reset, tput
-        pkgs.openssl.bin
-        pkgs.util-linux # flock, mount, script, more
-        pkgs.which
-        pkgs.xz
-      ];
-    }
-  );
+  # The rest of glibc's commands, such as ldd and getconf, which the Modal
+  # image keeps from Debian. The other base commands, tar, less, flock, and
+  # locale among them, are in the Home Manager profile; see
+  # home-manager/modules/sandbox/base-commands.nix. A Home Manager package of
+  # the same name wins.
+  base = lib.lowPrio pkgs.glibc.bin;
 
   # Root's Nix profile, as `nix profile add` writes it in the Modal image:
-  # Nix, the Home Manager packages, CA certificates, and the base commands. A
+  # Nix, the Home Manager packages, CA certificates, and glibc's commands. A
   # later `home-manager switch` finds home-path in the manifest and replaces it.
   profilePackages = [
     pkgs.nix.out

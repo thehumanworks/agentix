@@ -9,12 +9,15 @@ uv run agentix image build
 uv run agentix sandbox up
 ```
 
-The build installs a pinned Nix release, activates the `modal` Home Manager
-profile, and removes the build inputs from the Nix store. If `nix/flake.lock`
-is missing, a temporary sandbox generates it and copies it back to this
-checkout. Keep that lockfile in version control. No local Nix install is
-needed. The completed image is published as `determinate-nix:latest`; starting
-a sandbox does not rebuild it.
+The build starts from a Debian 12 image pinned by digest, installs a pinned
+Nix release checked against its SHA-256, activates the `modal` Home Manager
+profile, and removes the build inputs from the Nix store. It installs nothing
+with apt, so two builds from one `nix/flake.lock` start from the same files.
+`BASE_IMAGE` and `NIX_INSTALLER_VERSION` in `src/agentix/image.py` hold the
+pins, with how to move them. If `nix/flake.lock` is missing, a temporary
+sandbox generates it and copies it back to this checkout. Keep that lockfile
+in version control. No local Nix install is needed. The completed image is
+published as `determinate-nix:latest`; starting a sandbox does not rebuild it.
 
 The image gives an agent search and data tools, Python with uv, Bun and Node,
 linters and formatters, language servers, and direnv. A tool that is not
