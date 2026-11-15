@@ -34,6 +34,8 @@ class Local:
         name: str = "",
         tailscale: bool = False,
         hostname: str = "",
+        exit_snapshot: bool = True,
+        ephemeral: bool = False,
     ) -> dict[str, Any]:
         options: Options = {
             "image_name": image_name,
@@ -42,9 +44,12 @@ class Local:
             "workdir": workdir,
             "memory": memory,
             "cpu": cpu,
+            "exit_snapshot": exit_snapshot,
         }
         return _run(
-            lambda session: lifecycle.up(session, options, name, tailscale, hostname)
+            lambda session: lifecycle.up(
+                session, options, name, tailscale, hostname, ephemeral
+            )
         )
 
     def list_sandboxes(self) -> list[dict[str, Any]]:

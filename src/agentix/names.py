@@ -38,6 +38,15 @@ def check_name(name: str) -> str:
     return name
 
 
+def check_ephemeral(name: str, ephemeral: bool) -> None:
+    """An ephemeral sandbox keeps no record, and a name is found by its record."""
+    if ephemeral and name:
+        raise InvalidRequest(
+            "--ephemeral keeps no record, so the sandbox cannot have a name. "
+            "Drop --name, and use the sandbox ID that up prints."
+        )
+
+
 def generate() -> str:
     """A readable name such as `brisk-otter`. The caller checks that it is free."""
     return f"{secrets.choice(_ADJECTIVES)}-{secrets.choice(_NOUNS)}"
