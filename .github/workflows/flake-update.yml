@@ -76,7 +76,7 @@ jobs:
             echo '- `nix flake check --all-systems --no-build`, which evaluates the x86_64, ARM, and Mac outputs.'
             echo '- `nix flake check` on x86_64-linux: formatting, statix, deadnix, the `modal` profile, and the OCI image check.'
             echo
-            echo 'The ARM and Mac profiles are evaluated, not built. The workflow opened this pull request with its own token, so CI does not start on it; close and reopen the pull request to run CI.'
+            echo 'The ARM and Mac profiles are evaluated, not built; CI builds ARM once the pull request is reopened. The workflow opened this pull request with its own token, so CI does not start on it; close and reopen the pull request to run CI.'
             echo
             echo '**Merging requires an image rebuild.** The lock is an input of the Modal image, and this workflow neither builds nor publishes it. After merging, follow `AGENTS.md`: run `uv run agentix image build`, verify the published image in a fresh sandbox, and remove that sandbox.'
           } > "$out/body.md"
