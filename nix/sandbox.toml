@@ -1,0 +1,26 @@
+# What the agentix command on the host and the sandbox image agree on, defined
+# only here. The Home Manager modules read this file as the read-only
+# agentix.sandbox.* options, and src/agentix/layout.py reads it for the command
+# line and the image build. Change a value here, then rebuild the image.
+
+# The manifest the Home Manager build adds to the profile, relative to the
+# profile: ~/.nix-profile, or home-path in a generation. It lists the commands
+# the configuration provides and the paths below; the image build checks both.
+manifest = "share/agentix/manifest.json"
+
+[paths]
+# The working directory of the image, where commands and SSH logins start.
+# Claude trusts it.
+workdir = "/workdir"
+
+# The start command of a sandbox writes these. /run is a tmpfs, so no snapshot
+# keeps them.
+#
+# The 1Password service account token, which only root can read. The image's
+# `op` loads it in sessions that do not have the token in their environment.
+opTokenFile = "/run/agentix/op-token"
+# The directory `sandbox up --workdir=PATH` names, if any. SSH logins start
+# there instead of in workdir.
+workdirFile = "/run/agentix/workdir"
+# Written last. `sandbox up` returns once it exists.
+readyFile = "/run/agentix/ready"

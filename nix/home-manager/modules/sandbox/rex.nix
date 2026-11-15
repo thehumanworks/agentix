@@ -13,6 +13,7 @@
 
 {
   imports = [
+    ../core.nix
     ./options.nix
     inputs.rex.homeManagerModules.default
   ];
@@ -28,6 +29,7 @@
     # Installs rex, writes its xterm-rex terminfo entry to ~/.terminfo, and adds
     # its ssh guard to ~/.ssh/config.
     programs.rex.enable = true;
+    agentix.commands = [ "rex" ];
 
     # Home Manager writes ~/.ssh/config only when this is on. The guard there
     # keeps ssh from a Rex terminal from sending TERM=xterm-rex to hosts that

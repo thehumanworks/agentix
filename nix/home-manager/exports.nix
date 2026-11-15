@@ -29,14 +29,18 @@ in
     ./modules/sandbox/claude.nix
     claude-code
   ];
+  sandbox-manifest = ./modules/sandbox/manifest.nix;
   sandbox-op-token = ./modules/sandbox/op-token.nix;
   sandbox-tailscale = ./modules/sandbox/tailscale.nix;
+  sandbox-workdir = ./modules/sandbox/workdir.nix;
 
   default.imports = [
     ./modules/sandbox/claude.nix
+    ./modules/sandbox/manifest.nix
     ./modules/sandbox/op-token.nix
     sandbox-rex
     ./modules/sandbox/tailscale.nix
+    ./modules/sandbox/workdir.nix
     ./modules/1password.nix
     claude-code
     ./modules/git.nix

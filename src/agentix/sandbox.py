@@ -10,18 +10,12 @@ import modal.experimental
 
 from .defaults import IMAGE_NAME, SANDBOX_MEMORY_MIB, SANDBOX_TIMEOUT, SECRET_NAME
 from .errors import InvalidRequest, OperationFailed
+from .layout import OP_TOKEN_FILE, READY_FILE, WORKDIR_FILE
 from .session import Session
 
-# Modal gives the token only to the processes it starts. SSH sessions do not
-# have it, so the image's `op` wrapper reads it from this root-only file.
-# Keep the path in step with nix/home-manager/modules/sandbox/op-token.nix.
-OP_TOKEN_FILE = "/run/agentix/op-token"
-# SSH logins read this to start in the override instead of /workdir.
-# Keep the path in step with scripts/workdir-profile.sh.
-WORKDIR_FILE = "/run/agentix/workdir"
+# The start command writes the token file, the --workdir override, and, last,
+# the ready file, which `create` waits for. The paths are in layout.py.
 
-# The last thing the start command writes. `create` waits for it.
-READY_FILE = "/run/agentix/ready"
 # A sandbox is normally ready in about a second.
 READY_TIMEOUT = 60
 

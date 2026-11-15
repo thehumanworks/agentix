@@ -6,6 +6,8 @@
 }:
 
 {
+  imports = [ ./core.nix ];
+
   options.agentix.languageServers.enable =
     lib.mkEnableOption "language servers on PATH and in Claude's LSP tool"
     // {
@@ -24,6 +26,17 @@
       yaml-language-server
       nixd
       nil
+    ];
+    agentix.commands = [
+      "ty"
+      "ruff"
+      "typescript-language-server"
+      "bash-language-server"
+      "lua-language-server"
+      "vscode-json-language-server"
+      "yaml-language-server"
+      "nixd"
+      "nil"
     ];
 
     # Gives Claude go-to-definition, references, and diagnostics after each edit.

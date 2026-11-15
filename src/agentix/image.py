@@ -1,26 +1,21 @@
 import functools
-from pathlib import Path
+import json
+import shlex
 
 import modal
 
 from .defaults import APP_NAME, IMAGE_NAME
-from .flake import NIX_DIR, lock_in_sandbox
+from .flake import lock_in_sandbox
+from .layout import MANIFEST, NIX_DIR, OP_TOKEN_FILE, PATHS, WORKDIR
 
 HOME_CONFIG = "/root/.config/home-manager"
 GENERATION = "/opt/agentix/home-generation"
+# The manifest of the generation the image activates. It lists the commands
+# the Home Manager configuration provides and the paths it shares with the
+# host; see nix/sandbox.toml.
+MANIFEST_FILE = f"{GENERATION}/home-path/{MANIFEST}"
 # A pinned release, so a rebuild months later installs the same Nix.
 NIX_INSTALLER = "https://install.determinate.systems/nix/tag/v3.24.2"
-# Default working directory of sandboxes. The Home Manager profile marks this
-# path as trusted for Claude; keep nix/home-manager/modules/sandbox/claude.nix
-# in step.
-WORKDIR = "/workdir"
-# Commands the image must provide. The build fails if one is missing.
-REQUIRED_COMMANDS = (
-    "claude gh gh-lf op ts herdr rex nvim home-manager direnv "
-    "git rg fd fzf jq yq ast-grep sqlite3 curl rsync dig zip unzip zstd make just "
-    "python3 uv bun node ruff ty shellcheck shfmt nixfmt statix deadnix "
-    "typescript-language-server bash-language-server nixd ps strace"
-)
 
 
 @functools.cache
@@ -83,52 +78,56 @@ def build_image(force_build: bool = False, image_name: str = IMAGE_NAME):
         )
         image = image.run_commands(f"mkdir -p {WORKDIR}")
         image = image.workdir(WORKDIR)
-        # SSH sessions start in $HOME; this moves them to the working directory.
-        # Login shells read it from /etc/profile.d, and .bashrc reads it for
-        # `ssh HOST COMMAND`.
-        image = image.add_local_file(
-            Path(__file__).with_name("scripts") / "workdir-profile.sh",
-            "/etc/profile.d/agentix-workdir.sh",
-            copy=True,
-        )
-        image = image.run_commands(
-            f'test "$PWD" = {WORKDIR}',
-            f"for name in {REQUIRED_COMMANDS}; do "
-            'command -v "$name" > /dev/null || { echo "missing: $name"; exit 1; }; '
-            "done",
-            "home-manager --version",
-            "nvim --headless '+lua assert(vim.lsp.config.ty)' +qa",
-            "op --version && git --version && uv --version && bun --version",
-            # The evaluation setting must not leak into sandboxes.
-            'test -z "${NIX_CONFIG:-}"',
-            'test "$(locale charmap)" = UTF-8',
-            # A login shell started inside an SSH command keeps the Nix profile.
-            # A plain SSH command gets the session variables from .bashrc and
-            # starts in the working directory.
-            "env __ETC_PROFILE_NIX_SOURCED=1 bash -lc 'command -v claude' > /dev/null",
-            "env -u LANG bash -c '. /root/.bashrc; test \"$LANG\" = C.UTF-8'",
-            "env SSH_CONNECTION=check bash -c "
-            f"'cd /root && . /root/.bashrc; test \"$PWD\" = {WORKDIR}'",
-            "test -s /root/.claude/CLAUDE.md",
-            "test -s /root/.claude/skills/claude-code-home-manager/.lsp.json",
-            "jq -e '.permissions.deny | index(\"Read(//run/agentix/op-token)\")' "
-            "/root/.claude/settings.json > /dev/null",
-            # The pinned plugin marketplace must survive the store collection.
-            'test -s "$(jq -r \'.extraKnownMarketplaces["claude-mods"].source.path\' '
-            '/root/.claude/settings.json)/.claude-plugin/marketplace.json"',
-            "jq -e '.[\"claude-mods\"].lastUpdated' "
-            "/root/.claude/plugins/known_marketplaces.json > /dev/null",
-            "nix registry list | grep -q '^user  *flake:nixpkgs '",
-            # The patched rex binary starts, its terminfo entry resolves, and
-            # the ssh guard is in ~/.ssh/config. None of these starts a server.
-            "rex version > /dev/null",
-            "infocmp xterm-rex > /dev/null",
-            "env TERM=xterm-rex ssh -G example.invalid "
-            "| grep -qx 'setenv TERM=xterm-256color'",
-            # Each sandbox's rex server makes its own state, including its host
-            # ID; none may be baked into the image.
-            "test ! -e /root/.local/state/rex",
-        )
+        image = image.run_commands(*_checks())
         image = image.build(app=get_app())
         image.publish(name=image_name)
         return image
+
+
+def _checks() -> list[str]:
+    """Commands that fail the build when the image is not as expected."""
+    deny_token_read = f"Read(/{OP_TOKEN_FILE})"
+    return [
+        f'test "$PWD" = {WORKDIR}',
+        # The configuration read the same nix/sandbox.toml as this command, and
+        # lists the commands it provides.
+        f"jq -e --argjson paths {shlex.quote(json.dumps(PATHS))} "
+        f"'.paths == $paths and (.commands | length > 0)' {MANIFEST_FILE} > /dev/null",
+        f"test -s /root/.nix-profile/{MANIFEST}",
+        f"commands=$(jq -er '.commands | join(\" \")' {MANIFEST_FILE}) && "
+        'for name in $commands; do command -v "$name" > /dev/null '
+        '|| { echo "missing: $name"; exit 1; }; done',
+        "home-manager --version",
+        "nvim --headless '+lua assert(vim.lsp.config.ty)' +qa",
+        "op --version && git --version && uv --version && bun --version",
+        # The evaluation setting must not leak into sandboxes.
+        'test -z "${NIX_CONFIG:-}"',
+        'test "$(locale charmap)" = UTF-8',
+        # A login shell started inside an SSH command keeps the Nix profile.
+        # A plain SSH command gets the session variables from .bashrc. Both,
+        # and a login, start in the working directory.
+        "env __ETC_PROFILE_NIX_SOURCED=1 bash -lc 'command -v claude' > /dev/null",
+        "env -u LANG bash -c '. /root/.bashrc; test \"$LANG\" = C.UTF-8'",
+        "env SSH_CONNECTION=check bash -c "
+        f"'cd /root && . /root/.bashrc; test \"$PWD\" = {WORKDIR}'",
+        f"cd /root && env SSH_CONNECTION=check bash -lc 'test \"$PWD\" = {WORKDIR}'",
+        "test -s /root/.claude/CLAUDE.md",
+        "test -s /root/.claude/skills/claude-code-home-manager/.lsp.json",
+        f"jq -e --arg rule {shlex.quote(deny_token_read)} "
+        "'.permissions.deny | index($rule)' /root/.claude/settings.json > /dev/null",
+        # The pinned plugin marketplace must survive the store collection.
+        'test -s "$(jq -r \'.extraKnownMarketplaces["claude-mods"].source.path\' '
+        '/root/.claude/settings.json)/.claude-plugin/marketplace.json"',
+        "jq -e '.[\"claude-mods\"].lastUpdated' "
+        "/root/.claude/plugins/known_marketplaces.json > /dev/null",
+        "nix registry list | grep -q '^user  *flake:nixpkgs '",
+        # The patched rex binary starts, its terminfo entry resolves, and
+        # the ssh guard is in ~/.ssh/config. None of these starts a server.
+        "rex version > /dev/null",
+        "infocmp xterm-rex > /dev/null",
+        "env TERM=xterm-rex ssh -G example.invalid "
+        "| grep -qx 'setenv TERM=xterm-256color'",
+        # Each sandbox's rex server makes its own state, including its host
+        # ID; none may be baked into the image.
+        "test ! -e /root/.local/state/rex",
+    ]

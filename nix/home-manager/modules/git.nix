@@ -84,5 +84,10 @@ in
     };
 
     home.packages = [ workGh ];
+    agentix.commands = [
+      "git"
+      "gh"
+      "gh-lf"
+    ];
   };
 }

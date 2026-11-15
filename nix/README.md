@@ -14,12 +14,13 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 | Path | Contents |
 | --- | --- |
 | `flake.nix` | Pinned inputs, the profile table, the exported modules, the formatter, and the checks |
+| `sandbox.toml` | The paths that the agentix command on the host and the image share, and where the manifest goes |
 | `home-manager/exports.nix` | The modules the flake exports as `homeManagerModules`, and `default`, which imports them all |
 | `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
 | `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
 | `home-manager/users/` | One file per person: the Git name and emails |
 | `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
-| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: Tailscale, Rex, the 1Password token file, Claude's sandbox brief |
+| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: Tailscale, Rex, the 1Password token file, Claude's sandbox brief, the SSH working directory, the manifest |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
 
 Each home in `flake.nix` combines every module, a profile, and a user file.
@@ -43,9 +44,11 @@ follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
 | `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
 | `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
 | `agentix.sandbox.claude.enable` | `sandbox/claude.nix` | Claude's sandbox brief and trusted directories |
+| `agentix.sandbox.manifest.enable` | `sandbox/manifest.nix` | The manifest of commands and shared paths |
 | `agentix.sandbox.opToken.enable` | `sandbox/op-token.nix` | An `op` that loads the token file a sandbox stores |
 | `agentix.sandbox.rex.enable` | `sandbox/rex.nix` | Rex, its terminfo entry, and its ssh guard |
 | `agentix.sandbox.tailscale.enable` | `sandbox/tailscale.nix` | Tailscale and the `ts` wrapper |
+| `agentix.sandbox.workdir.enable` | `sandbox/workdir.nix` | The start of SSH sessions in the working directory |
 
 Settings that a person or another module provides:
 
@@ -56,6 +59,11 @@ Settings that a person or another module provides:
   `lib.mkForce` replaces it.
 - `agentix.unfreePackages`: the unfree packages the modules install. A module
   that adds one lists its name here, and `home.nix` allows exactly these.
+- `agentix.commands`: the commands the modules put on PATH. The manifest lists
+  them and the image build checks each. `tools.nix` takes the main command of
+  each of its packages, so a tool added there is checked too.
+- `agentix.sandbox.paths` and `agentix.sandbox.manifestFile`: read-only, from
+  `sandbox.toml`.
 - `agentix.op.package`, `agentix.op.tokenFile`, and
   `agentix.claude.trustedDirectories`, which the sandbox modules set.
 
@@ -70,9 +78,39 @@ To add a module here:
 3. If it uses a flake input, write it as `{ inputs }: { config, lib, ... }: ...`
    and list it with `withInputs` in `exports.nix`. Otherwise list the path.
    Add it to `default` there and give it a name of its own.
-4. List any unfree package it installs in `agentix.unfreePackages`.
+4. List any unfree package it installs in `agentix.unfreePackages`, and the
+   commands that agents rely on in `agentix.commands`.
 5. Stage the new file (flakes only see files known to Git) and run
    `nix flake check`.
+
+## Shared paths and the manifest
+
+`sandbox.toml` holds the paths that both sides of a sandbox use: the working
+directory, and the files the start command writes to `/run/agentix` (the
+1Password token, the `--workdir` override, and the ready file). The Home
+Manager modules read it as the read-only options `agentix.sandbox.paths`, and
+`src/agentix/layout.py` reads it for the command line and the image build.
+Change a path there, then rebuild the image.
+
+The Home Manager build writes a manifest into the profile, at
+`share/agentix/manifest.json`: in a sandbox,
+`/root/.nix-profile/share/agentix/manifest.json`, and in the image's
+generation, `/opt/agentix/home-generation/home-path/share/agentix/manifest.json`.
+
+```json
+{
+  "commands": ["ast-grep", "bash", "claude", "..."],
+  "paths": {
+    "opTokenFile": "/run/agentix/op-token",
+    "readyFile": "/run/agentix/ready",
+    "workdir": "/workdir",
+    "workdirFile": "/run/agentix/workdir"
+  }
+}
+```
+
+The image build fails if a listed command is not on PATH, or if the paths
+differ from the ones `sandbox.toml` gives the host.
 
 ## Use from another flake
 
@@ -167,6 +205,9 @@ modules you have no such items for.
   prevents accidental exposure and is not a security boundary.
 - Rex, the terminal multiplexer, with its terminfo entry and ssh guard. See
   [Rex in sandboxes](#rex-in-sandboxes).
+- `~/.nix-profile/share/agentix/manifest.json`, which lists the commands the
+  configuration provides and the paths it shares with the host. See
+  [Shared paths and the manifest](#shared-paths-and-the-manifest).
 
 ## Checks and formatting
 

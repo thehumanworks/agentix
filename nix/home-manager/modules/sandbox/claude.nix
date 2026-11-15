@@ -1,5 +1,8 @@
 { config, lib, ... }:
 
+let
+  inherit (config.agentix.sandbox.paths) workdir;
+in
 {
   imports = [ ./options.nix ];
 
@@ -11,14 +14,15 @@
     };
 
   config = lib.mkIf config.agentix.sandbox.claude.enable {
-    # Claude starts in these directories without asking. Keep /workdir in step
-    # with WORKDIR in src/agentix/image.py.
+    # Claude starts in these directories without asking.
     agentix.claude.trustedDirectories = [
-      "/root"
-      "/workdir"
+      config.home.homeDirectory
+      workdir
     ];
 
     # Loaded into every session as ~/.claude/CLAUDE.md.
-    programs.claude-code.context = ./claude-context.md;
+    programs.claude-code.context = builtins.replaceStrings [ "@workdir@" ] [ workdir ] (
+      builtins.readFile ./claude-context.md
+    );
   };
 }

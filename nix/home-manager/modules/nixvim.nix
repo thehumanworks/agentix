@@ -8,11 +8,16 @@
 
 {
   # Nixvim's own module, so its options exist even when this one is off.
-  imports = [ inputs.nixvim.homeModules.nixvim ];
+  imports = [
+    ./core.nix
+    inputs.nixvim.homeModules.nixvim
+  ];
 
   options.agentix.nixvim.enable = lib.mkEnableOption "Neovim, configured with Nixvim" // {
     default = true;
   };
+
+  config.agentix.commands = lib.mkIf config.agentix.nixvim.enable [ "nvim" ];
 
   config.programs.nixvim = lib.mkIf config.agentix.nixvim.enable {
     enable = true;

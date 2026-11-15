@@ -5,13 +5,12 @@ The host needs no Nix: the sandbox has it, and only `flake.nix` and
 """
 
 import json
-from pathlib import Path
 
 import modal
 
 from .errors import OperationFailed
+from .layout import NIX_DIR
 
-NIX_DIR = Path(__file__).resolve().parents[2] / "nix"
 # A directory of its own, so files already in the image are not picked up.
 _FLAKE_DIR = "/tmp/agentix-flake"
 

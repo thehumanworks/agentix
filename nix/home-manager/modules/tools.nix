@@ -9,6 +9,8 @@ let
   cfg = config.agentix.tools;
 in
 {
+  imports = [ ./core.nix ];
+
   options.agentix.tools = {
     enable = lib.mkEnableOption "the command line tools and direnv" // {
       default = true;
@@ -27,6 +29,17 @@ in
 
   config = lib.mkIf cfg.enable {
     home.packages = cfg.packages;
+
+    # The main command of each tool, so a tool added to or removed from the
+    # list is checked with it. bind (dig) and coreutils name none, and
+    # Python's is versioned.
+    agentix.commands =
+      lib.concatMap (pkg: lib.optional (pkg.meta ? mainProgram) pkg.meta.mainProgram) cfg.packages
+      ++ [
+        "dig"
+        "python3"
+        "direnv"
+      ];
 
     agentix.tools.packages = with pkgs; [
       # Consistent shell and text tools on Linux and macOS.

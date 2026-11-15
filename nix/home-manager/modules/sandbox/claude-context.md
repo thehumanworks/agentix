@@ -1,7 +1,7 @@
 # Sandbox environment
 
 You are root in a disposable Modal sandbox: a Debian VM with no systemd and no
-Nix daemon. Work in `/workdir` unless told otherwise. Files are lost when the
+Nix daemon. Work in `@workdir@` unless told otherwise. Files are lost when the
 sandbox ends, so push or hand back anything that must survive.
 
 ## Tools

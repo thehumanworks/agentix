@@ -3,6 +3,17 @@
 
 {
   options.agentix = {
+    commands = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "rg" ];
+      description = ''
+        Commands that the enabled modules put on PATH and that agents rely on.
+        A module lists the commands it installs. The sandbox manifest lists
+        them, and the image build fails if one is missing.
+      '';
+    };
+
     unfreePackages = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];

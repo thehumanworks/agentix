@@ -9,8 +9,13 @@
 {
   imports = [ ../home.nix ];
 
-  # The 1Password token file, Claude's sandbox brief, Rex, and Tailscale.
+  # The 1Password token file, Claude's sandbox brief, the SSH working
+  # directory, the manifest, Rex, and Tailscale.
   agentix.sandbox.enable = true;
+  agentix.commands = [
+    "ps"
+    "strace"
+  ];
 
   home = {
     username = "root";
@@ -23,7 +28,8 @@
       pkgs.strace
     ];
 
-    # Replace the Debian defaults for root instead of failing on them.
+    # Replace the Debian defaults for root instead of failing on them. The
+    # sandbox modules add the start in the working directory to both.
     file = {
       ".bashrc".force = true;
       ".profile".force = true;
@@ -37,15 +43,8 @@
 
     # `ssh HOST COMMAND` starts a shell that reads only .bashrc, so load the
     # session variables there too. The file guards against loading twice.
-    #
-    # Bash reads .bashrc without a terminal only for such a command. Start it
-    # in the working directory, as a login does. The image build installs the
-    # script; see src/agentix/image.py.
     bashrcExtra = ''
       . "${config.home.sessionVariablesPackage}/etc/profile.d/hm-session-vars.sh"
-      if [[ $- != *i* && -r /etc/profile.d/agentix-workdir.sh ]]; then
-        . /etc/profile.d/agentix-workdir.sh
-      fi
     '';
 
     # Debian's /etc/profile resets PATH, and the Nix profile script runs once

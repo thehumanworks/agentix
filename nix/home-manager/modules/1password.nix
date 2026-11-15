@@ -30,7 +30,7 @@ in
     tokenFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
-      example = "/run/agentix/op-token";
+      example = lib.literalExpression "config.agentix.sandbox.paths.opTokenFile";
       description = ''
         A file from which the profile's `op` loads its service account token.
         When the file is readable, `claude` starts without the token in its
@@ -42,6 +42,9 @@ in
   config = lib.mkMerge [
     # The wrappers call the CLI even when `op` itself is not on PATH.
     { agentix.unfreePackages = [ "1password-cli" ]; }
-    (lib.mkIf cfg.enable { home.packages = [ cfg.package ]; })
+    (lib.mkIf cfg.enable {
+      home.packages = [ cfg.package ];
+      agentix.commands = [ "op" ];
+    })
   ];
 }

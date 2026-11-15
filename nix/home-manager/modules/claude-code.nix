@@ -32,13 +32,14 @@ in
     trustedDirectories = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      example = [ "/workdir" ];
+      example = [ "/srv/project" ];
       description = "Directories where Claude starts without the workspace trust prompt.";
     };
   };
 
   config = lib.mkIf cfg.enable {
     agentix.unfreePackages = [ "claude-code" ];
+    agentix.commands = [ "claude" ];
 
     programs.claude-code = {
       enable = true;

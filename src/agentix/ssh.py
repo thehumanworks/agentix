@@ -10,6 +10,7 @@ from typing import Any
 import modal
 
 from .errors import InvalidRequest, OperationFailed, PublicKeyRequired
+from .layout import WORKDIR, WORKDIR_FILE
 from .session import Session
 from .ssh_input import NEED_PUBLIC_KEY, check_arguments, check_public_key
 
@@ -20,7 +21,8 @@ _KEY_REQUIRED = "An SSH public key is required."
 
 @functools.cache
 def _script(engine: str) -> str:
-    return (_SCRIPTS / f"{engine}-ssh.sh").read_text()
+    text = (_SCRIPTS / f"{engine}-ssh.sh").read_text()
+    return text.replace("@workdirFile@", WORKDIR_FILE).replace("@workdir@", WORKDIR)
 
 
 async def _run(

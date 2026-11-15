@@ -19,6 +19,11 @@
       defaultText = lib.literalExpression "config.agentix.sandbox.enable";
     };
 
+  config.agentix.commands = lib.mkIf config.agentix.sandbox.tailscale.enable [
+    "ts"
+    "tailscale"
+  ];
+
   config.home.packages = lib.mkIf config.agentix.sandbox.tailscale.enable [
     pkgs.tailscale
     pkgs.openssh

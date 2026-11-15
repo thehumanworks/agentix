@@ -22,8 +22,7 @@ in
     };
 
   config = lib.mkIf config.agentix.sandbox.opToken.enable {
-    # Keep the path in step with OP_TOKEN_FILE in src/agentix/sandbox.py.
-    agentix.op.tokenFile = "/run/agentix/op-token";
+    agentix.op.tokenFile = config.agentix.sandbox.paths.opTokenFile;
 
     # Modal gives the service account token only to the processes it starts, so
     # SSH sessions do not have it. `agentix sandbox up` stores it in a root-only

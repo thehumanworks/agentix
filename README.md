@@ -36,7 +36,9 @@ Tailscale SSH is the exception for `scp` and `sftp`, which start in `/root`.
 
 Claude already trusts `/workdir` and `/root`. Use `--workdir=PATH` to start a
 sandbox in another absolute path; Claude asks before trusting a directory
-outside those two.
+outside those two. The working directory and the files a sandbox writes in
+`/run/agentix` are set once, in `nix/sandbox.toml`, which this command and the
+image both read.
 
 `sandbox up` prints the new sandbox ID and a name, such as `brisk-otter`.
 Choose the name with `--name=NAME`: up to 63 lowercase letters, digits, and

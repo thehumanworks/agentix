@@ -38,8 +38,8 @@ case "$action" in
           --shell /bin/false sshd
       fi
       # SFTP, and scp through it, start in the working directory like other
-      # SSH sessions. Keep the paths in step with workdir-profile.sh.
-      workdir=$(cat /run/agentix/workdir 2>/dev/null || echo /workdir)
+      # SSH sessions. ssh.py fills in the paths from nix/sandbox.toml.
+      workdir=$(cat @workdirFile@ 2>/dev/null || echo @workdir@)
       [[ -d $workdir ]] || workdir=/root
       cat >"$config" <<EOF
 Port 22

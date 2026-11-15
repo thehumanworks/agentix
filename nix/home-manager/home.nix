@@ -7,6 +7,7 @@
   home.stateVersion = "26.05";
 
   programs.home-manager.enable = true;
+  agentix.commands = [ "home-manager" ];
 
   # Allow the unfree packages that the enabled modules list, and no others.
   nixpkgs.config.allowUnfreePredicate =
