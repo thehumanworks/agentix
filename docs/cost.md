@@ -91,14 +91,25 @@ asked for, and prices `max(cpu, 0.125) cores x seconds` and `memory GiB x
 seconds`. Each row's SOURCE says where its runtimes came from:
 
 - `modal`: start, finish (or now, while it runs), CPU and memory from Modal's
-  listing of ended sandboxes. That listing reached back about two days when it
-  was checked (on 2026-11-15, to 2026-11-13 18:22 UTC); sandboxes older than
-  that are found only through the records.
+  listing of ended sandboxes, never past the sandbox's own timeout. That
+  listing reached back about two days when it was checked (on 2026-11-15, to
+  2026-11-13 18:22 UTC); sandboxes older than that are found only through the
+  records. It is paged back to the start of the month, at most 100 pages, and
+  stops at a page with nothing new. If no ended sandbox in it has an end
+  time, it is not used.
+- `modal-upper`: listed as ended (it has a result) but with no end time, so
+  counted up to its timeout.
 - `record`: start from the agentix record of the name, end from the exit
-  snapshot it recorded for that sandbox, CPU and memory from the name's
-  options.
+  snapshot that agentix took when `sandbox down` ended it, or at its timeout;
+  CPU and memory from the name's options.
+- `record-upper`: the exit snapshot is dated when agentix first saw that the
+  sandbox had ended, which can be days late, so the end is capped at start +
+  timeout and is only an upper bound.
 - `record-timeout`: a recorded sandbox with no exit snapshot is counted up to
   its timeout. This is an upper bound.
+
+If the records cannot be read, the command carries on with Modal's listing
+and says so; if the listing fails, it carries on with the records.
 
 A sandbox is put under its `agentix-name` tag or its record's name. One with
 neither is `(image builds)` when it has the builder's 8 CPU and 16384 MiB
@@ -110,7 +121,10 @@ in a sandbox and are not estimated.
 The line "Not attributed to a row above" is what Modal billed the apps minus
 the sum of the estimates: image layer builds, egress, the runner app,
 sandboxes older than the listing that have no record, and the error of the
-estimate.
+estimate. When the estimates are larger than the bill, the output says so
+instead: the upper-bound sources count past the real ends. Billing rows are
+matched by app ID and by app name, so an app created again this month keeps
+the rows of its earlier ID.
 
 The estimate counts what a sandbox asked for. Modal bills, for each usage
 sample, the greater of the measured and the requested CPU and memory (the

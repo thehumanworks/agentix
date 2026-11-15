@@ -123,12 +123,12 @@ class SummarizeTest(ModalTestCase):
             "dev",
             ("sb-1", "2026-11-10T00:00:00+00:00"),
             snapshots=[
-                ("im-m", "sb-1", "manual", "2026-11-10T00:10:00+00:00"),
-                ("im-d", "sb-1", "down", "2026-11-10T00:30:00+00:00"),
+                ("im-m", "sb-1", "manual", "2026-11-10T00:01:00+00:00"),
+                ("im-d", "sb-1", "down", "2026-11-10T00:05:00+00:00"),
             ],
         )
         row = rows(summarize(records=[named]))["dev"]
-        self.assertEqual(row["seconds"], 1800)
+        self.assertEqual(row["seconds"], 300)
         self.assertEqual(row["source"], "estimate: record 1")
         self.assertEqual((row["snapshots"], row["snapshots_this_month"]), (2, 2))
 
@@ -191,6 +191,59 @@ class SummarizeTest(ModalTestCase):
         self.assertEqual((row["snapshots"], row["snapshots_this_month"]), (1, 0))
         self.assertEqual(row["source"], "no runtime this month")
 
+    def test_a_late_exit_snapshot_is_an_upper_bound_capped_at_the_timeout(self):
+        # Seen to have ended a week later; the timeout is 600 s.
+        named = record(
+            "dev",
+            ("sb-1", "2026-11-03T00:00:00+00:00"),
+            snapshots=[("im-e", "sb-1", "exit", "2026-11-10T00:00:00+00:00")],
+        )
+        row = rows(summarize(records=[named]))["dev"]
+        self.assertEqual(row["seconds"], OPTIONS["timeout"])
+        self.assertEqual(row["source"], "estimate: record-upper 1")
+        # Even an early exit snapshot is only a bound.
+        named["snapshots"][0]["created_at"] = "2026-11-03T00:01:00+00:00"
+        row = rows(summarize(records=[named]))["dev"]
+        self.assertEqual(row["seconds"], 60)
+        self.assertEqual(row["source"], "estimate: record-upper 1")
+
+    def test_a_down_snapshot_past_the_timeout_is_capped(self):
+        named = record(
+            "dev",
+            ("sb-1", "2026-11-03T00:00:00+00:00"),
+            snapshots=[("im-d", "sb-1", "down", "2026-11-03T05:00:00+00:00")],
+        )
+        row = rows(summarize(records=[named]))["dev"]
+        self.assertEqual(row["seconds"], OPTIONS["timeout"])
+        self.assertEqual(row["source"], "estimate: record-upper 1")
+
+    def test_estimates_above_billed_are_explained(self):
+        billed = [
+            {
+                "object_id": "ap-test",
+                "description": "agentix",
+                "interval_start": START,
+                "interval_end": START + dt.timedelta(days=1),
+                "cost_by_resource": {"CPU": Decimal("0.01")},
+            }
+        ]
+        named = record("dev", ("sb-1", "2026-11-10T00:00:00+00:00"))
+        summary = cost.summarize(
+            start=START,
+            now=NOW,
+            listed=[],
+            records=[named],
+            prices={**PRICES, "memory_gib_second": Decimal("0.001")},
+            sources=SOURCES,
+            billed=billed,
+            app_ids={"ap-test": "agentix"},
+        )
+        self.assertLess(Decimal(summary["billed"]["not_attributed"]), 0)
+        text = cost.render(summary)
+        self.assertIn("Estimates exceed what was billed by $", text)
+        self.assertIn("record-timeout", text)
+        self.assertNotIn("Not attributed", text)
+
     def test_billed_is_summed_by_app_and_compared(self):
         hour = dt.timedelta(hours=1)
         billed = [
@@ -248,12 +301,29 @@ class SummarizeTest(ModalTestCase):
         self.assertIn("Billed by Modal: unavailable (billing).", unavailable)
 
 
-def info(sandbox_id, name, started, finished, milli_cpu=125, memory_mb=8192):
+def info(
+    sandbox_id,
+    name,
+    started,
+    finished,
+    milli_cpu=125,
+    memory_mb=8192,
+    timeout=3600,
+    ended=None,
+    created=None,
+):
+    """A sandbox as Modal's listing gives it. It has a result once it ended."""
+    ended = bool(finished) if ended is None else ended
     return SimpleNamespace(
         id=sandbox_id,
-        created_at=started - 1,
+        created_at=created if created is not None else started - 1,
+        timeout_secs=timeout,
         tags=[SimpleNamespace(tag_name=NAME_TAG, tag_value=name)] if name else [],
-        task_info=SimpleNamespace(started_at=started, finished_at=finished),
+        task_info=SimpleNamespace(
+            started_at=started,
+            finished_at=finished,
+            result=SimpleNamespace() if ended else None,
+        ),
         resource_info=SimpleNamespace(
             milli_cpu=SimpleNamespace(value=milli_cpu),
             memory_mb=SimpleNamespace(value=memory_mb),
@@ -290,8 +360,9 @@ class CollectTest(ModalTestCase):
             side_effect=lambda name, **_: Mock(app_id=f"ap-{name}")
         )
 
-    async def _infos(self, app_id):
+    async def _infos(self, app_id, since):
         self.assertEqual(app_id, "ap-agentix")
+        self.assertEqual(since, START.timestamp())
         return list(self.infos)
 
     def collect(self):
@@ -307,7 +378,7 @@ class CollectTest(ModalTestCase):
             record(
                 "kept",
                 ("sb-k", "2026-11-14T00:00:00+00:00"),
-                snapshots=[("im-k", "sb-k", "down", "2026-11-14T01:00:00+00:00")],
+                snapshots=[("im-k", "sb-k", "down", "2026-11-14T00:05:00+00:00")],
             )
         )
         self.report_items = [
@@ -381,13 +452,56 @@ class CollectTest(ModalTestCase):
         summary = self.collect()
         self.assertIn("failed (RuntimeError)", summary["sources"]["listing"])
         self.assertIsNone(summary["billed"])
-        self.assertIn("InvalidError: plan", summary["sources"]["billing"])
+        # The type only: Modal's message can name the workspace.
+        self.assertEqual(
+            summary["sources"]["billing"],
+            "Modal's billing report failed (InvalidError)",
+        )
         self.assertIn("checked 2026-11-15", summary["prices"]["source"])
         self.assertEqual(
             summary["prices"]["cpu_core_second"],
             f"{cost.PRICES['cpu_core_second']:.8g}",
         )
         self.assertEqual(rows(summary)["dev"]["source"], "estimate: record-timeout 1")
+
+    def test_records_that_cannot_be_read_leave_the_rest(self):
+        begun = dt.datetime(2026, 11, 15, 11, tzinfo=dt.UTC).timestamp()
+        self.infos = [info("sb-1", "dev", begun, begun + 60)]
+        self.volume.listdir.aio.side_effect = RuntimeError("transport")
+        summary = self.collect()
+        self.assertIn(
+            "agentix records were unavailable (RuntimeError)",
+            summary["sources"]["records"],
+        )
+        self.assertIn("records were unavailable", cost.render(summary))
+        self.assertEqual(rows(summary)["dev"]["seconds"], 60)
+
+    def test_a_corrupt_record_file_leaves_the_rest(self):
+        self.volume.files["records/bad/x.json"] = b"{not json"
+        summary = self.collect()
+        self.assertIn("unavailable (JSONDecodeError)", summary["sources"]["records"])
+
+    def test_a_listing_without_end_times_is_not_used(self):
+        begun = dt.datetime(2026, 11, 15, 11, tzinfo=dt.UTC).timestamp()
+        self.infos = [
+            info("sb-1", "", begun, 0.0, ended=True),
+            info("sb-2", "", begun, 0.0, ended=True),
+        ]
+        summary = self.collect()
+        self.assertEqual(summary["rows"], [])
+        self.assertIn("gave no end times", summary["sources"]["listing"])
+
+    def test_billing_rows_of_an_earlier_app_of_the_name_are_kept(self):
+        self.report_items = [
+            SimpleNamespace(
+                object_id="ap-before",
+                description="agentix",
+                interval_start=START,
+                cost_by_resource={"CPU": Decimal("1")},
+            )
+        ]
+        summary = self.collect()
+        self.assertEqual(summary["billed"]["apps"]["agentix"]["total"], "1.0000")
 
     def test_no_app_and_no_records(self):
         self.app_lookup.aio = AsyncMock(
@@ -430,22 +544,98 @@ class CommandTest(ModalTestCase):
 
 class ListingTest(ModalTestCase):
     def test_listed_item_from_modal(self):
-        item = cost._listed_item(info("sb-1", "dev", 1000.0, 0.0, 8000, 16384))
+        item = cost._listed_item(info("sb-1", "dev", 1000.0, 1600.0, 8000, 16384))
         self.assertEqual(
-            (item["name"], item["cpu"], item["memory_mib"]), ("dev", 8.0, 16384)
+            (item["name"], item["cpu"], item["memory_mib"], item["source"]),
+            ("dev", 8.0, 16384, "modal"),
         )
-        self.assertEqual(item["end"].year, dt.MAXYEAR)
+        self.assertEqual((item["end"] - item["start"]).total_seconds(), 600)
 
-    def test_list_finished_pages_until_empty(self):
-        pages = [
-            SimpleNamespace(sandboxes=[SimpleNamespace(created_at=3.0)]),
-            SimpleNamespace(sandboxes=[]),
-        ]
+    def test_a_running_sandbox_ends_at_its_timeout_at_the_latest(self):
+        item = cost._listed_item(info("sb-1", "", 1000.0, 0.0, timeout=600))
+        self.assertEqual((item["end"] - item["start"]).total_seconds(), 600)
+        self.assertEqual(item["source"], "modal")
+        no_timeout = cost._listed_item(info("sb-1", "", 1000.0, 0.0, timeout=0))
+        self.assertEqual(no_timeout["end"].year, dt.MAXYEAR)
+
+    def test_a_finish_past_the_timeout_is_capped(self):
+        item = cost._listed_item(info("sb-1", "", 1000.0, 9000.0, timeout=600))
+        self.assertEqual((item["end"] - item["start"]).total_seconds(), 600)
+
+    def test_ended_without_an_end_time_is_an_upper_bound(self):
+        item = cost._listed_item(info("sb-1", "", 1000.0, 0.0, timeout=600, ended=True))
+        self.assertEqual((item["end"] - item["start"]).total_seconds(), 600)
+        self.assertEqual(item["source"], "modal-upper")
+
+    def test_ended_before_it_started_costs_nothing(self):
+        item = cost._listed_item(info("sb-1", "", 0.0, 0.0, ended=True, created=1000.0))
+        self.assertEqual(item["end"], item["start"])
+
+    def test_has_result_reads_the_proto(self):
+        from modal_proto import api_pb2
+
+        task = api_pb2.TaskInfo()
+        self.assertFalse(cost._has_result(task))
+        task.result.status = 1
+        self.assertTrue(cost._has_result(task))
+
+    def list_finished(self, pages, since=0.0):
         client = Mock()
         client.stub.SandboxList = AsyncMock(side_effect=pages)
         with patch("modal.client._Client.from_env", AsyncMock(return_value=client)):
-            found = asyncio.run(cost._list_finished("ap-1"))
-        self.assertEqual(len(found), 1)
+            found = asyncio.run(cost._list_finished("ap-1", since))
         requests = [c.args[0] for c in client.stub.SandboxList.call_args_list]
+        return found, requests
+
+    def page(self, *items):
+        return SimpleNamespace(
+            sandboxes=[SimpleNamespace(id=i, created_at=t) for i, t in items]
+        )
+
+    def test_list_finished_pages_until_empty(self):
+        found, requests = self.list_finished(
+            [self.page(("sb-2", 5.0), ("sb-1", 3.0)), self.page()]
+        )
+        self.assertEqual([f.id for f in found], ["sb-2", "sb-1"])
         self.assertTrue(all(r.include_finished for r in requests))
-        self.assertEqual(requests[1].before_timestamp, 3.0)
+        self.assertIsNone(requests[0].before_timestamp or None)
+        # Just after the oldest, so that one created at the same time is kept.
+        self.assertAlmostEqual(requests[1].before_timestamp, 3.001, places=5)
+
+    def test_sandboxes_created_at_the_same_time_are_not_skipped(self):
+        found, _ = self.list_finished(
+            [
+                self.page(("sb-3", 5.0), ("sb-2", 3.0)),
+                self.page(("sb-2", 3.0), ("sb-1", 3.0)),
+                self.page(("sb-2", 3.0), ("sb-1", 3.0)),
+            ]
+        )
+        self.assertEqual(sorted(f.id for f in found), ["sb-1", "sb-2", "sb-3"])
+
+    def test_a_listing_that_ignores_the_page_stops(self):
+        # Every page the same: the second adds nothing.
+        page = self.page(("sb-2", 5.0), ("sb-1", 3.0))
+        found, requests = self.list_finished([page] * 10)
+        self.assertEqual(len(found), 2)
+        self.assertEqual(len(requests), 2)
+
+    def test_times_that_do_not_decrease_stop_the_listing(self):
+        found, requests = self.list_finished(
+            [self.page(("sb-2", 5.0)), self.page(("sb-1", 9.0)), self.page()]
+        )
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(found), 2)
+
+    def test_listing_stops_once_past_the_month(self):
+        found, requests = self.list_finished(
+            [self.page(("sb-2", 50.0), ("sb-1", 5.0)), self.page(("sb-0", 1.0))],
+            since=10.0,
+        )
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(len(found), 2)
+
+    def test_listing_stops_after_the_page_cap(self):
+        pages = [self.page((f"sb-{n}", 1000.0 - n)) for n in range(200)]
+        with patch.object(cost, "MAX_PAGES", 5):
+            found, requests = self.list_finished(pages)
+        self.assertEqual((len(found), len(requests)), (5, 5))

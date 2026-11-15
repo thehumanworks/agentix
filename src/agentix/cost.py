@@ -40,6 +40,10 @@ PRICES = {
 SNAPSHOT_STORAGE = "not metered by Modal (no billing line for snapshot storage)"
 
 IMAGE_BUILDS = "(image builds)"
+# Sources whose end is a bound, not the real end.
+UPPER_BOUNDS = ("modal-upper", "record-upper", "record-timeout")
+# Pages of Modal's listing of ended sandboxes, at most.
+MAX_PAGES = 100
 UNNAMED = "(unnamed)"
 
 
@@ -51,11 +55,11 @@ async def collect(now: dt.datetime | None = None) -> dict[str, Any]:
     runner_id = await _app_id(RUNNER_APP_NAME)
     (
         (listed, listing),
-        records,
+        (records, records_source),
         (rates, rates_source),
         (billed, billing),
     ) = await asyncio.gather(
-        _listed(app_id),
+        _listed(app_id, start),
         _records(),
         _rates(),
         _billing(start, now, {i for i in (app_id, runner_id) if i}),
@@ -66,7 +70,12 @@ async def collect(now: dt.datetime | None = None) -> dict[str, Any]:
         listed=listed,
         records=records,
         prices=rates,
-        sources={"listing": listing, "rates": rates_source, "billing": billing},
+        sources={
+            "listing": listing,
+            "records": records_source,
+            "rates": rates_source,
+            "billing": billing,
+        },
         billed=billed,
         app_ids={app_id: APP_NAME, runner_id: RUNNER_APP_NAME},
     )
@@ -96,7 +105,7 @@ def summarize(
     """
     runs: dict[str, dict[str, Any]] = {}
     for item in listed:
-        runs[item["id"]] = {**item, "source": "modal"}
+        runs[item["id"]] = {"source": "modal", **item}
     for record in records:
         for sandbox in record["sandboxes"]:
             if sandbox["id"] in runs:
@@ -154,7 +163,9 @@ def summarize(
         "snapshot_storage": SNAPSHOT_STORAGE,
         "sources": {
             "listing": sources["listing"],
-            "records": f"agentix records on the Modal Volume {STORE_NAME}",
+            "records": sources.get(
+                "records", f"agentix records on the Modal Volume {STORE_NAME}"
+            ),
             "billing": sources["billing"],
         },
         "billed": None,
@@ -229,10 +240,18 @@ def render(summary: dict[str, Any]) -> str:
         for app, costs in billed["apps"].items():
             parts = ", ".join(f"{k} {v}" for k, v in costs["by_resource"].items())
             lines.append(f"  app {app}: ${costs['total']} ({parts})")
-        lines.append(
-            f"  Not attributed to a row above (billed minus estimated): "
-            f"${billed['not_attributed']}"
-        )
+        if Decimal(billed["not_attributed"]) < 0:
+            lines.append(
+                f"  Estimates exceed what was billed by "
+                f"${-Decimal(billed['not_attributed'])}: the rows marked "
+                f"{', '.join(UPPER_BOUNDS)} count up to a time that is later "
+                "than the real end."
+            )
+        else:
+            lines.append(
+                f"  Not attributed to a row above (billed minus estimated): "
+                f"${billed['not_attributed']}"
+            )
     prices = summary["prices"]
     lines += [
         "",
@@ -242,9 +261,13 @@ def render(summary: dict[str, Any]) -> str:
         f"least {prices['min_cpu_cores']} core), memory "
         f"${prices['memory_gib_second']} per GiB-second; {prices['source']}.",
         f"Runtimes: {summary['sources']['listing']}; {summary['sources']['records']}.",
-        "SOURCE: modal = start and end from Modal's sandbox listing; record = "
-        "start from the agentix record, end from its exit snapshot; "
-        "record-timeout = no end recorded, so its timeout (an upper bound).",
+        "SOURCE: modal = start and end from Modal's sandbox listing (a "
+        "running one up to now); modal-upper = listed as ended with no end "
+        "time, so up to its timeout; record = start from the agentix record, "
+        "end from the snapshot agentix took when it ended it or at its "
+        "timeout; record-upper = end from when agentix noticed it had ended, "
+        "at most its timeout; record-timeout = no end recorded, so up to its "
+        "timeout. The -upper and -timeout sources are upper bounds.",
         f"{IMAGE_BUILDS}: unnamed sandboxes with the builder's {BUILD_CPU:g} CPU "
         f"and {BUILD_MEMORY_MIB} MiB. {UNNAMED}: other sandboxes with no name "
         "(--ephemeral, flake update).",
@@ -256,17 +279,22 @@ def _from_record(
     record: store.Record, sandbox: store.SandboxRecord, now: dt.datetime
 ) -> dict[str, Any]:
     begun = store.parse_time(sandbox["started_at"])
-    ends = [
-        store.parse_time(s["created_at"])
+    options = record["options"]
+    deadline = begun + dt.timedelta(seconds=options["timeout"])
+    ends = sorted(
+        (store.parse_time(s["created_at"]), s["kind"])
         for s in record["snapshots"]
         if s["sandbox_id"] == sandbox["id"] and s["kind"] != "manual"
-    ]
-    options = record["options"]
-    if ends:
-        end, source = min(ends), "record"
+    )
+    if not ends:
+        end, source = min(deadline, now), "record-timeout"
     else:
-        timeout = dt.timedelta(seconds=options["timeout"])
-        end, source = min(begun + timeout, now), "record-timeout"
+        end, kind = ends[0]
+        # "down" and "timeout" snapshots are taken at the end. Any other is
+        # dated when agentix first saw the sandbox had ended, which can be
+        # days later, so it is only a bound, and the timeout is a closer one.
+        exact = kind in ("down", "timeout") and end <= deadline
+        end, source = min(end, deadline), "record" if exact else "record-upper"
     return {
         "id": sandbox["id"],
         "name": record["name"],
@@ -327,7 +355,9 @@ async def _app_id(name: str) -> str | None:
         return None
 
 
-async def _listed(app_id: str | None) -> tuple[list[dict[str, Any]], str]:
+async def _listed(
+    app_id: str | None, since: dt.datetime
+) -> tuple[list[dict[str, Any]], str]:
     """The app's sandboxes as Modal lists them, and what that listing covers.
 
     Modal's public `Sandbox.list` shows only running sandboxes. Its API also
@@ -337,7 +367,15 @@ async def _listed(app_id: str | None) -> tuple[list[dict[str, Any]], str]:
     if app_id is None:
         return [], f"no Modal app named {APP_NAME}"
     try:
-        infos = await _list_sandboxes(app_id)
+        infos = await _list_sandboxes(app_id, since.timestamp())
+        ended = [info for info in infos if _has_result(info.task_info)]
+        if ended and not any(info.task_info.finished_at for info in ended):
+            # No ended sandbox has an end time: the listing is not what this
+            # code expects, so the records answer instead.
+            return [], (
+                "Modal's listing of ended sandboxes gave no end times, so it was "
+                "not used and unnamed sandboxes are not counted"
+            )
         oldest = min((info.created_at for info in infos), default=None)
         since = (
             f" back to {_iso(dt.datetime.fromtimestamp(oldest, dt.UTC))}"
@@ -357,49 +395,100 @@ async def _listed(app_id: str | None) -> tuple[list[dict[str, Any]], str]:
 
 def _listed_item(info: Any) -> dict[str, Any]:
     tags = {tag.tag_name: tag.tag_value for tag in info.tags}
-    begun = info.task_info.started_at or info.created_at
-    finished = info.task_info.finished_at
+    task = info.task_info
+    begun = dt.datetime.fromtimestamp(task.started_at or info.created_at, dt.UTC)
+    timeout = info.timeout_secs
+    deadline = (
+        begun + dt.timedelta(seconds=timeout)
+        if timeout
+        else dt.datetime.max.replace(tzinfo=dt.UTC)
+    )
+    source = "modal"
+    if task.finished_at:
+        end = min(dt.datetime.fromtimestamp(task.finished_at, dt.UTC), deadline)
+    elif not _has_result(task):
+        # Still running: counted up to now, and never past its timeout.
+        end = deadline
+    elif task.started_at:
+        # Ended, but with no end time: at most its timeout.
+        end, source = deadline, "modal-upper"
+    else:
+        # Ended before it started.
+        end = begun
     return {
         "id": info.id,
         "name": tags.get(NAME_TAG, ""),
-        "start": dt.datetime.fromtimestamp(begun, dt.UTC),
-        "end": dt.datetime.fromtimestamp(finished, dt.UTC)
-        if finished
-        else dt.datetime.max.replace(tzinfo=dt.UTC),
+        "start": begun,
+        "end": end,
         "cpu": info.resource_info.milli_cpu.value / 1000,
         "memory_mib": info.resource_info.memory_mb.value,
+        "source": source,
     }
 
 
-async def _list_finished(app_id: str) -> list[Any]:
+def _has_result(task: Any) -> bool:
+    """Whether Modal holds the result of a sandbox, which it has once ended."""
+    try:
+        return task.HasField("result")
+    except AttributeError:
+        return getattr(task, "result", None) is not None
+
+
+async def _list_finished(app_id: str, since: float) -> list[Any]:
+    """The app's sandboxes, newest first, back to `since` (a timestamp).
+
+    A page holds those created before `before_timestamp`. The next page asks
+    for those created before the oldest of this one, plus a little, so that
+    sandboxes created at the same time as it are not skipped; the IDs already
+    seen are dropped. Paging stops at the first page with nothing new, once
+    past `since`, or after MAX_PAGES pages.
+    """
     from modal.client import _Client
     from modal_proto import api_pb2
 
     client = await _Client.from_env()
-    infos, before = [], None
+    found: dict[str, Any] = {}
+    before = None
     with warnings.catch_warnings():
         # The listing of ended sandboxes has no public method.
         warnings.simplefilter("ignore")
-        while True:
+        for _ in range(MAX_PAGES):
             request = api_pb2.SandboxListRequest(
                 app_id=app_id, before_timestamp=before, include_finished=True
             )
             response = await client.stub.SandboxList(request)
-            if not response.sandboxes:
-                return infos
-            infos += response.sandboxes
-            before = response.sandboxes[-1].created_at
+            new = [info for info in response.sandboxes if info.id not in found]
+            if not new:
+                break
+            found |= {info.id: info for info in new}
+            oldest = min(info.created_at for info in response.sandboxes)
+            if oldest < since or (before is not None and oldest >= before):
+                break
+            before = oldest + 0.001
+    return list(found.values())
 
 
-async def _list_sandboxes(app_id: str) -> list[Any]:
+async def _list_sandboxes(app_id: str, since: float) -> list[Any]:
     from modal._utils.async_utils import synchronizer
 
     # Run on Modal's own event loop, where its connection lives; called from
     # another loop, each page took a minute.
-    return await synchronizer.create_blocking(_list_finished).aio(app_id)
+    return await synchronizer.create_blocking(_list_finished).aio(app_id, since)
 
 
-async def _records() -> list[store.Record]:
+async def _records() -> tuple[list[store.Record], str]:
+    """Every record, and where they come from; none if they cannot be read."""
+    try:
+        records = await _read_records()
+    except Exception as error:
+        return [], (
+            f"agentix records were unavailable ({type(error).__name__}), so "
+            "only Modal's listing"
+        )
+    return records, f"agentix records on the Modal Volume {STORE_NAME}"
+
+
+async def _read_records() -> list[store.Record]:
     """Every record, read without writing anything back.
 
     `store.records` stores what it merges and refreshes a cache; this does
@@ -475,6 +564,9 @@ async def _billing(
     days, so whole days come from a daily report and today from an hourly one.
     """
     app_ids = set(app_ids)
+    # By name too, so that an app deleted and created again this month keeps
+    # the rows of its earlier ID.
+    app_names = {APP_NAME, RUNNER_APP_NAME}
     today = now.astimezone(dt.UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     parts = [(start, today, "d", dt.timedelta(days=1))] if today > start else []
     parts.append((max(start, today), now, "h", dt.timedelta(hours=1)))
@@ -494,10 +586,9 @@ async def _billing(
                     "cost_by_resource": dict(item.cost_by_resource),
                 }
                 for item in report
-                if item.object_id in app_ids
+                if item.object_id in app_ids or item.description in app_names
             ]
     except Exception as error:
-        return None, f"Modal's billing report failed: {type(error).__name__}: " + (
-            str(error)[:200]
-        )
+        # Only the type: the message can name the workspace.
+        return None, f"Modal's billing report failed ({type(error).__name__})"
     return rows, "Modal's billing report (Workspace.billing.report), by app"
