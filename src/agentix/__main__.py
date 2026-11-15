@@ -3,6 +3,7 @@
 Modal is slow to import, so only a command that needs it loads it.
 """
 
+import datetime as dt
 import os
 import shlex
 import sys
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .defaults import IMAGE_NAME
-from .errors import PublicKeyRequired
+from .errors import InvalidRequest, OperationFailed, PublicKeyRequired
 
 
 def _backend():
@@ -162,6 +163,107 @@ def _purge(name: str, terminate: bool = False):
     return _backend().purge(name, terminate)
 
 
+def _prune(
+    older_than: Any = None, keep_latest: bool = False, name: str = "", yes: bool = False
+):
+    """Delete snapshots older than --older-than, such as 14d, 12h, or 30m.
+
+    Lists what it would delete first: the snapshots, and each stopped name
+    left with no snapshot and nothing newer, whose record goes too. It
+    deletes only after you type yes, or with --yes; with no terminal and no
+    --yes it only lists. --keep-latest keeps the newest snapshot of each
+    name. --name=PATTERN limits it to matching names, as in a shell glob.
+    Running sandboxes and anything agentix did not record are never touched.
+    """
+    from . import durations
+
+    if older_than is None:
+        raise InvalidRequest("Pass --older-than, such as --older-than=14d.")
+    age = durations.parse(older_than)
+
+    def confirm(plan: dict[str, Any]) -> bool:
+        print(_prune_listing(plan))
+        sys.stdout.flush()
+        if not plan["items"]:
+            return False
+        if yes:
+            return True
+        if not sys.stdin.isatty():
+            print(
+                "Nothing was deleted: there is no terminal to confirm on. "
+                "Pass --yes to delete these.",
+                file=sys.stderr,
+            )
+            return False
+        print("Delete these? Type yes to delete: ", end="", file=sys.stderr)
+        sys.stderr.flush()
+        if sys.stdin.readline().strip().lower() in ("y", "yes"):
+            return True
+        print("Nothing was deleted.", file=sys.stderr)
+        return False
+
+    outcome = _backend().prune(age, keep_latest, name, confirm)
+    result = outcome["result"]
+    if result is None:
+        return None
+    print(
+        f"Deleted {_count(len(result['deleted_snapshots']), 'snapshot')} and "
+        f"removed {_count(len(result['removed_names']), 'stopped sandbox')}."
+    )
+    for item in result["skipped"]:
+        print(f"Skipped {item['name']}: {item['reason']}")
+    if result["failed"]:
+        listed = ", ".join(
+            f"{item['id']} ({item['error']})" for item in result["failed"]
+        )
+        raise OperationFailed(
+            f"Could not delete {listed}. The records keep them; run prune again."
+        )
+    return None
+
+
+def _prune_listing(plan: dict[str, Any]) -> str:
+    from .durations import describe
+
+    rows = [("NAME", "KIND", "ID", "AGE", "DATE")]
+    for item in plan["items"]:
+        if item["kind"] == "snapshot":
+            kind = f"snapshot ({item['snapshot_kind']})"
+            if item["expired"]:
+                kind += ", expired"
+        else:
+            kind = "stopped sandbox"
+        age = describe(dt.timedelta(seconds=item["age"]))
+        rows.append((item["name"], kind, item["id"], age, item["created_at"]))
+    lines = []
+    if plan["items"]:
+        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+        lines += [
+            "  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip()
+            for row in rows
+        ]
+    snapshots = sum(item["kind"] == "snapshot" for item in plan["items"])
+    stopped = len(plan["items"]) - snapshots
+    oldest = max((item["age"] for item in plan["items"]), default=0)
+    if plan["items"]:
+        lines.append(
+            f"Total: {_count(len(plan['items']), 'item')}: "
+            f"{_count(snapshots, 'snapshot')} and {_count(stopped, 'stopped sandbox')}, "
+            f"across {_count(len(plan['targets']), 'name')}; the oldest is "
+            f"{describe(dt.timedelta(seconds=oldest))} old. Modal does not report "
+            "snapshot sizes."
+        )
+    else:
+        lines.append("Nothing is old enough to prune.")
+    for item in plan["skipped"]:
+        lines.append(f"Skipped {item['name']}: {item['reason']}.")
+    return "\n".join(lines)
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
+
+
 def _ssh_start(
     sandbox_id: str, engine: str = "tailscale", hostname: str = "", public_key: str = ""
 ):
@@ -306,6 +408,7 @@ def main(argv: Sequence[str] | None = None):
                 "snapshots": _snapshots,
                 "restore": _restore,
                 "purge": _purge,
+                "prune": _prune,
                 "shell": _shell_command(command),
                 "ssh": {
                     "start": _ssh_start,

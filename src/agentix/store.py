@@ -271,10 +271,14 @@ def expires_at(snapshot: SnapshotRecord) -> str:
     For an `exit` snapshot that is when agentix saw it, so the real date can
     be earlier.
     """
-    taken = dt.datetime.fromisoformat(snapshot["created_at"])
-    if taken.tzinfo is None:
-        taken = taken.replace(tzinfo=dt.UTC)
+    taken = parse_time(snapshot["created_at"])
     return (taken + SNAPSHOT_RETENTION).isoformat(timespec="seconds")
+
+
+def parse_time(text: str) -> dt.datetime:
+    """A time stored in a record. One without a time zone is in UTC."""
+    when = dt.datetime.fromisoformat(text)
+    return when if when.tzinfo is not None else when.replace(tzinfo=dt.UTC)
 
 
 def record_exit(

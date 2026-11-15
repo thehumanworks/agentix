@@ -62,6 +62,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox snapshots SANDBOX` | The snapshots of a name, oldest first, with their expiry |
 | `sandbox restore NAME [--snapshot=ID]` | Start a new sandbox under NAME from its latest or the given snapshot |
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
+| `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
 
 Each command is `uv run agentix ...`. `SANDBOX` is a sandbox name or a
 sandbox ID (`sb-...`); the snapshot commands take an ID only for a sandbox
@@ -231,6 +232,38 @@ from: a newer published image reaches a name only through `purge` and
 - `sandbox up --ephemeral` starts a sandbox with only an ID: no name, no
   record, no snapshot. `sandbox ls` lists it while it runs, and
   `sandbox down ID` leaves nothing behind. It refuses `--name`.
+
+### Prune old snapshots
+
+`sandbox prune --older-than=14d` clears out old snapshots of every name in
+one go. AGE is a number with a unit: `w`, `d`, `h`, `m`, or `s`, such as
+`14d`, `12h`, `30m`, or `1d12h`; anything else is refused. It first lists
+what it would delete, with each item's name, kind, ID, and age, and a total:
+
+```sh
+$ uv run agentix sandbox prune --older-than=14d
+NAME  KIND             ID         AGE     DATE
+dev   snapshot (down)  im-...     20d 4h  2026-10-26T09:12:40+00:00
+old   snapshot (down)  im-...     31d 0h  2026-10-15T08:00:02+00:00
+old   stopped sandbox  sb-...     31d 0h  2026-10-15T08:00:02+00:00
+Total: 3 items: 2 snapshots and 1 stopped sandbox, across 2 names; the oldest is 31d 0h old. Modal does not report snapshot sizes.
+Delete these? Type yes to delete:
+```
+
+It deletes only after you type `yes`, or with `--yes`. Without a terminal
+and without `--yes` it only lists. A stopped sandbox is listed when its name
+would be left with no snapshot and nothing of it is newer than AGE; its
+record then goes as with `purge`. `--keep-latest` keeps the newest snapshot
+of each name, so every name can still be restored. `--name=GLOB` limits it
+to the names that match, such as `--name='scratch-*'`.
+
+Prune only acts on what the records hold, so it never deletes an image or
+snapshot that agentix did not record. A name whose sandbox runs, or whose
+exit snapshot Modal is still saving, is skipped whole and listed as skipped.
+A name that changes between the listing and the deletion, for example by a
+restore, is skipped too. Snapshots past Modal's 30 days are marked
+`expired`: Modal has deleted them already, and prune removes them from the
+record.
 
 ### Where the records live
 

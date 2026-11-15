@@ -4,6 +4,7 @@ Every operation that takes a sandbox also takes the name of one.
 """
 
 import asyncio
+import datetime as dt
 from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
@@ -116,3 +117,16 @@ class Local:
 
     def purge(self, target: str, terminate: bool) -> dict[str, Any]:
         return _run(lambda session: lifecycle.purge(session, target, terminate))
+
+    def prune(
+        self,
+        older_than: dt.timedelta,
+        keep_latest: bool,
+        pattern: str,
+        confirm: Callable[[dict[str, Any]], bool],
+    ) -> dict[str, Any]:
+        return _run(
+            lambda session: lifecycle.prune(
+                session, older_than, keep_latest, pattern, confirm
+            )
+        )

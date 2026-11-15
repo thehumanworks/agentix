@@ -8,7 +8,9 @@ sandbox of that record whose snapshot is not recorded yet.
 
 import asyncio
 import contextlib
-from collections.abc import Collection
+import datetime as dt
+import fnmatch
+from collections.abc import Callable, Collection
 from typing import Any
 
 import modal
@@ -487,3 +489,188 @@ async def purge(
         "sandboxes": [item["id"] for item in record["sandboxes"]],
         "deleted_snapshots": snapshot_ids,
     }
+
+
+async def prune(
+    session: Session,
+    older_than: dt.timedelta,
+    keep_latest: bool = False,
+    pattern: str = "",
+    confirm: Callable[[dict[str, Any]], bool] | None = None,
+) -> dict[str, Any]:
+    """Delete snapshots older than `older_than`, and names left with nothing.
+
+    Only what the records hold is considered, and only names whose sandbox
+    has ended: a running one, or one whose exit snapshot Modal is still
+    saving, is skipped whole. `keep_latest` keeps the newest snapshot of each
+    name. `pattern` limits it to the names that match, as in a shell glob. A
+    stopped name loses its record too once it has no snapshot left and
+    nothing of it is newer than `older_than`.
+
+    `confirm` is shown the plan and says whether to go ahead; without it,
+    nothing is deleted. Returns the plan, and under `result` what was done,
+    or None if nothing was.
+    """
+    plan = await _prune_plan(session, older_than, keep_latest, pattern)
+    # Shown also when there is nothing to delete, so the caller can say so.
+    if confirm is None or not confirm(plan) or not plan["items"]:
+        return {**plan, "result": None}
+    outcomes = await asyncio.gather(
+        *(
+            _prune_name(session, name, target)
+            for name, target in plan["targets"].items()
+        )
+    )
+    result: dict[str, Any] = {
+        "deleted_snapshots": [],
+        "removed_names": [],
+        "failed": [],
+        "skipped": [],
+    }
+    for outcome in outcomes:
+        for key in result:
+            result[key] += outcome.get(key, [])
+    return {**plan, "result": result}
+
+
+async def _prune_plan(
+    session: Session, older_than: dt.timedelta, keep_latest: bool, pattern: str
+) -> dict[str, Any]:
+    now = dt.datetime.now(dt.UTC)
+    cutoff = now - older_than
+    running_ids, records = await asyncio.gather(
+        sandbox.list_ids(session), store.records(session)
+    )
+    running = set(running_ids)
+    chosen = [
+        record
+        for record in records
+        if not pattern or fnmatch.fnmatchcase(record["name"], pattern)
+    ]
+
+    async def settle(record: store.Record) -> tuple[store.Record, str]:
+        if record["sandbox_id"] in running:
+            return record, "running"
+        if not store.pending(record):
+            return record, ""
+        try:
+            record, outcomes = await _reconcile(session, record, 0)
+        except Exception as error:
+            return record, f"its sandbox could not be checked ({error})"
+        if _is_running(record, outcomes):
+            return record, "running"
+        if store.pending(record):
+            return record, "Modal is still saving its exit snapshot"
+        return record, ""
+
+    settled = await asyncio.gather(*(settle(record) for record in chosen))
+    items: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    targets: dict[str, dict[str, Any]] = {}
+    for record, reason in sorted(settled, key=lambda pair: pair[0]["name"]):
+        name = record["name"]
+        if reason:
+            skipped.append({"name": name, "reason": reason})
+            continue
+        snapshots = store.ordered(record)
+        kept = snapshots[-1:] if keep_latest else []
+        old = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot not in kept
+            and store.parse_time(snapshot["created_at"]) <= cutoff
+        ]
+        for snapshot in old:
+            taken = store.parse_time(snapshot["created_at"])
+            items.append(
+                {
+                    "name": name,
+                    "kind": "snapshot",
+                    "snapshot_kind": snapshot["kind"],
+                    "id": snapshot["id"],
+                    "created_at": snapshot["created_at"],
+                    "age": (now - taken).total_seconds(),
+                    "expired": store.parse_time(store.expires_at(snapshot)) <= now,
+                }
+            )
+        # The last time anything happened to the name.
+        active = max(
+            store.parse_time(when)
+            for when in [
+                record["created_at"],
+                *(item["started_at"] for item in record["sandboxes"]),
+                *(snapshot["created_at"] for snapshot in snapshots),
+            ]
+        )
+        remove = len(old) == len(snapshots) and active <= cutoff
+        if remove:
+            items.append(
+                {
+                    "name": name,
+                    "kind": "sandbox",
+                    "id": record["sandbox_id"],
+                    "sandboxes": [item["id"] for item in record["sandboxes"]],
+                    "created_at": active.isoformat(timespec="seconds"),
+                    "age": (now - active).total_seconds(),
+                }
+            )
+        if old or remove:
+            targets[name] = {
+                "sandbox_id": record["sandbox_id"],
+                "snapshots": [snapshot["id"] for snapshot in old],
+                "remove": remove,
+            }
+    return {
+        "older_than": older_than.total_seconds(),
+        "keep_latest": keep_latest,
+        "pattern": pattern,
+        "items": items,
+        "skipped": skipped,
+        "targets": targets,
+    }
+
+
+async def _prune_name(
+    session: Session, name: str, target: dict[str, Any]
+) -> dict[str, list]:
+    """Carry out the plan for one name, unless it changed since the listing."""
+    latest = await store.find(session, name)
+    if latest is None:
+        return {"skipped": [{"name": name, "reason": "purged meanwhile"}]}
+    if latest["sandbox_id"] != target["sandbox_id"]:
+        return {
+            "skipped": [
+                {"name": name, "reason": "it has a new sandbox since the listing"}
+            ]
+        }
+    recorded = {snapshot["id"] for snapshot in latest["snapshots"]}
+    snapshot_ids = [item for item in target["snapshots"] if item in recorded]
+    results = await asyncio.gather(
+        *(sandbox.delete_snapshot(snapshot_id) for snapshot_id in snapshot_ids),
+        return_exceptions=True,
+    )
+    failed = [
+        {"name": name, "id": snapshot_id, "error": str(result)}
+        for snapshot_id, result in zip(snapshot_ids, results)
+        if isinstance(result, BaseException)
+    ]
+    deleted = [
+        snapshot_id
+        for snapshot_id, result in zip(snapshot_ids, results)
+        if not isinstance(result, BaseException)
+    ]
+    outcome: dict[str, list] = {"deleted_snapshots": deleted, "failed": failed}
+    if target["remove"] and not failed:
+        try:
+            await store.remove(session, name, deleted)
+        except OperationFailed as error:
+            # A snapshot was added meanwhile: the name stays.
+            outcome["skipped"] = [{"name": name, "reason": str(error)}]
+        else:
+            outcome["removed_names"] = [name]
+            return outcome
+    if deleted:
+        await store.update(
+            session, name, lambda record: store.remove_snapshots(record, deleted)
+        )
+    return outcome
