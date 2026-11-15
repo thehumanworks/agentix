@@ -177,6 +177,11 @@ class Local:
             )
         )
 
+    def cost(self) -> dict[str, Any]:
+        from . import cost
+
+        return _run(lambda _: cost.collect())
+
     def sync(
         self, target: str, local_dir: str, path: str, pull: bool
     ) -> dict[str, Any]:

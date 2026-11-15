@@ -422,6 +422,32 @@ def _count(number: int, noun: str) -> str:
     return f"{number} {noun}" + ("" if number == 1 else "s")
 
 
+def _cost(*extra: Any, json: Any = False):
+    """This month's Modal spend of agentix: per sandbox name, image builds,
+    and snapshots, with the source of each number. Only reads.
+
+    Modal bills the agentix app as a whole, which is shown as billed. The
+    split by name is an estimate from runtimes and sandbox prices, marked ~.
+    --json prints the numbers as JSON. See docs/cost.md.
+    """
+    if extra:
+        raise InvalidRequest(
+            f"cost takes only --json, not {' '.join(map(str, extra))}."
+        )
+    if not isinstance(json, bool):
+        raise InvalidRequest(f"--json takes no value, not {json!r}.")
+    from .cost import render
+
+    summary = _backend().cost()
+    if json:
+        import json as json_module
+
+        print(json_module.dumps(summary, indent=2))
+    else:
+        print(render(summary))
+    return None
+
+
 def _sync(name: str = "", pull: Any = False, path: Any = ""):
     """Copy this checkout's uncommitted changes into a sandbox, or back with --pull.
 
@@ -579,6 +605,7 @@ def main(argv: Sequence[str] | None = None):
             "config": {
                 "show": _config_show,
             },
+            "cost": _cost,
             "runner": {
                 "deploy": _runner_deploy,
             },

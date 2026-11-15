@@ -67,6 +67,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox resume NAME` | Restore NAME and continue the `exec --resume` commands its timeout cut off |
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
 | `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
+| `cost [--json]` | This month's Modal spend: billed per app, estimated per sandbox name, image builds, snapshots; see [docs/cost.md](docs/cost.md) |
 | `runner deploy` | Deploy the Modal app that runs `exec --detach` commands; safe to repeat |
 
 Each command is `uv run agentix ...`. `SANDBOX` is a sandbox name or a
