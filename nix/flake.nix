@@ -37,56 +37,58 @@
       self,
       nixpkgs,
       home-manager,
-      nixvim,
       ...
     }:
     let
       inherit (nixpkgs) lib;
 
-      # One entry per machine type. The profile holds everything that differs.
+      # One entry per machine type. The profile holds everything that differs;
+      # the user file says who commits.
       homes = {
         modal = {
           system = "x86_64-linux";
           profile = ./home-manager/profiles/sandbox.nix;
+          user = ./home-manager/users/tomas.nix;
         };
         modal-arm = {
           system = "aarch64-linux";
           profile = ./home-manager/profiles/sandbox.nix;
+          user = ./home-manager/users/tomas.nix;
         };
         mac = {
           system = "aarch64-darwin";
           profile = ./home-manager/profiles/mac.nix;
+          user = ./home-manager/users/tomas.nix;
         };
       };
 
       forAllSystems = lib.genAttrs (lib.unique (lib.mapAttrsToList (_: home: home.system) homes));
 
-      pkgsFor = forAllSystems (
-        system:
-        import nixpkgs {
-          inherit system;
-          config.allowUnfreePredicate =
-            pkg:
-            builtins.elem (lib.getName pkg) [
-              "claude-code"
-              "1password-cli"
-            ];
-        }
-      );
+      # The homes allow unfree packages through the modules' own list; see
+      # home-manager/home.nix.
+      pkgsFor = forAllSystems (system: nixpkgs.legacyPackages.${system});
 
       mkHome =
-        { system, profile }:
+        {
+          system,
+          profile,
+          user,
+        }:
         home-manager.lib.homeManagerConfiguration {
           pkgs = pkgsFor.${system};
           extraSpecialArgs = { inherit inputs; };
           modules = [
-            nixvim.homeModules.nixvim
+            self.homeManagerModules.default
             profile
+            user
           ];
         };
     in
     {
       homeConfigurations = lib.mapAttrs (_: mkHome) homes;
+
+      # For other flakes; see README.md.
+      homeManagerModules = import ./home-manager/exports.nix { inherit inputs lib; };
 
       # `nix fmt` formats every Nix file under this directory. The root is tied
       # to flake.nix: outside a Git checkout treefmt otherwise picks its own

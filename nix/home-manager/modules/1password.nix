@@ -5,8 +5,17 @@
   ...
 }:
 
+let
+  cfg = config.agentix.op;
+in
 {
+  imports = [ ./core.nix ];
+
   options.agentix.op = {
+    enable = lib.mkEnableOption "the 1Password CLI, `op`, on PATH" // {
+      default = true;
+    };
+
     package = lib.mkOption {
       type = lib.types.package;
       default = pkgs._1password-cli;
@@ -30,5 +39,9 @@
     };
   };
 
-  config.home.packages = [ config.agentix.op.package ];
+  config = lib.mkMerge [
+    # The wrappers call the CLI even when `op` itself is not on PATH.
+    { agentix.unfreePackages = [ "1password-cli" ]; }
+    (lib.mkIf cfg.enable { home.packages = [ cfg.package ]; })
+  ];
 }

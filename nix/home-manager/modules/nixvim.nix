@@ -1,7 +1,20 @@
-{ pkgs, ... }:
+{ inputs }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
 {
-  programs.nixvim = {
+  # Nixvim's own module, so its options exist even when this one is off.
+  imports = [ inputs.nixvim.homeModules.nixvim ];
+
+  options.agentix.nixvim.enable = lib.mkEnableOption "Neovim, configured with Nixvim" // {
+    default = true;
+  };
+
+  config.programs.nixvim = lib.mkIf config.agentix.nixvim.enable {
     enable = true;
     defaultEditor = true;
     vimAlias = true;

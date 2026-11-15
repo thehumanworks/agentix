@@ -1,9 +1,6 @@
 # Apple Silicon Mac. Shell startup files and system settings stay unmanaged.
 {
-  imports = [
-    ../home.nix
-    ./identity.nix
-  ];
+  imports = [ ../home.nix ];
 
   home = {
     username = "tomas";

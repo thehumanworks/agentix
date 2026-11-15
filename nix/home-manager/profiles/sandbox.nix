@@ -7,14 +7,10 @@
 }:
 
 {
-  imports = [
-    ../home.nix
-    ./identity.nix
-    ../modules/sandbox/claude.nix
-    ../modules/sandbox/op-token.nix
-    ../modules/sandbox/rex.nix
-    ../modules/sandbox/tailscale.nix
-  ];
+  imports = [ ../home.nix ];
+
+  # The 1Password token file, Claude's sandbox brief, Rex, and Tailscale.
+  agentix.sandbox.enable = true;
 
   home = {
     username = "root";

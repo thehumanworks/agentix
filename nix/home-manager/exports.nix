@@ -1,0 +1,47 @@
+# The Home Manager modules that flake.nix exports as `homeManagerModules`.
+# Each one has an `agentix.<name>.enable` option. `default` imports them all:
+# the shared modules start enabled, and the sandbox ones follow
+# `agentix.sandbox.enable`, which is off.
+{ inputs, lib }:
+
+let
+  # A module that uses this flake's inputs gets them here, not from the
+  # configuration that imports it, whose `inputs` are its own. The key lets
+  # several exports import it without declaring its options twice.
+  withInputs = file: {
+    key = toString file;
+    imports = [ (lib.modules.importApply file { inherit inputs; }) ];
+  };
+
+  claude-code = withInputs ./modules/claude-code.nix;
+  nixvim = withInputs ./modules/nixvim.nix;
+  sandbox-rex = withInputs ./modules/sandbox/rex.nix;
+in
+{
+  "1password" = ./modules/1password.nix;
+  inherit claude-code nixvim sandbox-rex;
+  git = ./modules/git.nix;
+  language-servers = ./modules/language-servers.nix;
+  tools = ./modules/tools.nix;
+
+  # Claude's sandbox settings extend the Claude module, so it comes along.
+  sandbox-claude.imports = [
+    ./modules/sandbox/claude.nix
+    claude-code
+  ];
+  sandbox-op-token = ./modules/sandbox/op-token.nix;
+  sandbox-tailscale = ./modules/sandbox/tailscale.nix;
+
+  default.imports = [
+    ./modules/sandbox/claude.nix
+    ./modules/sandbox/op-token.nix
+    sandbox-rex
+    ./modules/sandbox/tailscale.nix
+    ./modules/1password.nix
+    claude-code
+    ./modules/git.nix
+    ./modules/language-servers.nix
+    nixvim
+    ./modules/tools.nix
+  ];
+}

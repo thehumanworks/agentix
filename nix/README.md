@@ -13,17 +13,131 @@ sandboxes and for a Mac. Each profile is one output of `flake.nix`.
 
 | Path | Contents |
 | --- | --- |
-| `flake.nix` | Pinned inputs, the profile table, the formatter, and the checks |
-| `home-manager/home.nix` | Modules every profile shares |
-| `home-manager/profiles/` | One file per kind of machine: user, home directory, and what only that machine needs. `identity.nix` holds the Git name and emails |
-| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor |
-| `home-manager/modules/sandbox/` | Modules only the sandbox profile imports: Tailscale, Rex, the 1Password token file, Claude's sandbox brief |
+| `flake.nix` | Pinned inputs, the profile table, the exported modules, the formatter, and the checks |
+| `home-manager/exports.nix` | The modules the flake exports as `homeManagerModules`, and `default`, which imports them all |
+| `home-manager/home.nix` | Settings every profile here shares, including which unfree packages to allow |
+| `home-manager/profiles/` | One file per kind of machine: user, home directory, the modules it turns on, and what only that machine needs |
+| `home-manager/users/` | One file per person: the Git name and emails |
+| `home-manager/modules/` | One concern per file: tools, language servers, Git, Claude Code, 1Password, the editor. `core.nix` declares the options several modules share |
+| `home-manager/modules/sandbox/` | Modules for root in a Modal sandbox: Tailscale, Rex, the 1Password token file, Claude's sandbox brief |
 | `home-manager/modules/scripts/` | Shell scripts that modules package |
 
-To add a tool everywhere, add it to `modules/tools.nix`. To add it to
-sandboxes only, add it to `profiles/sandbox.nix`. To add a kind of machine, add
-a profile file and one line to `homes` in `flake.nix`. All profiles use one
-nixpkgs revision, including the editor, so a package appears in the image once.
+Each home in `flake.nix` combines every module, a profile, and a user file.
+To add a tool everywhere, add it to the list in `modules/tools.nix`. To add it
+to sandboxes only, add it to `profiles/sandbox.nix`. To add a kind of machine,
+add a profile file and one entry to `homes` in `flake.nix`. All profiles use
+one nixpkgs revision, including the editor, so a package appears in the image
+once.
+
+## Modules and options
+
+Every module has a switch. The shared modules start on, and the sandbox modules
+follow `agentix.sandbox.enable`, which `profiles/sandbox.nix` turns on.
+
+| Option | Module | Turns on |
+| --- | --- | --- |
+| `agentix.op.enable` | `1password.nix` | `op` on PATH |
+| `agentix.claude.enable` | `claude-code.nix` | Claude Code, its settings and plugins, and the `claude` wrapper |
+| `agentix.git.enable` | `git.nix` | Git, with `gh` and `gh-lf` as HTTPS credential helpers |
+| `agentix.languageServers.enable` | `language-servers.nix` | The language servers, on PATH and in Claude's LSP tool |
+| `agentix.nixvim.enable` | `nixvim.nix` | Neovim, configured with Nixvim |
+| `agentix.tools.enable` | `tools.nix` | The tools in `agentix.tools.packages`, and direnv |
+| `agentix.sandbox.claude.enable` | `sandbox/claude.nix` | Claude's sandbox brief and trusted directories |
+| `agentix.sandbox.opToken.enable` | `sandbox/op-token.nix` | An `op` that loads the token file a sandbox stores |
+| `agentix.sandbox.rex.enable` | `sandbox/rex.nix` | Rex, its terminfo entry, and its ssh guard |
+| `agentix.sandbox.tailscale.enable` | `sandbox/tailscale.nix` | Tailscale and the `ts` wrapper |
+
+Settings that a person or another module provides:
+
+- `agentix.identity.name` and `agentix.identity.email`: who Git records as the
+  author. `users/tomas.nix` sets them; another person adds a file of their own
+  to `users/` and names it as `user` in `homes`.
+- `agentix.tools.packages`: the tools. A list in another module adds to it;
+  `lib.mkForce` replaces it.
+- `agentix.unfreePackages`: the unfree packages the modules install. A module
+  that adds one lists its name here, and `home.nix` allows exactly these.
+- `agentix.op.package`, `agentix.op.tokenFile`, and
+  `agentix.claude.trustedDirectories`, which the sandbox modules set.
+
+To add a module here:
+
+1. Create `modules/NAME.nix` with an `agentix.NAME.enable` option, made with
+   `lib.mkEnableOption` and `default = true` for a shared module, or
+   `default = config.agentix.sandbox.enable` and an import of `./options.nix`
+   for a sandbox one. Put its settings under `lib.mkIf` of that option.
+2. Import the files whose options it reads, such as `./1password.nix` for
+   `agentix.op.package`. Importing a file more than once is fine.
+3. If it uses a flake input, write it as `{ inputs }: { config, lib, ... }: ...`
+   and list it with `withInputs` in `exports.nix`. Otherwise list the path.
+   Add it to `default` there and give it a name of its own.
+4. List any unfree package it installs in `agentix.unfreePackages`.
+5. Stage the new file (flakes only see files known to Git) and run
+   `nix flake check`.
+
+## Use from another flake
+
+The flake exports `homeManagerModules.default`, which imports every module,
+and one module per concern: `"1password"`, `claude-code`, `git`,
+`language-servers`, `nixvim`, `tools`, `sandbox-claude`, `sandbox-op-token`,
+`sandbox-rex`, and `sandbox-tailscale`. Each brings the modules it depends on.
+The modules use this flake's pinned inputs, not those of the flake that imports
+them.
+
+```nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    home-manager = {
+      url = "github:nix-community/home-manager/master";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    agentix = {
+      url = "github:thehumanworks/agentix?dir=nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.home-manager.follows = "home-manager";
+    };
+  };
+
+  outputs =
+    { nixpkgs, home-manager, agentix, ... }:
+    {
+      homeConfigurations.me = home-manager.lib.homeManagerConfiguration {
+        pkgs = nixpkgs.legacyPackages.x86_64-linux;
+        modules = [
+          agentix.homeManagerModules.default
+          ./my-module.nix
+          (
+            { config, lib, ... }:
+            {
+              home = {
+                username = "me";
+                homeDirectory = "/home/me";
+                stateVersion = "26.05";
+              };
+              agentix.identity = {
+                name = "Me";
+                email = "me@example.com";
+              };
+              agentix.nixvim.enable = false;
+              # The modules do not change nixpkgs settings. Allow their list.
+              nixpkgs.config.allowUnfreePredicate =
+                pkg: builtins.elem (lib.getName pkg) config.agentix.unfreePackages;
+            }
+          )
+        ];
+      };
+    };
+}
+```
+
+Without the unfree setting, evaluation refuses `claude-code` and
+`1password-cli`. With Home Manager inside NixOS and `useGlobalPkgs`, allow
+`config.home-manager.users.NAME.agentix.unfreePackages` in the system's own
+predicate instead. The
+`nixvim` and `sandbox-rex` modules import the Home Manager modules of Nixvim
+and Rex; do not import those again. The gh wrappers, the Claude login, and
+Tailscale read secrets from the `agentix` vault in 1Password; turn off the
+modules you have no such items for.
 
 ## What a sandbox gets
 
@@ -177,8 +291,8 @@ ts ip -4
 
 Use this wrapper for the custom socket; the plain CLI targets the default system
 socket. Host DNS is left unchanged. Logs are in `$TAILSCALE_STATE_DIR/daemon.log`
-(or the default state directory). Only the sandbox profile includes this
-module; the native Mac Tailscale application remains responsible for its
+(or the default state directory). Only the sandbox profile turns this module
+on; the native Mac Tailscale application remains responsible for its
 connection.
 
 This repository does not yet mount a persistent Modal volume or invoke this
@@ -193,8 +307,8 @@ entry in `~/.terminfo`, and Rex's ssh guard in `~/.ssh/config`, which Home
 Manager now writes for root. The flake input follows the snapshot channel and
 this flake's nixpkgs. The flake and the release binary download without
 credentials, so the image build needs no secret. Move to the newest snapshot
-with `uv run agentix flake update rex`, then rebuild. The Mac profile does not
-import the module; the Rex app installs `rex` and runs the server there.
+with `uv run agentix flake update rex`, then rebuild. The Mac profile leaves
+the module off; the Rex app installs `rex` and runs the server there.
 
 The nixos box runs its server as a systemd user service with its own Tailscale
 node. A sandbox has no systemd, so nothing starts at boot. The first `rex`

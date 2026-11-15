@@ -6,6 +6,9 @@
 }:
 
 let
+  cfg = config.agentix.git;
+  inherit (config.agentix) identity;
+
   # Each command resolves its host and token. op must already be authenticated.
   #
   # op run replaces a secret in the child's output with a placeholder. Git
@@ -31,41 +34,55 @@ let
   workGh = mkGh "gh-lf" "op://agentix/gh/work/host" "op://agentix/gh/work/token";
 in
 {
-  # The committer identity is set by the profile; see ../profiles/identity.nix.
-  programs.git = {
-    enable = true;
-    lfs.enable = true;
-    settings = {
-      init.defaultBranch = "main";
-      push.autoSetupRemote = true;
-      push.default = "simple";
-      remote.pushDefault = "origin";
-      pull.ff = "only";
-      fetch.prune = true;
+  imports = [ ./1password.nix ];
 
-      # Host-specific helpers work for ordinary git clone/fetch/push over HTTPS.
-      credential."https://leadforensics.ghe.com".helper = [
-        ""
-        "${lib.getExe workGh} auth git-credential"
-      ];
+  options.agentix.git.enable =
+    lib.mkEnableOption "Git, with `gh` and `gh-lf` as HTTPS credential helpers"
+    // {
+      default = true;
     };
-  };
 
-  programs.gh = {
-    enable = true;
-    package = personalGh;
-    settings = {
-      git_protocol = "https";
-      prompt = "enabled";
-    };
-    gitCredentialHelper = {
+  config = lib.mkIf cfg.enable {
+    programs.git = {
       enable = true;
-      hosts = [
-        "https://github.com"
-        "https://gist.github.com"
-      ];
-    };
-  };
+      lfs.enable = true;
+      settings = {
+        # A user file sets the identity; see ../users.
+        user = {
+          name = lib.mkIf (identity.name != null) identity.name;
+          email = lib.mkIf (identity.email != null) identity.email;
+        };
+        init.defaultBranch = "main";
+        push.autoSetupRemote = true;
+        push.default = "simple";
+        remote.pushDefault = "origin";
+        pull.ff = "only";
+        fetch.prune = true;
 
-  home.packages = [ workGh ];
+        # Host-specific helpers work for ordinary git clone/fetch/push over HTTPS.
+        credential."https://leadforensics.ghe.com".helper = [
+          ""
+          "${lib.getExe workGh} auth git-credential"
+        ];
+      };
+    };
+
+    programs.gh = {
+      enable = true;
+      package = personalGh;
+      settings = {
+        git_protocol = "https";
+        prompt = "enabled";
+      };
+      gitCredentialHelper = {
+        enable = true;
+        hosts = [
+          "https://github.com"
+          "https://gist.github.com"
+        ];
+      };
+    };
+
+    home.packages = [ workGh ];
+  };
 }

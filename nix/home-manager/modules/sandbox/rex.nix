@@ -8,21 +8,34 @@
 # session closes. `rex server start` starts one that stays until the sandbox
 # ends. No Tailscale node is enrolled; reach the server over SSH, as
 # `rex -S ssh://root@HOST`.
-{ inputs, ... }:
+{ inputs }:
+{ config, lib, ... }:
 
 {
-  imports = [ inputs.rex.homeManagerModules.default ];
+  imports = [
+    ./options.nix
+    inputs.rex.homeManagerModules.default
+  ];
 
-  # Installs rex, writes its xterm-rex terminfo entry to ~/.terminfo, and adds
-  # its ssh guard to ~/.ssh/config.
-  programs.rex.enable = true;
+  options.agentix.sandbox.rex.enable =
+    lib.mkEnableOption "Rex, its terminfo entry, and its ssh guard"
+    // {
+      default = config.agentix.sandbox.enable;
+      defaultText = lib.literalExpression "config.agentix.sandbox.enable";
+    };
 
-  # Home Manager writes ~/.ssh/config only when this is on. The guard there
-  # keeps ssh from a Rex terminal from sending TERM=xterm-rex to hosts that
-  # lack the entry. With both the entry and the guard in place, Rex terminals
-  # use xterm-rex; otherwise they fall back to xterm-256color.
-  programs.ssh = {
-    enable = true;
-    enableDefaultConfig = false;
+  config = lib.mkIf config.agentix.sandbox.rex.enable {
+    # Installs rex, writes its xterm-rex terminfo entry to ~/.terminfo, and adds
+    # its ssh guard to ~/.ssh/config.
+    programs.rex.enable = true;
+
+    # Home Manager writes ~/.ssh/config only when this is on. The guard there
+    # keeps ssh from a Rex terminal from sending TERM=xterm-rex to hosts that
+    # lack the entry. With both the entry and the guard in place, Rex terminals
+    # use xterm-rex; otherwise they fall back to xterm-256color.
+    programs.ssh = {
+      enable = true;
+      enableDefaultConfig = false;
+    };
   };
 }

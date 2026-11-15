@@ -1,65 +1,93 @@
-{ pkgs, ... }:
-
 {
-  home.packages = with pkgs; [
-    # Consistent shell and text tools on Linux and macOS.
-    bash
-    coreutils
-    findutils
-    gnugrep
-    gnused
-    gawk
-    diffutils
-    patch
-    file
-    tree
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 
-    # Search and structured data.
-    ripgrep
-    fd
-    fzf
-    ast-grep
-    jq
-    yq-go
-    sqlite
+let
+  cfg = config.agentix.tools;
+in
+{
+  options.agentix.tools = {
+    enable = lib.mkEnableOption "the command line tools and direnv" // {
+      default = true;
+    };
 
-    # Network and transfer.
-    curl
-    wget
-    rsync
-    dnsutils
-    lsof
+    packages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = [ ];
+      example = lib.literalExpression "[ pkgs.htop ]";
+      description = ''
+        The tools to install. This module defines the standard set; a list in
+        another module adds to it, and `lib.mkForce` replaces it.
+      '';
+    };
+  };
 
-    # Archives.
-    zip
-    unzip
-    zstd
+  config = lib.mkIf cfg.enable {
+    home.packages = cfg.packages;
 
-    # Builds and task runners.
-    gnumake
-    just
-    pkg-config
+    agentix.tools.packages = with pkgs; [
+      # Consistent shell and text tools on Linux and macOS.
+      bash
+      coreutils
+      findutils
+      gnugrep
+      gnused
+      gawk
+      diffutils
+      patch
+      file
+      tree
 
-    # Python, JavaScript, and shell.
-    python3
-    uv
-    bun
-    nodejs
-    shellcheck
-    shfmt
+      # Search and structured data.
+      ripgrep
+      fd
+      fzf
+      ast-grep
+      jq
+      yq-go
+      sqlite
 
-    # Nix formatting and linting; the flake's checks run the same tools.
-    nixfmt
-    statix
-    deadnix
+      # Network and transfer.
+      curl
+      wget
+      rsync
+      dnsutils
+      lsof
 
-    herdr
-  ];
+      # Archives.
+      zip
+      unzip
+      zstd
 
-  # Loads a project's .envrc. `use flake` environments are cached and kept from
-  # garbage collection by nix-direnv.
-  programs.direnv = {
-    enable = true;
-    nix-direnv.enable = true;
+      # Builds and task runners.
+      gnumake
+      just
+      pkg-config
+
+      # Python, JavaScript, and shell.
+      python3
+      uv
+      bun
+      nodejs
+      shellcheck
+      shfmt
+
+      # Nix formatting and linting; the flake's checks run the same tools.
+      nixfmt
+      statix
+      deadnix
+
+      herdr
+    ];
+
+    # Loads a project's .envrc. `use flake` environments are cached and kept from
+    # garbage collection by nix-direnv.
+    programs.direnv = {
+      enable = true;
+      nix-direnv.enable = true;
+    };
   };
 }
