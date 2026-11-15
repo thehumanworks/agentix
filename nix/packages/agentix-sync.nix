@@ -5,6 +5,7 @@
 {
   writeShellApplication,
   coreutils,
+  findutils,
   gawk,
   git,
   gnused,
@@ -14,6 +15,7 @@ writeShellApplication {
   name = "agentix-sync";
   runtimeInputs = [
     coreutils
+    findutils
     gawk
     git
     gnused

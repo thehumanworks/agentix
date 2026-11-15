@@ -24,15 +24,23 @@
 # `git merge-tree`, so the two HEADs may differ. BASE is the last state both
 # sides agreed on (refs/agentix-sync/synced on both, which `info` shows), so
 # that a file synced before and changed since on one side is not a conflict;
-# without it, the sender's HEAD. If any file conflicts, or a
-# file the sender adds exists here but Git ignores it, apply changes nothing
-# and lists the files (exit code 3). Otherwise it first saves this side's
-# working tree as refs/agentix-sync/backup/TIME, then writes only the files
-# that change. The index and HEAD stay as they are: the changes show as
-# unstaged, and new files as untracked.
+# without it, the sender's HEAD.
+#
+# apply changes nothing, and exits with 3 and lists the files, if any file
+# conflicts, or if writing would remove a file Git ignores here. It changes
+# nothing, and exits with 1, if any step before writing fails: reading the
+# working tree, merging, or preparing the new files (filters included), or
+# if the working tree changed while it ran. Then it saves this side's working
+# tree as refs/agentix-sync/backup/NNNNNN-TIME, moves the files it replaces
+# aside, and moves the new ones in; if a move fails, it puts the old files
+# back. The index and HEAD stay as they are: the changes show as unstaged,
+# and new files as untracked.
+#
+# Every step checks its own result: set -e does nothing inside $(...), in a
+# function called from `if` or `||`, or in a process substitution.
 set -euo pipefail
 
-PROTOCOL=1
+PROTOCOL=2
 OUTGOING=refs/agentix-sync/outgoing
 INCOMING=refs/agentix-sync/incoming
 SYNCED=refs/agentix-sync/synced
@@ -42,170 +50,325 @@ export GIT_AUTHOR_NAME=agentix-sync GIT_AUTHOR_EMAIL=agentix-sync@localhost
 export GIT_COMMITTER_NAME=agentix-sync GIT_COMMITTER_EMAIL=agentix-sync@localhost
 export GIT_TERMINAL_PROMPT=0
 
+work=
+keep_work=
+
 die() {
   printf 'agentix-sync: %s\n' "$*" >&2
   exit 1
 }
 
+cleanup() {
+  if [[ -n $work && -z $keep_work ]]; then
+    rm -rf "$work"
+  fi
+}
+
 # Enter the top of the checkout at $1. Exit 4: no such directory; 5: not in a
 # Git checkout with a commit.
 enter() {
-  local dir=${1:-.}
-  [[ -d $dir ]] || {
+  local dir=${1:-.} top gitdir
+  if [[ ! -d $dir ]]; then
     printf 'agentix-sync: %s does not exist\n' "$dir" >&2
     exit 4
-  }
-  cd "$dir"
-  local top
-  top=$(git rev-parse --show-toplevel 2>/dev/null) || {
+  fi
+  cd "$dir" || die "cannot enter $dir"
+  if ! top=$(git rev-parse --show-toplevel 2>/dev/null); then
     printf 'agentix-sync: %s is not in a Git checkout\n' "$dir" >&2
     exit 5
-  }
-  cd "$top"
-  git rev-parse --verify -q HEAD >/dev/null || {
+  fi
+  cd "$top" || die "cannot enter $top"
+  if ! git rev-parse --verify -q HEAD >/dev/null; then
     printf 'agentix-sync: %s has no commit yet\n' "$top" >&2
     exit 5
-  }
-  work=$(mktemp -d "$(git rev-parse --absolute-git-dir)/agentix-sync.XXXXXX")
-  trap 'rm -rf "$work"' EXIT
-}
-
-# A commit of the working tree, untracked files included, on top of HEAD. It
-# starts from a copy of the index, so the real index is untouched. The copy
-# keeps the index's time, by which Git tells a file changed just after it was
-# indexed; a newer copy would make Git take such a file as unchanged.
-snapshot() {
-  local index tree
-  index=$(git rev-parse --git-path index)
-  if [[ -f $index ]]; then
-    cp -p "$index" "$work/index"
   fi
-  GIT_INDEX_FILE=$work/index git -c advice.addEmbeddedRepo=false add -A -- .
-  tree=$(GIT_INDEX_FILE=$work/index git write-tree)
-  git commit-tree -p HEAD -m "agentix-sync: the working tree of $(git rev-parse --abbrev-ref HEAD)" "$tree"
+  gitdir=$(git rev-parse --absolute-git-dir) || die "cannot find the Git directory of $top"
+  work=$(mktemp -d "$gitdir/agentix-sync.XXXXXX") || die "cannot make a temporary directory in $gitdir"
+  trap cleanup EXIT
 }
 
-# Files that `write_tree` would put where Git ignores an existing file: those
-# are in neither tree, so nothing else would notice them being overwritten.
-ignored_in_the_way() {
-  local from=$1 to=$2 status path
-  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
-    # A directory in the way is not overwritten: checkout-index fails on it.
-    if [[ $status == A && (-L $path || (-e $path && ! -d $path)) ]]; then
-      printf '%s\n' "$path"
-    fi
-  done < <(git diff-tree -r -z --no-renames --name-status "$from" "$to")
+# Prints a commit of the working tree, untracked files included, on top of
+# HEAD. It starts from a copy of the index, so the real index is untouched.
+# The copy keeps the index's time, by which Git tells a file changed just
+# after it was indexed; a newer copy would make Git take such a file as
+# unchanged. Called in $(...), so each step is checked.
+snapshot() {
+  local index tree branch commit
+  index=$(git rev-parse --git-path index) || return 1
+  rm -f "$work/index" || return 1
+  if [[ -f $index ]]; then
+    cp -p "$index" "$work/index" || return 1
+  fi
+  GIT_INDEX_FILE=$work/index git -c advice.addEmbeddedRepo=false add -A -- . || return 1
+  tree=$(GIT_INDEX_FILE=$work/index git write-tree) || return 1
+  branch=$(git rev-parse --abbrev-ref HEAD) || return 1
+  commit=$(git commit-tree -p HEAD -m "agentix-sync: the working tree of $branch" "$tree") || return 1
+  [[ -n $commit ]] || return 1
+  printf '%s\n' "$commit"
 }
 
-# Make the working tree hold tree $2 where it now holds tree $1: delete the
-# files that $2 lacks, and write the ones that differ, with their modes and
-# symlinks, through a temporary index.
-write_tree() {
-  local from=$1 to=$2 status path parent
+# Sets $snap to a snapshot of the working tree, or stops.
+take_snapshot() {
+  snap=$(snapshot) ||
+    die "could not read the working tree, so nothing was changed; see Git's message above"
+}
+
+tree_of() {
+  git rev-parse --verify -q "$1^{tree}" || die "no tree for $1"
+}
+
+# The changes from tree $1 to tree $2, as NUL-separated status and path, in
+# $work/diff, and the paths alone in $work/touched (all) and $work/write
+# (those that $2 has).
+list_changes() {
+  local status path
+  git diff-tree -r -z --no-renames --name-status "$1" "$2" >"$work/diff" ||
+    die "could not compare $1 and $2"
+  : >"$work/touched"
   : >"$work/write"
   while IFS= read -r -d '' status && IFS= read -r -d '' path; do
-    if [[ $status == D ]]; then
-      rm -f -- "$path"
-      parent=$(dirname -- "$path")
-      while [[ $parent != . ]] && rmdir -- "$parent" 2>/dev/null; do
-        parent=$(dirname -- "$parent")
-      done
-    else
+    printf '%s\0' "$path" >>"$work/touched"
+    if [[ $status != D ]]; then
       printf '%s\0' "$path" >>"$work/write"
     fi
-  done < <(git diff-tree -r -z --no-renames --name-status "$from" "$to")
-  GIT_INDEX_FILE=$work/write-index git read-tree "$to"
-  GIT_INDEX_FILE=$work/write-index git checkout-index -f -z --stdin <"$work/write"
+  done <"$work/diff"
 }
 
+# Files that writing the changes in $work/diff would remove although tree $1,
+# the working tree as snapshotted, does not have them: files Git ignores
+# here. Each would be lost, as it is in no backup. Written to
+# $work/blocked: a file where a new file goes, a file where a new file's
+# directory goes, and a file inside a directory that a new file replaces.
+check_in_the_way() {
+  local from=$1 status path prefix found
+  : >"$work/blocked"
+  while IFS= read -r -d '' status && IFS= read -r -d '' path; do
+    [[ $status == D ]] && continue
+    prefix=$path
+    while [[ $prefix == */* ]]; do
+      prefix=${prefix%/*}
+      if [[ -L $prefix || (-e $prefix && ! -d $prefix) ]] &&
+        ! git cat-file -e "$from:$prefix" 2>/dev/null; then
+        printf '%s\n' "$prefix" >>"$work/blocked"
+      fi
+    done
+    if [[ -L $path || (-e $path && ! -d $path) ]]; then
+      if ! git cat-file -e "$from:$path" 2>/dev/null; then
+        printf '%s\n' "$path" >>"$work/blocked"
+      fi
+    elif [[ -d $path ]]; then
+      find "$path" \( -type f -o -type l \) -print0 >"$work/found" ||
+        die "could not list $path"
+      while IFS= read -r -d '' found; do
+        if ! git cat-file -e "$from:$found" 2>/dev/null; then
+          printf '%s\n' "$found" >>"$work/blocked"
+        fi
+      done <"$work/found"
+    fi
+  done <"$work/diff"
+  awk '!seen[$0]++' "$work/blocked" >"$work/blocked.unique" || die "awk failed"
+  mv "$work/blocked.unique" "$work/blocked" || die "mv failed"
+}
+
+# Saves commit $1 under a new backup ref, numbered after the newest one.
 backup() {
-  local commit=$1 ref
-  ref=$BACKUPS/$(date -u +%Y%m%dT%H%M%SZ)-$(git rev-parse --short "$commit")
-  git update-ref -m "agentix-sync: $2" "$ref" "$commit"
-  printf 'backup %s %s\n' "$ref" "$commit"
+  local commit=$1 last number stamp
+  last=$(git for-each-ref --sort=-refname --count=1 --format='%(refname:lstrip=3)' \
+    "$BACKUPS/[0-9][0-9][0-9][0-9][0-9][0-9]-*") || die "could not list the backups"
+  number=${last%%-*}
+  [[ $number =~ ^[0-9]+$ ]] || number=0
+  stamp=$(date -u +%Y%m%dT%H%M%SZ) || die "date failed"
+  backup_ref=$(printf '%s/%06d-%s' "$BACKUPS" "$((10#$number + 1))" "$stamp")
+  git update-ref -m "agentix-sync: $2" "$backup_ref" "$commit" "" ||
+    die "could not save the backup $backup_ref"
+  printf 'backup %s %s\n' "$backup_ref" "$commit"
+}
+
+dir_of() {
+  local dir=${1%/*}
+  [[ $dir == "$1" ]] && dir=.
+  printf '%s' "$dir"
+}
+
+# Removes the empty directories above path $1.
+prune_dirs() {
+  local dir
+  dir=$(dir_of "$1")
+  while [[ $dir != . ]] && rmdir -- "$dir" 2>/dev/null; do
+    dir=$(dir_of "$dir")
+  done
+}
+
+# Moves the files in $work/touched aside to $work/old, then the prepared
+# ones from $work/new into place. Returns 1 at the first failure, with what
+# it did in $work/moved and $work/placed.
+swap() {
+  local path dir
+  : >"$work/moved"
+  : >"$work/placed"
+  while IFS= read -r -d '' path; do
+    if [[ -L $path || (-e $path && ! -d $path) ]]; then
+      dir=$(dir_of "$path")
+      mkdir -p -- "$work/old/$dir" || return 1
+      mv -- "$path" "$work/old/$path" || return 1
+      printf '%s\0' "$path" >>"$work/moved"
+      prune_dirs "$path"
+    fi
+  done <"$work/touched"
+  while IFS= read -r -d '' path; do
+    if [[ ${AGENTIX_SYNC_FAIL_AT:-} == "$path" ]]; then
+      # For the tests: a write that fails part of the way.
+      return 1
+    fi
+    # A directory that a file replaces is empty now; anything else in it
+    # was refused by check_in_the_way.
+    if [[ -d $path && ! -L $path ]]; then
+      rmdir -- "$path" || return 1
+    fi
+    dir=$(dir_of "$path")
+    mkdir -p -- "$dir" || return 1
+    mv -- "$work/new/$path" "$path" || return 1
+    printf '%s\0' "$path" >>"$work/placed"
+  done <"$work/write"
+}
+
+# Undoes what swap did. Returns 1 if anything could not be put back.
+unswap() {
+  local path dir failed=0
+  while IFS= read -r -d '' path; do
+    rm -f -- "$path" || failed=1
+    prune_dirs "$path"
+  done <"$work/placed"
+  while IFS= read -r -d '' path; do
+    dir=$(dir_of "$path")
+    if [[ -d $path && ! -L $path ]]; then
+      rmdir -- "$path" || failed=1
+    fi
+    { mkdir -p -- "$dir" && mv -- "$work/old/$path" "$path"; } || failed=1
+  done <"$work/moved"
+  return "$failed"
+}
+
+# Makes the working tree, which snapshot commit $1 holds, hold tree $2,
+# changing only the files that differ. Saves $1 as a backup first, with
+# message $3. Stops with nothing changed if any check fails or the working
+# tree changed since $1, and puts the old files back if writing fails.
+write_tree() {
+  local from=$1 to=$2 now
+  list_changes "$from" "$to"
+  # The new files, filters and all, away from the working tree.
+  GIT_INDEX_FILE=$work/write-index git read-tree "$to" ||
+    die "could not read the merged tree, so nothing was changed"
+  mkdir "$work/new" "$work/old" || die "could not make $work/new"
+  GIT_INDEX_FILE=$work/write-index git checkout-index -f -z --prefix="$work/new/" --stdin \
+    <"$work/write" || die "could not prepare the new files, so nothing was changed; see Git's message above"
+  take_snapshot
+  now=$snap
+  [[ $(tree_of "$now") == "$(tree_of "$from")" ]] ||
+    die "the working tree changed while syncing, so nothing was changed; sync again"
+  backup "$from" "$3"
+  if swap; then
+    return 0
+  fi
+  if unswap; then
+    die "could not write the working tree, so it was put back as it was"
+  fi
+  keep_work=1
+  die "could not write the working tree, nor put all of it back; the files moved aside are in $work/old, and $backup_ref holds the whole working tree from before"
 }
 
 report_changes() {
-  git diff-tree -r --no-renames --name-status "$1" "$2" | sed 's/^/changed /'
+  git diff-tree -r --no-renames --name-status "$1" "$2" >"$work/report" ||
+    die "could not compare $1 and $2"
+  sed 's/^/changed /' "$work/report" || die "sed failed"
 }
 
 cmd_info() {
   enter "${1:-}"
-  printf 'protocol %s\n' "$PROTOCOL"
-  printf 'toplevel %s\n' "$PWD"
-  printf 'head %s\n' "$(git rev-parse HEAD)"
-  printf 'branch %s\n' "$(git rev-parse --abbrev-ref HEAD)"
-  printf 'origin %s\n' "$(git config --get remote.origin.url || true)"
-  git rev-list --max-parents=0 HEAD | sed 's/^/root /'
-  # What the other side need not send.
-  if git rev-parse -q --verify "$SYNCED^{commit}" >/dev/null; then
-    printf 'synced %s %s\n' "$(git rev-parse "$SYNCED")" "$(git rev-parse "$SYNCED^")"
+  local head branch origin synced parent
+  head=$(git rev-parse HEAD) || die "no HEAD"
+  branch=$(git rev-parse --abbrev-ref HEAD) || die "no branch"
+  origin=$(git config --get remote.origin.url) || origin=
+  printf 'protocol %s\ntoplevel %s\nhead %s\nbranch %s\norigin %s\n' \
+    "$PROTOCOL" "$PWD" "$head" "$branch" "$origin"
+  git rev-list --max-parents=0 HEAD >"$work/roots" || die "could not list the root commits"
+  sed 's/^/root /' "$work/roots"
+  if synced=$(git rev-parse -q --verify "$SYNCED^{commit}"); then
+    parent=$(git rev-parse "$synced^") || die "no parent of $synced"
+    printf 'synced %s %s\n' "$synced" "$parent"
   fi
-  git for-each-ref --format='known %(objectname)' refs/heads refs/remotes
-  printf 'known %s\n' "$(git rev-parse HEAD)"
+  # What the other side need not send.
+  git for-each-ref --format='known %(objectname)' refs/heads refs/remotes >"$work/known" ||
+    die "could not list the refs"
+  cat "$work/known"
+  printf 'known %s\n' "$head"
 }
 
 cmd_pack() {
   enter "${1:-}"
-  local commit sha
-  commit=$(snapshot)
-  git update-ref "$OUTGOING" "$commit"
-  {
-    printf '%s\n' "$OUTGOING"
-    # Leave out what the other side has; skip what this side does not know.
-    while read -r sha; do
-      if [[ $sha =~ ^[0-9a-f]{40,64}$ ]] && git cat-file -e "$sha^{commit}" 2>/dev/null; then
-        printf '^%s\n' "$sha"
-      fi
-    done
-  } >"$work/revs"
-  git bundle create -q - --stdin <"$work/revs"
+  local sha
+  take_snapshot
+  git update-ref "$OUTGOING" "$snap" || die "could not record $OUTGOING"
+  printf '%s\n' "$OUTGOING" >"$work/revs"
+  # Leave out what the other side has; skip what this side does not know.
+  while read -r sha; do
+    if [[ $sha =~ ^[0-9a-f]{40,64}$ ]] && git cat-file -e "$sha^{commit}" 2>/dev/null; then
+      printf '^%s\n' "$sha" >>"$work/revs"
+    fi
+  done
+  git bundle create -q - --stdin <"$work/revs" || die "could not make the bundle"
 }
 
 cmd_apply() {
   enter "${1:-}"
-  [[ $(git merge-tree -h 2>&1 || true) == *merge-base* ]] ||
+  local help theirs sender base mine head merged code=0
+  help=$(git merge-tree -h 2>&1) || true
+  [[ $help == *merge-base* ]] ||
     die "this needs Git 2.40 or newer for git merge-tree --merge-base; this is $(git --version)"
-  cat >"$work/bundle"
-  git bundle verify -q "$work/bundle" >/dev/null 2>"$work/verify" || {
+  cat >"$work/bundle" || die "could not read the bundle"
+  if ! git bundle verify -q "$work/bundle" >/dev/null 2>"$work/verify"; then
     cat "$work/verify" >&2
     die "the changes sent need commits this checkout does not have"
-  }
-  git fetch -q --no-write-fetch-head "$work/bundle" "+$OUTGOING:$INCOMING"
-  local theirs base mine merged code=0
-  theirs=$(git rev-parse "$INCOMING^{commit}")
-  base=$(git rev-parse "$theirs^")
+  fi
+  git fetch -q --no-write-fetch-head "$work/bundle" "+$OUTGOING:$INCOMING" ||
+    die "could not fetch the bundle"
+  theirs=$(git rev-parse --verify -q "$INCOMING^{commit}") || die "the bundle has no snapshot"
+  sender=$(git rev-parse --verify -q "$theirs^") || die "the snapshot has no parent"
+  base=$sender
   if [[ -n ${2:-} ]]; then
     base=$(git rev-parse -q --verify "$2^{commit}") || die "no commit $2 to merge from"
   fi
-  mine=$(snapshot)
-  printf 'incoming %s\n' "$theirs"
-  printf 'sender-head %s\n' "$(git rev-parse "$theirs^")"
-  printf 'head %s\n' "$(git rev-parse HEAD)"
-  git merge-tree --write-tree --name-only --no-messages --merge-base="$base" "$mine" "$theirs" >"$work/merge" || code=$?
+  head=$(git rev-parse HEAD) || die "no HEAD"
+  take_snapshot
+  mine=$snap
+  printf 'incoming %s\nsender-head %s\nhead %s\n' "$theirs" "$sender" "$head"
+  git merge-tree --write-tree --name-only --no-messages --merge-base="$base" "$mine" "$theirs" \
+    >"$work/merge" || code=$?
   if ((code == 1)); then
     printf 'result conflict\n'
     tail -n +2 "$work/merge" | awk '!seen[$0]++' | sed 's/^/conflict /'
     exit 3
   elif ((code != 0)); then
-    die "git merge-tree failed with exit code $code"
+    die "git merge-tree failed with exit code $code, so nothing was changed"
   fi
-  merged=$(head -n 1 "$work/merge")
-  if [[ $merged == "$(git rev-parse "$mine^{tree}")" ]]; then
-    git update-ref "$SYNCED" "$theirs"
+  merged=$(head -n 1 "$work/merge") || die "could not read the merge"
+  [[ -n $merged ]] || die "git merge-tree gave no tree"
+  if [[ $merged == "$(tree_of "$mine")" ]]; then
+    git update-ref "$SYNCED" "$theirs" || die "could not record $SYNCED"
     printf 'result unchanged\n'
     return
   fi
-  ignored_in_the_way "$mine" "$merged" >"$work/ignored"
-  if [[ -s $work/ignored ]]; then
+  list_changes "$mine" "$merged"
+  check_in_the_way "$mine"
+  if [[ -s $work/blocked ]]; then
     printf 'result conflict\n'
-    sed 's/^/ignored /' "$work/ignored"
+    sed 's/^/ignored /' "$work/blocked"
     exit 3
   fi
-  backup "$mine" "before applying $theirs"
-  report_changes "$mine" "$merged"
-  write_tree "$mine" "$merged"
-  git update-ref "$SYNCED" "$theirs"
+  report_changes "$mine" "$merged" >"$work/changes"
+  write_tree "$mine" "$merged" "before applying $theirs"
+  cat "$work/changes"
+  git update-ref "$SYNCED" "$theirs" || die "could not record $SYNCED"
   printf 'result applied\n'
 }
 
@@ -213,33 +376,37 @@ cmd_mark() {
   enter "${1:-}"
   local commit
   commit=$(git rev-parse -q --verify "${2:-}^{commit}") || die "no commit ${2:-} to mark"
-  git update-ref "$SYNCED" "$commit"
+  git update-ref "$SYNCED" "$commit" || die "could not record $SYNCED"
 }
 
 cmd_undo() {
   enter "${1:-}"
-  local latest mine
-  latest=$(git for-each-ref --sort=-refname --count=1 --format='%(refname)' "$BACKUPS/")
+  local latest mine target
+  latest=$(git for-each-ref --sort=-refname --count=1 --format='%(refname)' \
+    "$BACKUPS/[0-9][0-9][0-9][0-9][0-9][0-9]-*") || die "could not list the backups"
   [[ -n $latest ]] || die "there is no backup to go back to"
-  mine=$(snapshot)
-  if [[ $(git rev-parse "$mine^{tree}") == "$(git rev-parse "$latest^{tree}")" ]]; then
+  take_snapshot
+  mine=$snap
+  target=$(tree_of "$latest")
+  if [[ $(tree_of "$mine") == "$target" ]]; then
     printf 'result unchanged\n'
     return
   fi
-  ignored_in_the_way "$mine" "$latest" >"$work/ignored"
-  if [[ -s $work/ignored ]]; then
+  list_changes "$mine" "$latest"
+  check_in_the_way "$mine"
+  if [[ -s $work/blocked ]]; then
     printf 'result conflict\n'
-    sed 's/^/ignored /' "$work/ignored"
+    sed 's/^/ignored /' "$work/blocked"
     exit 3
   fi
-  # Saved first, so that undo can itself be undone. The working tree no
-  # longer holds what the other side has, so the two agree on nothing now.
-  backup "$mine" "before going back to $latest"
-  git update-ref -d "$SYNCED"
-  report_changes "$mine" "$latest"
-  write_tree "$mine" "$latest"
-  printf 'restored %s\n' "$latest"
-  printf 'result applied\n'
+  report_changes "$mine" "$latest" >"$work/changes"
+  # The working tree no longer holds what the other side has, so the two
+  # agree on nothing now. The current state is saved first, so that undo can
+  # itself be undone.
+  write_tree "$mine" "$latest" "before going back to $latest"
+  git update-ref -d "$SYNCED" || die "could not clear $SYNCED"
+  cat "$work/changes"
+  printf 'restored %s\nresult applied\n' "$latest"
 }
 
 case ${1:-} in

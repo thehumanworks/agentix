@@ -260,14 +260,26 @@ PATH, and the host runs the same file from `nix/` (or `nix run
   Changes show as unstaged, and new files as untracked; the index and HEAD
   stay.
 - It refuses conflicts: if a file changed on both sides in ways that do not
-  merge, or a file it would add is already there but ignored by Git, nothing
-  changes on either side and the files are listed.
+  merge, or writing would remove a file that Git ignores there (one where a
+  new file or a new file's directory goes, or one inside a directory that a
+  file replaces), nothing changes on either side and the files are listed.
+- It stops before writing anything if Git cannot read the working tree (a
+  failing filter, such as LFS without git-lfs, or an unreadable file), if
+  the new files cannot be prepared, or if a file changed while it ran. It
+  writes by moving the old files aside and the new ones in, and if a move
+  fails it puts the old files back.
 - It keeps a backup: before it writes, the receiver's working tree, untracked
-  files included, is saved as a commit under `refs/agentix-sync/backup/`.
-  `agentix-sync undo` there puts back the latest one, after saving the
-  current state the same way.
-- A sandbox from an image without `agentix-sync` gets the host's copy of the
-  script for that run.
+  files included, is saved as a commit under
+  `refs/agentix-sync/backup/NNNNNN-TIME`, numbered in order. `agentix-sync
+  undo` there puts back the latest one, after saving the current state the
+  same way. Any failure after the backup was taken prints its ref and the
+  undo command. Backups accumulate, with every untracked file they held;
+  delete them all with `git for-each-ref --format='delete %(refname)'
+  refs/agentix-sync/backup/ | git update-ref --stdin`.
+- It refuses changes over 1 GiB, and warns from 100 MiB: untracked files
+  that are not ignored are sent too.
+- A sandbox from an image without `agentix-sync`, or with an older one, gets
+  the host's copy of the script for that run.
 
 ## Sandbox lifecycle
 

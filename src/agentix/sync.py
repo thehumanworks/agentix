@@ -23,10 +23,16 @@ from .errors import InvalidRequest, NotFound, OperationFailed
 from .layout import NIX_DIR, WORKDIR
 
 SCRIPT = NIX_DIR / "home-manager" / "modules" / "scripts" / "agentix-sync.sh"
-PROTOCOL = "1"
+PROTOCOL = "2"
 # What a side runs agentix-sync with, unless the sandbox lacks it: the image's
 # command, or this repository's copy.
 INSTALLED = ("agentix-sync",)
+
+# A bundle is held in memory on its way. Larger ones are refused, and from
+# the warning size on the result says so: usually untracked files that are
+# not ignored, such as build output.
+MAX_BUNDLE = 1 << 30
+WARN_BUNDLE = 100 << 20
 
 # Runs a command on one side: its arguments and input; its exit code, output
 # and errors.
@@ -145,15 +151,26 @@ async def sync(here: Side, there: Side, pull: bool = False) -> dict[str, Any]:
     code, err, bundle = await sender.call("pack", known)
     if code != 0:
         raise OperationFailed(f"agentix-sync pack failed in {sender.label}: {err}")
+    if len(bundle) > MAX_BUNDLE:
+        raise OperationFailed(
+            f"The changes in {sender.label} come to {_mib(len(bundle))}, more than "
+            f"{_mib(MAX_BUNDLE)}, so nothing was sent. Untracked files that are "
+            "not ignored are sent too: add large ones to .gitignore."
+        )
     code, err, out = await receiver.call(
         "apply", bundle, *_base(here_info, there_info, sender_info)
     )
     report = _report(out.decode(errors="replace"))
     where = f"{receiver.label} ({receiver.path})"
+    undo = _undo_hint(receiver, here, report)
     if code == 3:
         raise OperationFailed(_conflict_message(sender, receiver, report))
     if code != 0 or "result" not in report:
-        raise OperationFailed(f"agentix-sync apply failed in {where}: {err}")
+        message = f"agentix-sync apply failed in {where}: {err}"
+        if undo:
+            # It failed after saving the working tree: say how to get it back.
+            message += f"\nThe working tree from before is saved: {undo}."
+        raise OperationFailed(message)
     # Now both sides hold the sender's snapshot. If this fails, the next sync
     # merges from the sender's HEAD instead.
     with contextlib.suppress(Exception):
@@ -164,13 +181,14 @@ async def sync(here: Side, there: Side, pull: bool = False) -> dict[str, Any]:
         "result": report["result"],
         "changed": report["changed"],
     }
-    if report["backup"]:
-        ref, commit = report["backup"][0].split(" ", 1)
-        result["backup"] = ref
-        undo = ["bash", str(SCRIPT)] if receiver is here else ["agentix-sync"]
-        result["undo"] = (
-            f"{shlex.join([*undo, 'undo', receiver.path])}, run in "
-            f"{receiver.label}; the backup is commit {commit[:12]}"
+    if undo:
+        result["backup"] = report["backup"][0].split(" ", 1)[0]
+        result["undo"] = undo
+    if len(bundle) > WARN_BUNDLE:
+        result["warning"] = (
+            f"{_mib(len(bundle))} was sent. Untracked files that are not ignored "
+            "are sent each time and kept in the backups: add large ones to "
+            ".gitignore."
         )
     if report["sender-head"] != report["head"]:
         result["note"] = (
@@ -180,6 +198,31 @@ async def sync(here: Side, there: Side, pull: bool = False) -> dict[str, Any]:
             "refs/agentix-sync/incoming^ there."
         )
     return result
+
+
+def _undo_hint(receiver: Side, here: Side, report: dict[str, Any]) -> str:
+    """How to put back the working tree that apply saved, or "" if it saved
+    none."""
+    if not report["backup"]:
+        return ""
+    ref, _, commit = report["backup"][0].partition(" ")
+    if receiver is here:
+        command = shlex.join(["bash", str(SCRIPT), "undo", receiver.path])
+    elif tuple(receiver.command) == INSTALLED:
+        command = shlex.join(["agentix-sync", "undo", receiver.path])
+    else:
+        # The image lacks agentix-sync; this repository's copy can run there.
+        command = (
+            f"agentix-sync undo {shlex.quote(receiver.path)} with "
+            f"{SCRIPT.relative_to(SCRIPT.parents[4])} from this repository"
+        )
+    return (
+        f"run {command} in {receiver.label}; the backup is {ref} (commit {commit[:12]})"
+    )
+
+
+def _mib(size: int) -> str:
+    return f"{size / (1 << 20):.0f} MiB"
 
 
 def _base(here: dict[str, Any], there: dict[str, Any], sender: dict[str, Any]):

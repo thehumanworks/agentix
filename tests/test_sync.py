@@ -213,6 +213,130 @@ class SafetyTests(SyncTestCase):
         )
 
 
+class FailureTests(SyncTestCase):
+    """Whatever fails, uncommitted work survives on both sides."""
+
+    def backups(self, repo: Path) -> list[str]:
+        out = git(
+            repo, "for-each-ref", "--format=%(refname)", "refs/agentix-sync/backup"
+        )
+        return out.split()
+
+    def tree_state(self, repo: Path) -> dict[str, bytes]:
+        return {
+            str(path.relative_to(repo)): path.read_bytes()
+            for path in sorted(repo.rglob("*"))
+            if ".git" not in path.parts and path.is_file()
+        }
+
+    def test_a_working_tree_git_cannot_read_stops_before_any_write(self):
+        # A clean filter that fails, as a required LFS filter does without
+        # git-lfs: the sandbox's edit must not be taken as unchanged.
+        git(self.box, "config", "filter.broken.clean", "false")
+        git(self.box, "config", "filter.broken.required", "true")
+        (self.box / ".git" / "info" / "attributes").write_text("a.txt filter=broken\n")
+        (self.box / "a.txt").write_text("one\ntwo\nbox\n")
+        (self.host / "a.txt").write_text("host\ntwo\nthree\n")
+        (self.host / "new.txt").write_text("new\n")
+        before = self.tree_state(self.box)
+        with self.assertRaisesRegex(OperationFailed, "could not read the working tree"):
+            self.sync()
+        self.assertEqual(self.tree_state(self.box), before)
+        self.assertEqual(self.backups(self.box), [])
+
+    def test_new_files_that_cannot_be_prepared_stop_before_any_write(self):
+        git(self.box, "config", "filter.broken.smudge", "false")
+        git(self.box, "config", "filter.broken.required", "true")
+        (self.box / ".git" / "info" / "attributes").write_text(
+            "new.txt filter=broken\n"
+        )
+        (self.host / "b.txt").write_text("host\n")
+        (self.host / "new.txt").write_text("new\n")
+        before = self.tree_state(self.box)
+        with self.assertRaisesRegex(OperationFailed, "could not prepare the new files"):
+            self.sync()
+        self.assertEqual(self.tree_state(self.box), before)
+        self.assertEqual(self.backups(self.box), [])
+
+    def test_an_edit_made_while_syncing_stops_it(self):
+        # The smudge filter runs while the new files are prepared, after the
+        # snapshot: it stands in for an editor saving at that moment.
+        git(self.box, "config", "filter.late.smudge", "sh -c 'echo late >> b.txt; cat'")
+        (self.box / ".git" / "info" / "attributes").write_text("new.txt filter=late\n")
+        (self.host / "b.txt").write_text("host\n")
+        (self.host / "new.txt").write_text("new\n")
+        with self.assertRaisesRegex(OperationFailed, "changed while syncing"):
+            self.sync()
+        self.assertEqual((self.box / "b.txt").read_text(), "bee\nlate\n")
+        self.assertFalse((self.box / "new.txt").exists())
+        self.assertEqual(self.backups(self.box), [])
+
+    def test_a_write_that_fails_part_way_is_put_back(self):
+        (self.box / "a.txt").write_text("one\ntwo\nthree\nbox\n")
+        (self.box / "mine.txt").write_text("mine\n")
+        (self.host / "b.txt").unlink()
+        (self.host / "c.txt").write_text("c\n")
+        (self.host / "sub").mkdir()
+        (self.host / "sub" / "z.txt").write_text("z\n")
+        before = self.tree_state(self.box)
+        status = self.status(self.box)
+        with patch.dict(os.environ, {"AGENTIX_SYNC_FAIL_AT": "sub/z.txt"}):
+            with self.assertRaises(OperationFailed) as caught:
+                self.sync()
+        message = str(caught.exception)
+        self.assertIn("put back as it was", message)
+        # The backup and how to use it, although nothing needs undoing.
+        self.assertIn("refs/agentix-sync/backup/000001-", message)
+        self.assertIn(f"agentix-sync undo {self.box}", message)
+        self.assertEqual(self.tree_state(self.box), before)
+        self.assertEqual(self.status(self.box), status)
+        self.assertFalse((self.box / "sub").exists())
+
+    def test_ignored_files_in_a_directory_a_file_replaces_are_kept(self):
+        (self.host / "d").mkdir()
+        (self.host / "d" / "x.txt").write_text("x\n")
+        self.sync()
+        (self.box / ".git" / "info" / "exclude").write_text("*.o\n")
+        (self.box / "d" / "cache.o").write_text("precious\n")
+        shutil.rmtree(self.host / "d")
+        (self.host / "d").write_text("now a file\n")
+        with self.assertRaisesRegex(
+            OperationFailed, "file Git ignores(.|\n)*  d/cache.o"
+        ):
+            self.sync()
+        self.assertEqual((self.box / "d" / "cache.o").read_text(), "precious\n")
+        self.assertEqual((self.box / "d" / "x.txt").read_text(), "x\n")
+
+    def test_an_ignored_file_where_a_new_directory_goes_is_kept(self):
+        (self.box / ".git" / "info" / "exclude").write_text("build\n")
+        (self.box / "build").write_text("precious\n")
+        (self.host / "build").mkdir()
+        (self.host / "build" / "out").write_text("out\n")
+        with self.assertRaisesRegex(OperationFailed, "file Git ignores(.|\n)*  build"):
+            self.sync()
+        self.assertEqual((self.box / "build").read_text(), "precious\n")
+
+    def test_backups_are_numbered_in_order(self):
+        for text in ("1\n", "2\n", "3\n"):
+            (self.host / "a.txt").write_text(text)
+            self.sync()
+        names = [ref.rsplit("/", 1)[1][:6] for ref in self.backups(self.box)]
+        self.assertEqual(names, ["000001", "000002", "000003"])
+        subprocess.run(
+            [*SCRIPT, "undo", str(self.box)], check=True, capture_output=True
+        )
+        self.assertEqual((self.box / "a.txt").read_text(), "2\n")
+
+    def test_a_bundle_too_large_is_refused(self):
+        (self.host / "a.txt").write_text("changed\n")
+        with patch.object(sync, "MAX_BUNDLE", 100):
+            with self.assertRaisesRegex(OperationFailed, "nothing was sent"):
+                self.sync()
+        self.assertEqual((self.box / "a.txt").read_text(), "one\ntwo\nthree\n")
+        with patch.object(sync, "WARN_BUNDLE", 100):
+            self.assertIn(".gitignore", self.sync()["warning"])
+
+
 class MatchTests(SyncTestCase):
     def test_missing_checkout_says_how_to_make_one(self):
         shutil.rmtree(self.box)
@@ -250,6 +374,12 @@ class MatchTests(SyncTestCase):
             with self.subTest(url=url):
                 info = {"origin": url, "toplevel": "/a/dir"}
                 self.assertEqual(sync.checkout_name(info), name)
+
+    def test_an_older_command_is_replaced_by_the_repository_copy(self):
+        (self.host / "a.txt").write_text("newer\n")
+        old = ["sh", "-c", 'echo "protocol 1"', "agentix-sync"]
+        self.sync(command=old)
+        self.assertEqual((self.box / "a.txt").read_text(), "newer\n")
 
     def test_without_the_command_the_repository_copy_runs(self):
         # An image from before agentix-sync: the sandbox has no such command.
