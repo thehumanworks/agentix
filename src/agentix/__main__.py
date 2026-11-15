@@ -128,12 +128,63 @@ def _terminate_sandbox(sandbox_id: str):
     return _backend().terminate(sandbox_id)
 
 
-def _execute(sandbox_id: str, command: str):
-    """Run COMMAND in a sandbox, given its ID or name."""
-    result = _backend().execute(sandbox_id, shlex.split(command))
-    if result["exit_code"] != 0:
-        raise RuntimeError(f"Failed to execute command: {result['stderr']}")
-    return result["stdout"]
+def _execute(sandbox_id: str, command: str, resume: bool | str = False):
+    """Run COMMAND in a sandbox, given its ID or name.
+
+    With --resume, if a named sandbox reaches its timeout while COMMAND runs,
+    it is restored from its exit snapshot and COMMAND continues, as its resume
+    rule says (claude becomes claude --continue), up to 3 times.
+    --resume='OTHER' names the command that continues it instead. A command
+    with no rule is refused. See docs/resume.md.
+    """
+    if resume is False:
+        result = _backend().execute(sandbox_id, shlex.split(command))
+        if result["exit_code"] != 0:
+            raise RuntimeError(f"Failed to execute command: {result['stderr']}")
+        return result["stdout"]
+    result = _backend().execute_resumable(
+        sandbox_id, shlex.split(command), resume, _notify, _output
+    )
+    _check_runs(result)
+
+
+def _resume(name: str):
+    """Restore NAME from its latest snapshot and continue what was cut off.
+
+    Commands started with `sandbox exec --resume` that were still running when
+    the sandbox ended continue as their resume rule says, watched as by
+    `exec --resume`. With none, this is `sandbox restore NAME`.
+    """
+    result = _backend().resume(name, _notify, _output)
+    _check_runs(result)
+    return result
+
+
+def _notify(message: str) -> None:
+    print(f"agentix: {message}", file=sys.stderr, flush=True)
+
+
+def _output(run: dict[str, Any], result: dict[str, Any]) -> None:
+    sys.stdout.write(result["stdout"])
+    sys.stdout.flush()
+    sys.stderr.write(result["stderr"])
+    # 128 is what Modal reports when the sandbox ends; the watcher says more.
+    if result["exit_code"] not in (0, 128):
+        _notify(
+            f"`{shlex.join(run['command'])}` exited with code {result['exit_code']}."
+        )
+
+
+def _check_runs(result: dict[str, Any]) -> None:
+    failed = [run for run in result.get("runs", []) if run["exit_code"] != 0]
+    if failed or result.get("stopped"):
+        raise RuntimeError(
+            "Not every command finished: "
+            + ", ".join(
+                f"`{shlex.join(run['command'])}` ({run['exit_code']})"
+                for run in result.get("runs", [])
+            )
+        )
 
 
 def _list_sandboxes():
@@ -312,6 +363,7 @@ def main(argv: Sequence[str] | None = None):
                 "snapshot": _snapshot,
                 "snapshots": _snapshots,
                 "restore": _restore,
+                "resume": _resume,
                 "purge": _purge,
                 "shell": _shell_command(command),
                 "ssh": {
