@@ -64,3 +64,27 @@ jobs:
       # Formatting, statix, deadnix, the modal profile, and the OCI image check.
       - name: Build and lint x86_64-linux
         run: nix flake check --keep-going --print-build-logs
+
+  # The same build on a native ARM runner, so modal-arm and the ARM OCI image
+  # are built, not only evaluated. It runs beside the x86_64 job and does
+  # about the same work, so CI takes no longer. Under qemu-user emulation the
+  # profile builds but the OCI image does not: its fakechroot step runs proot,
+  # which needs ptrace, and qemu-user has none.
+  nix-arm:
+    name: Nix flake check (ARM)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: nix
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/nix # zizmor: ignore[self-repository]
+      # Formatting, statix, deadnix, the modal-arm profile, and the OCI image
+      # check, for aarch64-linux.
+      - name: Build and lint aarch64-linux
+        run: nix flake check --keep-going --print-build-logs
