@@ -1,0 +1,46 @@
+name: Install Nix
+description: >-
+  Install the Determinate Nix release that src/agentix/image.py pins for the
+  Modal image, optionally with Magic Nix Cache. Run it after actions/checkout.
+
+inputs:
+  cache:
+    description: >-
+      Keep the store paths that cache.nixos.org lacks in this repository's
+      GitHub Actions cache, with Magic Nix Cache.
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Read the image's Nix release
+      id: pin
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      # Either NIX_INSTALLER_VERSION = "v3.24.2" or a NIX_INSTALLER URL that
+      # ends in /nix/tag/v3.24.2.
+      run: |
+        tag=$(sed -n \
+          -e 's|^NIX_INSTALLER_VERSION = "\(v[0-9][0-9.]*\)"$|\1|p' \
+          -e 's|^NIX_INSTALLER = "https://install\.determinate\.systems/nix/tag/\(v[0-9][0-9.]*\)"$|\1|p' \
+          src/agentix/image.py | head -n 1)
+        if [ -n "$tag" ]; then
+          echo "Installing Determinate Nix $tag, as the Modal image does."
+        else
+          echo "::warning file=src/agentix/image.py::No Determinate Nix release found in src/agentix/image.py, so CI installs the newest one. Update .github/actions/nix/action.yml."
+        fi
+        echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+    - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      with:
+        source-tag: ${{ steps.pin.outputs.tag }}
+        diagnostic-endpoint: ""
+
+    # The action downloads the cache daemon at run time; without a pin that is
+    # whatever magic-nix-cache's main branch holds that day.
+    - if: inputs.cache == 'true'
+      uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+      with:
+        source-revision: cd88146e8de45fc50afaee98634fea04249c3c13 # magic-nix-cache main, 2026-10-21
+        use-flakehub: disabled
+        diagnostic-endpoint: ""

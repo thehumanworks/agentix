@@ -197,3 +197,37 @@ so purge names you no longer need. `sandbox snapshot` keeps a snapshot for
 Modal's default of 30 days; Modal does not document how long it keeps the
 snapshots it saves when a sandbox ends. These exit snapshots are an
 experimental Modal feature.
+
+## CI
+
+GitHub Actions run two workflows from `.github/workflows/`. Neither needs a
+secret, and neither contacts Modal.
+
+`ci.yml` runs on every pull request and every push to `main`. One job runs
+the Python tests, `ruff check`, and `ruff format --check`. The other runs, in
+`nix/`, `nix flake check --all-systems --no-build`, which evaluates the
+x86_64, ARM, and Mac outputs, and then `nix flake check`, which checks the
+formatting, runs statix and deadnix, and builds the `modal` profile and the
+OCI image check. On a fresh runner that fetches about 620 MiB and adds about
+3 GiB to the store.
+
+`flake-update.yml` runs every Monday and on demand. It runs `nix flake update`
+in `nix/` and the same Nix checks on the new lock. When they pass, it opens a
+pull request from `automation/flake-update` with the new `flake.lock`, or
+updates the one already open. When they fail, the run fails and its summary
+lists the inputs that moved. It does not build or publish the image: after
+merging its pull request, rebuild the image and verify it as `AGENTS.md`
+requires.
+
+The runners install the Determinate Nix release that `src/agentix/image.py`
+pins for the image. `ci.yml` keeps the store paths that
+cache.nixos.org lacks in the repository's Actions cache, with Magic Nix Cache.
+The weekly update uses no cache, because it builds inputs that nobody has
+reviewed yet.
+
+The weekly job opens its pull request with the workflow's own token. GitHub
+allows that only when "Allow GitHub Actions to create and approve pull
+requests" is on in the repository's Actions settings. CI does not start on a
+pull request opened with that token; close and reopen it to run CI. Each
+third-party action is pinned to a full commit SHA, with its version in a
+comment.
