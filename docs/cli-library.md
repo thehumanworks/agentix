@@ -1,8 +1,70 @@
 # Choosing a replacement for python-fire
 
-Status: proposal (phase 1: compare and recommend). Nothing here changes the CLI yet.
+Status: done. click was chosen, and the command line moved to it: the
+commands are plain functions in `src/agentix/__main__.py`, a table there names
+their flags, and `src/agentix/cli.py` builds the click commands, rewrites the
+old Fire spellings, and prints results as Fire did. The sections after
+"Result" are the comparison that led to the choice.
 
-## The problem
+## Result
+
+Startup against main (fire), mean ms on the same machine, `python -m agentix`:
+
+| | warm: main | warm: click | cold: main | cold: click |
+|---|---|---|---|---|
+| `--help` | 111 | 70 | 200 | 175 |
+| `sandbox up --help` (`-- --help` on main) | 115 | 73 | 191 | 198 |
+| `config show` | 118 | 77 | 199 | 181 |
+| `sandbox up --nmae=x` (refused, exit 2) | starts a sandbox | 75 | | 184 |
+
+Warm runs are 1.5x faster; cold runs (no bytecode, page cache dropped) are
+about even, since click's modules compile on the first run. Commands that
+reach Modal still spend about 400 ms (warm) importing it.
+
+`tests/test_cli_surface.py` runs 335 spellings of the old surface (every
+command, positional, and flag, each as `--a-b=V`, `--a-b V`, `--a_b`, the
+Fire short flag, a positional as `--name=V`, and booleans as `--x`,
+`--x=True`, `--x False`, `--nox`) and checks the call each command's
+function gets. The same spellings were run through the Fire command line of
+main (182aecb) and gave the same calls, all 335.
+
+Behaviour changes:
+
+- A mistyped flag or command, a value of the wrong type, a bare `--repo`,
+  or an extra positional now exits 2 with click's message before anything
+  runs. Fire ran the command first (`--nmae=dev` started a sandbox), or
+  failed later in our code with exit 1.
+- `--no-tailscale` works (Fire ignored it, then exited 2). Booleans that Fire
+  typed take `true`/`false`, `1`/`0`, `yes`/`no` in any case
+  (`--tailscale=false` was refused; `--terminate=false` and
+  `--ephemeral=false` meant true). `--snapshot` turns `no_snapshot` off.
+- `--yes`, `--keep-latest`, `--pull`, `--clean`, and `--detach` still take
+  no value but `True`/`False`; other values now exit 2 with click's message
+  ("does not take a value") instead of exit 1 with ours.
+- `--workdir=None` (and `=None` on any option the config file can set) is
+  refused with exit 2; Fire read it as "not given".
+- Flags are not filled by position: `sandbox up img 3` and
+  `sandbox restore dev im-1` exit 2. Fire set `image_name`/`secret_name` and
+  `snapshot`.
+- Values stay text: `--name=7` is "7" (Fire passed the integer 7);
+  `sandbox prune --name=123` and `sandbox sync box --path=12` now work
+  instead of being refused.
+- `--resume` is a switch. `--resume=CMD` still names the continuing command,
+  and `--resume-with CMD` is new. `sandbox exec dev --resume 'claude'` now
+  runs `claude` with `--resume`; Fire took `claude` as the resume command and
+  then lacked COMMAND. Likewise `sandbox sync --pull box` syncs `box` back.
+- `-h` is help on commands without a `-h` flag, as with Fire; on
+  `sandbox up`, `restore`, `shell`, and `ssh start` it is `--hostname`, as
+  before. Fire's own flags after `--` (`--trace`, `--interactive`,
+  `--completion`, `--verbose`) are gone.
+- Help is click's: options with their types and defaults, the config-backed
+  ones as `[default: 3600, or timeout in [sandbox.up] of the config file]`.
+  A bare group (`agentix`, `agentix sandbox`) prints its help and exits 0,
+  as before.
+- Errors raised by a command still print as Python tracebacks with exit 1;
+  `sandbox wait` still exits with the run's code.
+
+## The problem (before the move)
 
 python-fire makes the command line forgiving in ways that cost real sandboxes:
 
