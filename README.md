@@ -654,19 +654,38 @@ declares each key of `.env`, marks every value `redacted: true` (masked in
 dotenvx's output) and `encrypted: true` (never committed as plaintext), and
 sets `strict true`, so a declared key that is missing fails.
 `scripts/check_env.py` enforces it, for every tracked or untracked env file
-that Git does not ignore:
+that Git does not ignore (`.env*`, `*.env`, `.dev.vars*`, `.flaskenv`, and
+files under a `.env` or `.env.d` directory, in any letter case):
 
-- `dotenvx protect --git-file`, the check behind dotenvx's own Git filter,
-  refuses any value that is not empty, an `op://` or `bw://` reference, or
-  ciphertext, and refuses `.env.keys` files and plaintext private keys;
+- every line is blank, a comment, or `KEY=VALUE` on one line (optionally
+  after `export`, the value optionally quoted, then an optional comment).
+  Anything else fails, so a pasted secret on a line of its own, or under a
+  key with a space in it, cannot slip past a dotenv parser;
+- every value, including one in a commented-out `# KEY=...` line, is empty,
+  a single-line `op://VAULT/ITEM/FIELD` or `op://VAULT/ITEM/SECTION/FIELD`
+  reference, or dotenvx ciphertext; `DOTENV_PUBLIC_KEY*` values must be
+  public keys;
+- the `Envfile` holds only comments, `strict true`, and `env "KEY"` lines
+  whose options are `redacted: true`, `encrypted: true`, `optional`,
+  `required`, or `type`. `encrypted: false`, `redacted: false` (which would
+  print the value in public CI logs), defaults, profiles, and file blocks are
+  refused, and so is any other `Envfile` in the tree;
 - every key must be declared in the `Envfile` (`DOTENV_PUBLIC_KEY` excepted);
-- `dotenvx check` must pass, with 1Password resolution, key stores, and shell
-  values all off, so it needs no secret and a shell variable cannot stand in
-  for a missing key.
+- `dotenvx protect --git-file`, the check behind dotenvx's own Git filter,
+  and `dotenvx check` must pass. They run in a scratch copy that holds only
+  the root `Envfile` and the file, with 1Password resolution, key stores,
+  Armor, and shell values all off, so they need no secret and a shell
+  variable cannot stand in for a missing key.
 
-Templates (`*.example`, `*.sample`, `*.template`) get only the first check,
-so their values may be empty. The script prints key names and dotenvx's
-redacted preview, never a value.
+Templates (`*.example`, `*.sample`, `*.template`) skip the declaration
+check and `dotenvx check`, so they may leave out keys and values. The script prints key names,
+line numbers, and dotenvx's redacted preview, never a value. It needs
+dotenvx 2.32.4 to 2.38.x, the releases that read an `Envfile`, and says
+which `dotenvx` on `PATH` it found when that one is outside the range.
+
+With `--staged`, as the hook runs it, it checks the staged versions against
+the staged `Envfile`; when the `Envfile` itself is staged, it rechecks every
+tracked env file.
 
 Run it with `python3 scripts/check_env.py`. It runs in CI (the `Nix flake
 check` job, and the flake's `env-check` check), and as a pre-commit hook on

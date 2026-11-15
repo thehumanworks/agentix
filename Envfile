@@ -8,7 +8,9 @@
 # committed as a 1Password reference (op://VAULT/ITEM/FIELD) or as dotenvx
 # ciphertext (encrypted:...), never as plaintext. Both are the dotenvx
 # defaults; they are written out so the rule is visible. Declare each new key
-# here before adding it to .env: the check fails on an undeclared key.
+# here before adding it to .env: the check fails on an undeclared key. The
+# check refuses `encrypted: false`, `redacted: false`, defaults, profiles, and
+# file blocks here, and any other Envfile in the tree.
 strict true
 
 # Modal credentials for the agentix command line on the host.
