@@ -50,6 +50,26 @@ field, and the version both last agreed on, kept in
 Values pass through files in a private temporary directory, never through a
 command line, and nothing prints them.
 
+## With the login refresher
+
+Once the login refresher runs (`agentix auth refresher deploy`; see
+[docs/auth-refresher.md](../../../docs/auth-refresher.md)), it alone holds
+the refresh tokens and writes copies with empty refresh tokens to the
+fields. By default (`AGENT_AUTH_SYNC_MODE=auto`) such a field is only
+pulled: the file takes the field (or, per login, the strictly newer tokens
+of the two, by the access tokens' own expiry where they are JWTs), the
+public field is never written, and a copy replaces the same login with its
+refresh token. A login here that has a refresh token and is strictly newer
+than the field (a new sign-in, or a refresh that happened anyway) is written
+to this machine's own intake slot, `op://VAULT/ITEM-intake-MACHINE/auth`,
+which no machine pulls, and written again whenever the slot does not hold it
+while it is still newer than the field; the refresher takes it over
+(`AGENT_AUTH_SYNC_INTAKE=off` turns this off). MACHINE is the host name and
+a random part, kept in `$XDG_STATE_HOME/agent-auth-sync/machine-id`. The
+refresher's own items are never read. `pull` pulls every field
+that way; `sync` always syncs both ways. `status` prints the mode and which
+files are pulled only.
+
 ## Requirements
 
 A POSIX shell (macOS `/bin/sh`, bash, dash, or busybox), the 1Password CLI
@@ -119,6 +139,8 @@ From the environment, then from `~/.config/agent-auth-sync/config`:
 | `AGENT_AUTH_SYNC_OP_TIMEOUT` | `30`: seconds before a call of `op` is stopped |
 | `AGENT_AUTH_SYNC_TOKEN_FILE` | `~/.config/agent-auth-sync/op-token`: the token `save-token` writes and `uninstall` removes |
 | `AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE` | None; the Nix package sets the profile's `agentix.op.tokenFile` (in a sandbox, `/run/agentix/op-token`). Read when neither the environment nor the saved token has one; never written or removed |
+| `AGENT_AUTH_SYNC_MODE` | `auto`: pull only a field whose refresh tokens are empty (the login refresher's); `pull`: never push; `sync`: always both ways |
+| `AGENT_AUTH_SYNC_INTAKE` | `on`: hand a pulled-only file's newer login with a refresh token to this machine's intake slot; `off`: never |
 | `AGENT_AUTH_SYNC_STATE_DIR` | `~/.local/state/agent-auth-sync` |
 | `AGENT_AUTH_SYNC_CONFIG_DIR` | `~/.config/agent-auth-sync` |
 

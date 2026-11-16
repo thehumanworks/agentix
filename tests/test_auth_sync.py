@@ -4,6 +4,7 @@ The fake keeps its vault in a JSON file (see fake_op.py), so each test sets
 up both sides, runs the script, and reads what it left on each.
 """
 
+import base64
 import contextlib
 import json
 import os
@@ -398,6 +399,30 @@ class FailureTest(AuthSyncTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("op did not answer within 1 seconds", result.stderr)
 
+    def test_the_op_timer_ends_with_op_even_if_its_signal_is_lost(self):
+        # The shell can drop a TERM that reaches the timer subshell before it
+        # has reset the traps it inherited; a busy machine makes that likely
+        # for a quick op. Here every such TERM is dropped (the config file is
+        # sourced, and a function shadows the kill builtin). The timer must
+        # still end with op, not live on as a second process for the whole
+        # timeout and then call a finished op hung.
+        config = self.home / ".config" / "agent-auth-sync" / "config"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'kill() { [ "${1:-}" = "${op_killer:-}" ] && return 0; command kill "$@"; }\n'
+        )
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        started = time.monotonic()
+        result = self.run_script("sync", AGENT_AUTH_SYNC_OP_TIMEOUT="20")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("did not answer", result.stderr)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-old"
+        )
+
     def test_a_file_that_is_not_json_is_left_alone(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
         self.codex.parent.mkdir(parents=True)
@@ -460,6 +485,228 @@ class FailureTest(AuthSyncTestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("not an op://VAULT/ITEM/FIELD reference", result.stderr)
+
+
+class PullOnlyTest(AuthSyncTestCase):
+    """AGENT_AUTH_SYNC_MODE. By default (auto) a field whose refresh tokens are
+    empty, as the login refresher writes it, is only pulled."""
+
+    def stripped(self, token: str, refreshed: str) -> dict:
+        value = codex_auth(token, refreshed)
+        value["tokens"]["refresh_token"] = ""
+        return value
+
+    def edits(self) -> list:
+        return [
+            c for c in self.calls() if c[:2] in (["item", "edit"], ["item", "create"])
+        ]
+
+    def test_the_refreshers_copy_replaces_the_same_login_with_its_refresh_token(self):
+        real = codex_auth("access-old", "2026-11-01T00:00:00Z")
+        self.put_field("codex", real)
+        self.write_file(self.codex, real)
+        self.sync()  # in step, as before the refresher
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.codex)["tokens"]["refresh_token"], "")
+        self.assertEqual(self.edits(), [])
+
+    def test_a_tie_after_both_changed_goes_to_the_field(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.codex)["tokens"]["refresh_token"], "")
+        self.assertEqual(self.edits(), [])
+
+    def items(self) -> dict:
+        return json.loads(self.store.read_text()) if self.store.exists() else {}
+
+    def slots(self, item: str) -> dict:
+        """This machine's intake slots for an item, as {title: login}."""
+        return {
+            title.removeprefix("agentix/"): json.loads(self.field(title[8:]))
+            for title in self.items()
+            if title.startswith(f"agentix/{item}-intake-")
+        }
+
+    def machine(self) -> str:
+        return (
+            (self.home / ".local/state/agent-auth-sync/machine-id").read_text().strip()
+        )
+
+    def test_a_newer_local_login_is_handed_to_the_refresher_not_pushed(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.sync()
+        newer = codex_auth("access-new", "2026-11-02T00:00:00Z")
+        self.write_file(self.codex, newer)
+
+        result = self.sync()
+        self.sync()
+
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-new"
+        )
+        self.assertEqual(
+            json.loads(self.field("codex"))["tokens"]["access_token"], "access-old"
+        )
+        self.assertEqual(self.slots("codex"), {f"codex-intake-{self.machine()}": newer})
+        self.assertEqual(len(self.edits()), 1)  # handed in once
+        self.assertIn("handed a newer login to the refresher", result.stderr)
+        # The refresher's store item is never read, let alone written.
+        self.assertFalse(
+            [c for c in self.calls() if any("codex-refresher" in a for a in c)]
+        )
+
+    def test_a_hand_in_is_repeated_until_the_field_has_it(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.sync()
+        newer = codex_auth("access-new", "2026-11-02T00:00:00Z")
+        self.write_file(self.codex, newer)
+        self.sync()
+        slot = f"codex-intake-{self.machine()}"
+        # Something else (a stale write, a cleanup) changed the slot.
+        self.put_field(slot, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(json.loads(self.field(slot)), newer)
+        # Once the refresher has published it, nothing is handed in again.
+        self.put_field(slot, "")
+        self.put_field("codex", self.stripped("access-new", "2026-11-02T00:00:00Z"))
+        self.sync()
+        self.assertEqual(self.field(slot), "")
+
+    def test_the_machine_id_stays_the_same(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+        self.sync()
+        first = self.machine()
+        self.write_file(self.codex, codex_auth("access-newer", "2026-11-03T00:00:00Z"))
+        self.sync()
+
+        self.assertEqual(self.machine(), first)
+        self.assertRegex(first, r"^[a-z0-9-]+-[0-9a-f]{8}$")
+        self.assertEqual(list(self.slots("codex")), [f"codex-intake-{first}"])
+
+    def test_the_same_login_with_its_refresh_token_is_not_handed_in(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(self.slots("codex"), {})
+
+    def test_order_comes_from_the_access_tokens_expiry(self):
+        def login(name: str, exp: int, refreshed: str) -> dict:
+            claims = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode())
+            token = f"e30.{claims.decode().rstrip('=')}.c2ln"
+            return {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": token, "refresh_token": "", "id": name},
+                "last_refresh": refreshed,
+            }
+
+        remote = login("remote", 2000, "2026-11-01T00:00:00Z")
+        self.put_field("codex", remote)
+        # A clock ahead wrote a later last_refresh on an older token.
+        local = login("local", 1000, "2026-12-01T00:00:00Z")
+        local["tokens"]["refresh_token"] = "refresh-old"
+        self.write_file(self.codex, local)
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.codex)["tokens"]["id"], "remote")
+        self.assertEqual(self.slots("codex"), {})
+
+    def test_pi_entries_are_pulled_per_provider_and_never_pushed(self):
+        remote = {
+            "anthropic": {
+                "type": "oauth",
+                "access": "pi-a",
+                "refresh": "",
+                "expires": 10,
+            },
+            "openai": {"type": "oauth", "access": "pi-b", "refresh": "", "expires": 10},
+        }
+        self.put_field("pi", remote)
+        local = {
+            "anthropic": {
+                "type": "oauth",
+                "access": "pi-a",
+                "refresh": "refresh-old",
+                "expires": 10,
+            },
+            "openai": {
+                "type": "oauth",
+                "access": "pi-b",
+                "refresh": "refresh-new",
+                "expires": 20,
+            },
+            "zai": {"type": "api_key", "key": "access-new"},
+        }
+        self.write_file(self.pi, local)
+
+        self.sync()
+
+        merged = self.read_file(self.pi)
+        self.assertEqual(merged["anthropic"]["refresh"], "")  # a tie: the field's
+        self.assertEqual(merged["openai"]["refresh"], "refresh-new")  # newer here
+        self.assertEqual(merged["zai"], local["zai"])
+        self.assertEqual(json.loads(self.field("pi")), remote)
+        # The newer openai login went to this machine's slot.
+        self.assertEqual(self.slots("pi"), {f"pi-intake-{self.machine()}": local})
+
+    def test_pull_mode_never_creates_the_public_field(self):
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="pull")
+
+        self.assertNotIn("agentix/codex", self.items())
+        self.assertEqual(len(self.slots("codex")), 1)
+
+    def test_intake_off_hands_nothing_in(self):
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="pull", AGENT_AUTH_SYNC_INTAKE="off")
+
+        self.assertFalse(self.store.exists())
+
+    def test_pull_mode_pulls_a_field_with_refresh_tokens_too(self):
+        self.put_field("codex", codex_auth("access-new", "2026-11-02T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="pull")
+
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-new"
+        )
+        self.assertEqual(self.edits(), [])
+
+    def test_sync_mode_pushes_even_over_the_refreshers_copy(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.sync(AGENT_AUTH_SYNC_MODE="sync")
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="sync")
+
+        self.assertEqual(
+            json.loads(self.field("codex"))["tokens"]["access_token"], "access-new"
+        )
+
+    def test_status_shows_the_mode_and_pull_only(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+
+        result = self.run_script("status")
+
+        self.assertIn("mode: auto", result.stdout)
+        self.assertIn("pull only", result.stdout)
+        self.assertNotIn("pushes it", result.stdout)
 
 
 class CommandsTest(AuthSyncTestCase):
@@ -546,6 +793,20 @@ class CommandsTest(AuthSyncTestCase):
         self.stop(self.wait_for_watcher())
 
     def test_two_ensures_at_once_leave_one_watcher(self):
+        self.two_ensures_leave_one_watcher()
+
+    def test_one_watcher_even_when_the_op_timers_signal_is_lost(self):
+        # As on a busy CI runner: the TERM that ends the op timer is dropped
+        # (see FailureTest), and the timer, a subshell with the watcher's
+        # command line, must not stay on beside it.
+        config = self.home / ".config" / "agent-auth-sync" / "config"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'kill() { [ "${1:-}" = "${op_killer:-}" ] && return 0; command kill "$@"; }\n'
+        )
+        self.two_ensures_leave_one_watcher()
+
+    def two_ensures_leave_one_watcher(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
         env = {**self.env, "OP_SERVICE_ACCOUNT_TOKEN": "ops_fake"}
         command = [os.environ.get("AUTH_SYNC_TEST_SHELL", "sh"), str(SCRIPT), "ensure"]
