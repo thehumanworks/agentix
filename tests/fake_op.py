@@ -79,6 +79,17 @@ def main(args: list[str]) -> None:
                 f"could not read secret '{reference}': item '{vault}/{title}' "
                 f"does not have a field '{field}'"
             )
+        case ["item", "list", *rest]:
+            vault = flag(rest, "--vault")
+            print(
+                json.dumps(
+                    [
+                        {"id": item.get("id", key), "title": key.split("/", 1)[1]}
+                        for key, item in items.items()
+                        if key.split("/", 1)[0] == vault
+                    ]
+                )
+            )
         case ["item", "get", title, *rest]:
             vault = flag(rest, "--vault")
             item = items.get(f"{vault}/{title}")

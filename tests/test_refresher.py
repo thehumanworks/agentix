@@ -119,7 +119,13 @@ class RefresherTestCase(unittest.TestCase):
         op = self.tmp / "op"
         op.write_text(f'#!/bin/sh\nexec {sys.executable} {FAKE_OP} "$@"\n')
         op.chmod(0o755)
-        environment = patch.dict(os.environ, {"FAKE_OP_STORE": str(self.vault)})
+        environment = patch.dict(
+            os.environ,
+            {
+                "FAKE_OP_STORE": str(self.vault),
+                "AGENT_AUTH_SYNC_STATE_DIR": str(self.tmp / "state"),
+            },
+        )
         environment.start()
         self.addCleanup(environment.stop)
         for name in refresher.SETTINGS:
@@ -186,8 +192,8 @@ class RefresherTestCase(unittest.TestCase):
         return [json.loads(line) for line in path.read_text().splitlines()]
 
     def written(self) -> list[str]:
-        """The fields written, as ITEM/FIELD, in order, without owner fields."""
-        return [ref for ref in self.writes if not ref.endswith("/owner")]
+        """The fields written, as ITEM/FIELD, in order, without the meta items."""
+        return [ref for ref in self.writes if "-meta/" not in ref]
 
     def set_field(self, title: str, label: str, text: str) -> None:
         items = json.loads(self.vault.read_text()) if self.vault.exists() else {}
@@ -303,7 +309,7 @@ class CodexTest(RefresherTestCase):
 
         self.assertEqual(self.server.requests, [])
         self.assertEqual(self.written(), [])  # nothing changed, nothing written
-        self.assertIn("codex-refresher/owner", self.writes)
+        self.assertIn("codex-refresher-meta/owner", self.writes)
 
     def test_an_old_last_refresh_is_refreshed_even_with_time_left(self):
         login = codex_login(
@@ -370,7 +376,7 @@ class CodexTest(RefresherTestCase):
 
         self.assertEqual(self.get("codex"), refresher.codex_strip(newer))
 
-    def test_a_new_token_that_cannot_be_stored_goes_to_the_intake_field(self):
+    def test_a_new_token_that_cannot_be_stored_goes_to_the_rescue_slot(self):
         old = codex_login(
             "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
         )
@@ -393,10 +399,10 @@ class CodexTest(RefresherTestCase):
         summary = self.run_once(store=flaky)
 
         self.assertFalse(summary["ok"])
-        self.assertIn("codex-refresher/intake", summary["codex"]["error"])
+        self.assertIn("codex-intake-refresher/auth", summary["codex"]["error"])
         self.assertEqual(flaky.writes, 4)  # the check and three tries
         self.assertEqual(
-            self.get_field("codex-refresher", "intake")["tokens"]["refresh_token"],
+            self.get("codex-intake-refresher")["tokens"]["refresh_token"],
             "refresh-a2",
         )
         self.assertEqual(self.get("codex")["tokens"]["refresh_token"], "")
@@ -437,7 +443,7 @@ class CodexTest(RefresherTestCase):
             self.get("codex-refresher")["tokens"]["refresh_token"], "refresh-a2"
         )
 
-    def test_with_store_and_intake_unwritable_the_public_field_gets_it(self):
+    def test_with_store_and_rescue_slot_unwritable_the_public_field_gets_it(self):
         old = codex_login(
             "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
         )
@@ -449,7 +455,9 @@ class CodexTest(RefresherTestCase):
             writes = 0
 
             def write(inner, ref, value):
-                if "codex-refresher" in ref and not ref.endswith("/owner"):
+                if ref.endswith(
+                    ("codex-refresher/auth", "codex-intake-refresher/auth")
+                ):
                     inner.writes += 1
                     if inner.writes > 1:
                         raise refresher.StoreError(f"{ref}: writing 1Password failed")
@@ -479,7 +487,7 @@ class CodexTest(RefresherTestCase):
             checked = False
 
             def write(inner, ref, value):
-                if ref.endswith("/owner"):
+                if "-meta/" in ref:
                     return super().write(ref, value)
                 if not inner.checked:
                     inner.checked = True
@@ -548,12 +556,12 @@ class CodexTest(RefresherTestCase):
         self.assertLess(refresher.RUN_BUDGET + 60, refresher.FUNCTION_TIMEOUT)
         self.assertLess(run.reserve, refresher.RUN_BUDGET / 2)
 
-    def test_a_login_handed_in_through_the_intake_is_taken(self):
+    def test_a_login_handed_in_through_a_machines_slot_is_taken(self):
         old = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
         newer = codex_login("b1", self.secret("refresh-b1"), NOW, NOW + 10 * DAY)
         self.put("codex-refresher", old)
         self.put("codex", refresher.codex_strip(old))
-        self.set_field("codex-refresher", "intake", json.dumps(newer))
+        self.put("codex-intake-mac-1", newer)
 
         summary = self.run_once()
 
@@ -561,8 +569,91 @@ class CodexTest(RefresherTestCase):
         self.assertEqual(self.get("codex-refresher"), newer)
         self.assertEqual(self.get("codex"), refresher.codex_strip(newer))
         # An older one handed in later is ignored.
-        self.set_field("codex-refresher", "intake", json.dumps(old))
+        self.put("codex-intake-mac-1", old)
         self.assertFalse(self.run_once(now=NOW + 60)["codex"]["adopted"])
+
+    def test_the_newest_of_several_machines_slots_is_taken(self):
+        old = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
+        mid = codex_login("b1", self.secret("refresh-b1"), NOW, NOW + 10 * DAY)
+        new = codex_login("c1", self.secret("refresh-c1"), NOW + 60, NOW + 11 * DAY)
+        self.put("codex-refresher", old)
+        self.put("codex", refresher.codex_strip(old))
+        self.put("codex-intake-mac-1", new)
+        self.put("codex-intake-sandbox-2", mid)
+        self.put("codex-other", new)  # not a slot: its title does not match
+
+        summary = self.run_once()
+
+        self.assertTrue(summary["codex"]["adopted"])
+        self.assertEqual(summary["codex"]["slots"], 2)
+        self.assertEqual(self.get("codex-refresher"), new)
+        self.assertIn(
+            "codex: took the login in op://agentix/codex-intake-mac-1/auth into "
+            "op://agentix/codex-refresher/auth",
+            self.lines,
+        )
+
+    def test_the_store_item_holds_only_the_login(self):
+        old = codex_login(
+            "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
+        )
+        self.put("codex-refresher", old)
+        self.put("codex-intake-mac-1", old)
+        self.answer_codex("a2", "refresh-a2")
+
+        self.assertTrue(self.run_once()["codex"]["refreshed"])
+
+        items = json.loads(self.vault.read_text())
+        labels = [f["label"] for f in items["agentix/codex-refresher"]["fields"]]
+        self.assertEqual(labels, ["notesPlain", "auth"])
+        meta = [f["label"] for f in items["agentix/codex-refresher-meta"]["fields"]]
+        self.assertEqual(meta, ["owner"])
+
+    def test_a_hand_in_during_a_run_cannot_write_back_an_old_store_login(self):
+        # The hand-in writes its own item, never the store's: whatever it
+        # read, it cannot put an older login back over a new one.
+        old = codex_login(
+            "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
+        )
+        self.put("codex-refresher", old)
+        self.answer_codex("a2", "refresh-a2")
+        store_ref = refresher.setting("AGENTIX_REFRESHER_CODEX_STORE")
+        test = self
+
+        class Racing(refresher.OpStore):
+            def write(inner, ref, value):
+                super().write(ref, value)
+                if ref == store_ref:
+                    test.put("codex-intake-mac-1", old)  # a slow machine
+
+        self.run_once(store=Racing(op=self.store.op))
+        self.assertEqual(
+            self.get("codex-refresher")["tokens"]["refresh_token"], "refresh-a2"
+        )
+        self.assertFalse(self.run_once(now=NOW + 60)["codex"]["adopted"])
+        self.assertEqual(
+            self.get("codex-refresher")["tokens"]["refresh_token"], "refresh-a2"
+        )
+
+    def test_too_little_time_left_publishes_nothing(self):
+        login = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
+        self.put("codex-refresher", login)
+        clock = [0.0]
+
+        class Slow(refresher.OpStore):
+            def read(inner, ref):
+                clock[0] += 100  # four reads (owner, store, public, taken)
+                return super().read(ref)
+
+        slow = Slow(op=self.store.op, timeout=10, read_timeout=10)
+        summary = self.run_once(store=slow, clock=lambda: clock[0], budget=420)
+
+        self.assertFalse(summary["codex"]["published"])
+        self.assertIsNone(self.get("codex"))
+        self.assertIn(
+            "codex: too little time left in this run to publish; the next run does",
+            self.lines,
+        )
 
     def test_order_comes_from_the_token_not_last_refresh(self):
         current = codex_login("a1", self.secret("refresh-a1"), NOW, NOW + 10 * DAY)
@@ -579,7 +670,7 @@ class CodexTest(RefresherTestCase):
     def test_a_store_owned_by_another_app_is_refused(self):
         login = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
         self.put("codex-refresher", login)
-        self.set_field("codex-refresher", "owner", "other-refresher")
+        self.set_field("codex-refresher-meta", "owner", "other-refresher")
 
         summary = self.run_once()
 
@@ -807,7 +898,7 @@ class PiTest(PiCase):
 
 
 class PiSafetyTest(PiCase):
-    def test_a_pi_login_that_cannot_be_stored_goes_to_the_intake_field(self):
+    def test_a_pi_login_that_cannot_be_stored_goes_to_the_rescue_slot(self):
         logins = self.logins(NOW + 600)
         self.put("pi-refresher", logins)
         self.answer_all()
@@ -825,14 +916,71 @@ class PiSafetyTest(PiCase):
 
         summary = self.run_once(store=Flaky(op=self.store.op))
 
-        self.assertIn("pi-refresher/intake", summary["pi"]["error"])
-        handed = self.get_field("pi-refresher", "intake")
+        self.assertIn("pi-intake-refresher/auth", summary["pi"]["error"])
+        handed = self.get("pi-intake-refresher")
         self.assertEqual(handed["anthropic"]["refresh"], "pi-ant-refresh-2")
         # The next run takes it back.
         self.run_once(now=NOW + 60)
         self.assertEqual(
             self.get("pi-refresher")["anthropic"]["refresh"], "pi-ant-refresh-2"
         )
+
+    def test_pi_takes_each_provider_from_the_slot_that_has_it_newest(self):
+        logins = self.logins(NOW + DAY)
+        self.put("pi-refresher", logins)
+        anthropic = {
+            **logins["anthropic"],
+            "refresh": self.secret("pi-ant-refresh-8"),
+            "expires": int((NOW + 2 * DAY) * 1000),
+        }
+        openai = {
+            **logins["openai"],
+            "refresh": self.secret("pi-openai-refresh-8"),
+            "expires": int((NOW + 2 * DAY) * 1000),
+        }
+        older_anthropic = {
+            **anthropic,
+            "refresh": self.secret("pi-ant-refresh-7"),
+            "expires": int((NOW + 1.5 * DAY) * 1000),
+        }
+        self.put(
+            "pi-intake-mac-1", {"anthropic": anthropic, "openai": logins["openai"]}
+        )
+        self.put(
+            "pi-intake-sandbox-2", {"anthropic": older_anthropic, "openai": openai}
+        )
+
+        summary = self.run_once()
+
+        self.assertEqual(summary["pi"]["slots"], 2)
+        real = self.get("pi-refresher")
+        self.assertEqual(real["anthropic"], anthropic)
+        self.assertEqual(real["openai"], openai)
+        self.assertEqual(real["openai-codex"], logins["openai-codex"])
+        items = json.loads(self.vault.read_text())
+        labels = [f["label"] for f in items["agentix/pi-refresher"]["fields"]]
+        self.assertEqual(labels, ["notesPlain", "auth"])
+
+    def test_a_forced_pi_slot_is_taken_once(self):
+        logins = self.logins(NOW + DAY)
+        self.put("pi-refresher", logins)
+        older = {
+            **logins["anthropic"],
+            "refresh": self.secret("pi-ant-refresh-0"),
+            "expires": int((NOW + 0.9 * DAY) * 1000),
+        }
+        self.put(
+            "pi-intake-mac-seed",
+            {refresher.FORCE_KEY: True, "login": {"anthropic": older}, "at": NOW},
+        )
+
+        self.run_once()
+        self.assertEqual(self.get("pi-refresher")["anthropic"], older)
+        self.assertEqual(len(self.get_field("pi-refresher-meta", "taken")), 1)
+        # Back to the newer one; the forced slot is not taken again.
+        self.put("pi-refresher", logins)
+        self.run_once(now=NOW + 60)
+        self.assertEqual(self.get("pi-refresher")["anthropic"], logins["anthropic"])
 
     def test_the_summary_names_providers_left_out_of_the_public_field(self):
         self.put(
@@ -857,11 +1005,7 @@ class PiSafetyTest(PiCase):
             "refresh": self.secret("pi-ant-refresh-7"),
             "expires": int((NOW + 2 * DAY) * 1000),
         }
-        self.set_field(
-            "pi-refresher",
-            "intake",
-            json.dumps({"anthropic": newer, "openai": logins["openai"]}),
-        )
+        self.put("pi-intake-mac-1", {"anthropic": newer, "openai": logins["openai"]})
 
         summary = self.run_once()
 
@@ -1000,14 +1144,18 @@ class SeedTest(RefresherTestCase):
             "clientId": "c",
         }
         self.put("pi-refresher", {"openai": openai})
+        self.put("pi", {"openai": refresher.pi_strip(openai)})
 
-        done = refresher.seed(self.store, str(codex_file), str(pi_file))
+        done = refresher.seed(self.store, str(codex_file), str(pi_file), machine="mac")
 
         self.assertEqual(done["pi"]["providers"], ["anthropic"])
-        # Only the intake fields are written; the run takes them, serialized.
+        # Only this machine's seed slots are written; the run takes them.
         self.assertEqual(
-            self.written(), ["codex-refresher/intake", "pi-refresher/intake"]
+            self.written(), ["codex-intake-mac-seed/auth", "pi-intake-mac-seed/auth"]
         )
+        self.assertNotIn(
+            ["read", "op://agentix/pi-refresher/auth"], self.calls()
+        )  # seeding never reads the store
         self.run_once()
         self.assertEqual(self.get("codex-refresher"), login)
         self.assertEqual(set(self.get("pi-refresher")), {"openai", "anthropic"})
@@ -1016,18 +1164,19 @@ class SeedTest(RefresherTestCase):
         old = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
         newer = codex_login("a2", self.secret("refresh-a2"), NOW, NOW + 10 * DAY)
         self.put("codex-refresher", newer)
+        self.put("codex", refresher.codex_strip(newer))
         codex_file = self.tmp / "codex.json"
         codex_file.write_text(json.dumps(old))
 
         with self.assertRaisesRegex(refresher.StoreError, "spent refresh token"):
-            refresher.seed(self.store, str(codex_file))
+            refresher.seed(self.store, str(codex_file), machine="mac")
         self.assertEqual(self.written(), [])
 
         # --force hands it in, and the next run takes it although it is older.
-        refresher.seed(self.store, str(codex_file), force=True)
+        refresher.seed(self.store, str(codex_file), force=True, machine="mac")
         self.assertTrue(self.run_once()["codex"]["adopted"])
         self.assertEqual(self.get("codex-refresher"), old)
-        # Taken once: the intake no longer forces it.
+        # Taken once: the slot no longer forces it.
         self.put("codex-refresher", newer)
         self.assertFalse(self.run_once(now=NOW + 60)["codex"]["adopted"])
         self.assertEqual(self.get("codex-refresher"), newer)
@@ -1040,7 +1189,7 @@ class SeedTest(RefresherTestCase):
             "expires": 5,
         }
         newer = {**entry, "refresh": self.secret("pi-r2"), "expires": 9}
-        self.put("pi-refresher", {"anthropic": newer})
+        self.put("pi", {"anthropic": refresher.pi_strip(newer)})
         pi_file = self.tmp / "pi.json"
         pi_file.write_text(json.dumps({"anthropic": entry}))
 
@@ -1049,11 +1198,11 @@ class SeedTest(RefresherTestCase):
 
     def test_seeding_the_same_login_again_changes_nothing(self):
         login = codex_login("a1", self.secret("refresh-a1"), NOW, NOW + DAY)
-        self.put("codex-refresher", login)
+        self.put("codex", refresher.codex_strip(login))
         codex_file = self.tmp / "codex.json"
         codex_file.write_text(json.dumps(login))
 
-        done = refresher.seed(self.store, str(codex_file))
+        done = refresher.seed(self.store, str(codex_file), machine="mac")
 
         self.assertEqual(done["codex"], "already the refresher's login")
         self.assertEqual(self.written(), [])

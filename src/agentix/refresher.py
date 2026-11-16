@@ -23,6 +23,7 @@ never its command line.
 
 import base64
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -47,22 +48,27 @@ SCHEDULE = "17,47 * * * *"
 STATUS_DICT = f"{APP_NAME}-status"
 
 # The fields, as op:// references. STORE holds the real logins and is read
-# only by this app; PUBLIC is what agent-auth-sync syncs on every machine.
-# INTAKE is where a machine hands in a newer login with a refresh token (a
-# new sign-in, or a refresh that happened anyway); only this app reads it.
-# agent-auth-sync derives it from the public field: op://VAULT/ITEM-refresher/intake.
+# and written only by this app, and its item holds nothing else; PUBLIC is
+# what agent-auth-sync syncs on every machine.
 SETTINGS = {
     "AGENTIX_REFRESHER_CODEX_STORE": "op://agentix/codex-refresher/auth",
     "AGENTIX_REFRESHER_PI_STORE": "op://agentix/pi-refresher/auth",
     "AGENTIX_REFRESHER_CODEX_PUBLIC": "op://agentix/codex/auth",
     "AGENTIX_REFRESHER_PI_PUBLIC": "op://agentix/pi/auth",
-    "AGENTIX_REFRESHER_CODEX_INTAKE": "op://agentix/codex-refresher/intake",
-    "AGENTIX_REFRESHER_PI_INTAKE": "op://agentix/pi-refresher/intake",
 }
-# The field, next to each store field, that names the app that owns it: a
-# second app with another name refuses to refresh the same logins.
-OWNER_FIELD = "owner"
-# What `seed --force` writes to an intake field: taken even when older.
+# Machines hand in a newer login with a refresh token (a new sign-in, or a
+# refresh that happened anyway) through intake slots: one item per machine,
+# op://VAULT/ITEM-intake-MACHINE/auth next to the public op://VAULT/ITEM/...,
+# which only that machine writes and only this app reads. A run scans them
+# all. This app's own slot, MACHINE = "refresher", is where a rotated login
+# goes when the store cannot be written.
+INTAKE_INFIX = "-intake-"
+RESCUE_SLOT = "refresher"
+# The item next to each store item, ITEM-meta, with the fields `owner` (the
+# app that owns the store: another app refuses it) and `taken` (the forced
+# hand-ins already taken). Only this app writes it.
+META_SUFFIX = "-meta"
+# What `seed --force` writes to a slot: taken once, even when older.
 FORCE_KEY = "agentix_seed_force"
 
 
@@ -196,6 +202,31 @@ class OpStore:
         if self._missing(result):
             return None
         raise StoreError(f"{ref}: reading 1Password failed: {self._complaint(result)}")
+
+    def titles(self, vault: str) -> list[str]:
+        """The titles of the items in a vault."""
+        result = self._run(
+            "item",
+            "list",
+            "--vault",
+            vault,
+            "--format",
+            "json",
+            timeout=self.read_timeout,
+        )
+        if result.returncode != 0:
+            raise StoreError(
+                f"listing the items of {vault} failed: {self._complaint(result)}"
+            )
+        try:
+            items = json.loads(result.stdout or "[]")
+            return [
+                item["title"] for item in items if isinstance(item.get("title"), str)
+            ]
+        except ValueError, TypeError, AttributeError, KeyError:
+            raise StoreError(
+                f"listing the items of {vault}: op answered no list"
+            ) from None
 
     def write(self, ref: str, value: str) -> None:
         """Puts `value` in the field, creating the field or the item. Every
@@ -659,18 +690,34 @@ def _line(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
-def owner_ref(store_ref: str) -> str:
-    """The owner field next to a store field."""
+def meta_ref(store_ref: str, field: str) -> str:
+    """A field of the meta item next to a store item."""
     vault, item, _ = OpStore.parse(store_ref)
-    return f"op://{vault}/{item}/{OWNER_FIELD}"
+    return f"op://{vault}/{item}{META_SUFFIX}/{field}"
 
 
-def _intake_value(raw: str | None, what: str) -> tuple[Any, bool]:
-    """An intake field's login and whether `seed --force` wrote it."""
-    value = _parse(raw, what, lambda v: isinstance(v, dict))
-    if isinstance(value, dict) and value.get(FORCE_KEY) is True:
-        return value.get("login"), True
-    return value, False
+def intake_ref(public_ref: str, machine: str) -> str:
+    """A machine's intake slot for a public field."""
+    vault, item, _ = OpStore.parse(public_ref)
+    return f"op://{vault}/{item}{INTAKE_INFIX}{machine}/auth"
+
+
+def _fingerprint(value: Any) -> str:
+    return hashlib.sha256(_canon(value).encode()).hexdigest()
+
+
+class Slot:
+    """One intake slot as read: its login, whether `seed --force` wrote it,
+    and the fingerprint by which a forced one is taken only once."""
+
+    def __init__(self, ref: str, raw: str):
+        self.ref = ref
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+        self.forced = value.get(FORCE_KEY) is True
+        self.login = value.get("login") if self.forced else value
+        self.fingerprint = _fingerprint(value)
 
 
 class Run:
@@ -725,7 +772,7 @@ class Run:
 
     def _own(self, store_ref: str) -> None:
         """Claims the store for this app, or refuses one another app owns."""
-        ref = owner_ref(store_ref)
+        ref = meta_ref(store_ref, "owner")
         owner = self.store.read(ref)
         if owner is None or not owner.strip():
             self.store.write(ref, self.app_name)
@@ -734,6 +781,43 @@ class Run:
                 f"{store_ref} belongs to the refresher app {owner.strip()!r}, not "
                 f"{self.app_name!r}: two apps would spend the same refresh tokens"
             )
+
+    def _slots(self, public_ref: str, check: Callable[[Any], bool]) -> list[Slot]:
+        """Every machine's intake slot for a public field, but this app's."""
+        vault, item, _ = OpStore.parse(public_ref)
+        prefix = f"{item}{INTAKE_INFIX}"
+        slots = []
+        for title in sorted(self.store.titles(vault)):
+            if not title.startswith(prefix):
+                continue
+            ref = f"op://{vault}/{title}/auth"
+            raw = self.store.read(ref)
+            if raw is None or not raw.strip():
+                continue
+            try:
+                slot = Slot(ref, raw)
+            except ValueError:
+                self.log(f"{ref} is not JSON; ignored")
+                continue
+            if not check(slot.login):
+                self.log(f"{ref} is not a login; ignored")
+                continue
+            slots.append(slot)
+        return slots
+
+    def _taken(self, store_ref: str) -> list[str]:
+        raw = self.store.read(meta_ref(store_ref, "taken"))
+        try:
+            taken = json.loads(raw) if raw else []
+        except ValueError:
+            taken = []
+        return (
+            [t for t in taken if isinstance(t, str)] if isinstance(taken, list) else []
+        )
+
+    def _mark_taken(self, store_ref: str, taken: list[str], new: list[str]) -> None:
+        if new:
+            self.store.write(meta_ref(store_ref, "taken"), _line((taken + new)[-100:]))
 
     def _persist(self, ref: str, value: Any, rescues: list[tuple[str, Any]]) -> None:
         """Writes a login with a new refresh token to the store, trying a few
@@ -778,6 +862,11 @@ class Run:
         the field changed since it was read as `before`."""
         if before is not None and _canon(before) == _canon(after):
             return False
+        if self.left() < self.store.read_timeout + self.write_cost:
+            self.log(
+                f"{what}: too little time left in this run to publish; the next run does"
+            )
+            return False
         now_raw = self.store.read(ref)
         current = None
         if now_raw is not None and now_raw.strip():
@@ -796,7 +885,7 @@ class Run:
         out: dict[str, Any] = {"refreshed": False, "published": False, "adopted": False}
         store_ref = setting("AGENTIX_REFRESHER_CODEX_STORE")
         public_ref = setting("AGENTIX_REFRESHER_CODEX_PUBLIC")
-        intake_ref = setting("AGENTIX_REFRESHER_CODEX_INTAKE")
+        rescue_ref = intake_ref(public_ref, RESCUE_SLOT)
         self._own(store_ref)
 
         def is_login(value: Any) -> bool:
@@ -804,25 +893,30 @@ class Run:
 
         login = _parse(self.store.read(store_ref), store_ref, is_login)
         public = _parse(self.store.read(public_ref), public_ref, is_login)
-        intake, forced = _intake_value(self.store.read(intake_ref), intake_ref)
-        if intake is not None and not is_login(intake):
-            self.log(f"codex: {intake_ref} is not a login; ignored")
-            intake, forced = None, False
+        slots = self._slots(public_ref, is_login)
+        taken = self._taken(store_ref)
+        out["slots"] = len(slots)
 
         # A real login handed in, or still pushed to the public field by an
         # older agent-auth-sync, that is newer than the store's comes from a
         # machine that signed in again or refreshed: the store's refresh
-        # token is spent or superseded, so the store takes it.
-        candidates = [
-            (source, value)
-            for source, value in ((intake_ref, intake), (public_ref, public))
-            if codex_real(value)
+        # token is spent or superseded, so the store takes the newest. A
+        # forced hand-in (`seed --force`) is taken once, whatever its age.
+        forced = [
+            slot
+            for slot in slots
+            if slot.forced and codex_real(slot.login) and slot.fingerprint not in taken
         ]
         best = None
-        if forced and codex_real(intake):
-            best = (intake_ref, intake)
+        if forced:
+            chosen = max(forced, key=lambda slot: codex_age(slot.login))
+            best = (chosen.ref, chosen.login)
         else:
+            candidates = [(slot.ref, slot.login) for slot in slots if not slot.forced]
+            candidates.append((public_ref, public))
             for source, value in candidates:
+                if not codex_real(value):
+                    continue
                 if (login is None or codex_age(value) > codex_age(login)) and (
                     best is None or codex_age(value) > codex_age(best[1])
                 ):
@@ -832,8 +926,7 @@ class Run:
             login = best[1]
             out["adopted"] = True
             self.log(f"codex: took the login in {best[0]} into {store_ref}")
-        if forced:
-            self.store.write(intake_ref, _line(intake))  # taken; no longer forced
+        self._mark_taken(store_ref, taken, [slot.fingerprint for slot in forced])
         if login is None:
             raise StoreError(
                 f"no Codex login in {store_ref} or {public_ref}: sign in on a machine "
@@ -849,7 +942,7 @@ class Run:
             # Prove the store can be written before the refresh token is spent.
             self.store.write(store_ref, _line(login))
             new = codex_refresh(login, self.now, self.urls.get("codex", ""))
-            self._persist(store_ref, new, [(intake_ref, new), (public_ref, new)])
+            self._persist(store_ref, new, [(rescue_ref, new), (public_ref, new)])
             login = new
             out["refreshed"] = True
             self.log("codex: refreshed")
@@ -878,7 +971,7 @@ class Run:
         }
         store_ref = setting("AGENTIX_REFRESHER_PI_STORE")
         public_ref = setting("AGENTIX_REFRESHER_PI_PUBLIC")
-        intake_ref = setting("AGENTIX_REFRESHER_PI_INTAKE")
+        rescue_ref = intake_ref(public_ref, RESCUE_SLOT)
         self._own(store_ref)
 
         def is_auth(value: Any) -> bool:
@@ -886,29 +979,39 @@ class Run:
 
         logins = _parse(self.store.read(store_ref), store_ref, is_auth) or {}
         public = _parse(self.store.read(public_ref), public_ref, is_auth)
-        intake, forced = _intake_value(self.store.read(intake_ref), intake_ref)
-        if not isinstance(intake, dict):
-            intake, forced = None, False
+        slots = self._slots(public_ref, is_auth)
+        taken_marks = self._taken(store_ref)
+        out["slots"] = len(slots)
+        forced = [
+            slot
+            for slot in slots
+            if slot.forced and slot.fingerprint not in taken_marks
+        ]
 
-        # As for Codex, per provider: a newer real entry handed in or in the
-        # public field replaces the store's.
+        # As for Codex, per provider: the newest real entry handed in or in
+        # the public field replaces the store's when it is newer; a forced
+        # hand-in's entries are taken once, whatever their age.
         taken: dict[str, str] = {}
-        for source, entries in ((intake_ref, intake), (public_ref, public)):
+        for slot in forced:
+            for name, entry in slot.login.items():
+                if pi_real(entry) and _canon(entry) != _canon(logins.get(name)):
+                    logins = {**logins, name: entry}
+                    taken[name] = slot.ref
+        forced_names = set(taken)
+        sources = [(slot.ref, slot.login) for slot in slots if not slot.forced]
+        sources.append((public_ref, public))
+        for source, entries in sources:
             for name, entry in (entries or {}).items():
-                if not pi_real(entry):
+                if not pi_real(entry) or name in forced_names:
                     continue
                 current = logins.get(name)
-                take = (forced and source == intake_ref) or (
-                    current is None or pi_order(entry) > pi_order(current)
-                )
-                if take and (current is None or _canon(entry) != _canon(current)):
+                if current is None or pi_order(entry) > pi_order(current):
                     logins = {**logins, name: entry}
                     taken[name] = source
         if taken:
             self.store.write(store_ref, _line(logins))
             self.log(f"pi: took {', '.join(sorted(taken))} into {store_ref}")
-        if forced:
-            self.store.write(intake_ref, _line(intake))
+        self._mark_taken(store_ref, taken_marks, [slot.fingerprint for slot in forced])
 
         checked = False
         for name in sorted(logins):
@@ -947,7 +1050,7 @@ class Run:
                 self._persist(
                     store_ref,
                     logins,
-                    [(intake_ref, logins), (public_ref, {**(public or {}), name: new})],
+                    [(rescue_ref, logins), (public_ref, {**(public or {}), name: new})],
                 )
                 state["refreshed"] = True
                 self.log(f"pi {name}: refreshed")
@@ -1011,29 +1114,67 @@ def _describe(error: Exception | None) -> str:
     return type(error).__name__ if error is not None else "unknown error"
 
 
+def machine_id(state_dir: str = "") -> str:
+    """This computer's intake slot name: the one agent-auth-sync keeps in
+    its state directory, made the same way when it is missing."""
+    state = (
+        state_dir
+        or os.environ.get("AGENT_AUTH_SYNC_STATE_DIR")
+        or os.path.join(
+            os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+            "agent-auth-sync",
+        )
+    )
+    path = os.path.join(state, "machine-id")
+    try:
+        with open(path) as handle:
+            known = handle.read().strip()
+        if re.fullmatch(r"[a-z0-9-]{1,80}", known):
+            return known
+    except OSError:
+        pass
+    host = re.sub(r"[^a-z0-9-]+", "-", os.uname().nodename.lower()).strip("-")[:40]
+    made = f"{host or 'host'}-{os.urandom(4).hex()}"
+    os.makedirs(state, exist_ok=True)
+    with open(path, "w") as handle:
+        handle.write(made + "\n")
+    return made
+
+
 def seed(
-    store: OpStore, codex_path: str = "", pi_path: str = "", force: bool = False
+    store: OpStore,
+    codex_path: str = "",
+    pi_path: str = "",
+    force: bool = False,
+    machine: str = "",
 ) -> dict[str, Any]:
     """Hands the real logins in these local files to the refresher, through
-    its intake fields, for after a new sign-in. The next run takes each one
-    that is newer than the store's. A login older than the store's is
-    refused, since that would put back a spent refresh token, unless `force`,
-    which makes the next run take it anyway."""
+    this computer's seed slots (MACHINE-seed), for after a new sign-in. The
+    next run takes each one that is newer than the store's. A login older
+    than the store's is refused, since that would put back a spent refresh
+    token, unless `force`, which makes the next run take it once anyway.
+    The order is checked against the public copy, which carries the store's
+    access tokens: the store's item is never read or written from here."""
     done: dict[str, Any] = {}
+    slot = f"{machine or machine_id()}-seed"
 
-    def hand_in(intake_ref: str, value: Any) -> None:
-        payload = {FORCE_KEY: True, "login": value} if force else value
-        store.write(intake_ref, _line(payload))
+    def hand_in(public_ref: str, value: Any) -> str:
+        ref = intake_ref(public_ref, slot)
+        payload = (
+            {FORCE_KEY: True, "login": value, "at": time.time()} if force else value
+        )
+        store.write(ref, _line(payload))
+        return ref
 
     if codex_path:
         with open(codex_path) as handle:
             login = json.load(handle)
         if not codex_real(login):
             raise StoreError(f"{codex_path} holds no Codex login with a refresh token")
-        ref = setting("AGENTIX_REFRESHER_CODEX_STORE")
+        ref = setting("AGENTIX_REFRESHER_CODEX_PUBLIC")
         current = _parse(store.read(ref), ref, lambda v: codex_tokens(v) is not None)
         if current is not None and not force:
-            if _canon(current) == _canon(login):
+            if _canon(codex_strip(current)) == _canon(codex_strip(login)):
                 done["codex"] = "already the refresher's login"
                 login = None
             elif codex_age(current) >= codex_age(login):
@@ -1042,23 +1183,28 @@ def seed(
                     "seeding it would put back a spent refresh token (--force to anyway)"
                 )
         if login is not None:
-            intake = setting("AGENTIX_REFRESHER_CODEX_INTAKE")
-            hand_in(intake, login)
-            done["codex"] = intake
+            done["codex"] = hand_in(setting("AGENTIX_REFRESHER_CODEX_PUBLIC"), login)
     if pi_path:
         with open(pi_path) as handle:
             local = json.load(handle)
         real = {name: e for name, e in (local or {}).items() if pi_real(e)}
         if not real:
             raise StoreError(f"{pi_path} holds no pi login with a refresh token")
-        ref = setting("AGENTIX_REFRESHER_PI_STORE")
+        ref = setting("AGENTIX_REFRESHER_PI_PUBLIC")
         current = _parse(store.read(ref), ref, lambda v: isinstance(v, dict)) or {}
+
+        def same(name: str, entry: dict) -> bool:
+            have = current.get(name)
+            return isinstance(have, dict) and _canon(pi_strip(have)) == _canon(
+                pi_strip(entry)
+            )
+
         if not force:
             older = sorted(
                 name
                 for name, entry in real.items()
                 if name in current
-                and _canon(current[name]) != _canon(entry)
+                and not same(name, entry)
                 and pi_order(current[name]) >= pi_order(entry)
             )
             if older:
@@ -1067,13 +1213,10 @@ def seed(
                     f"{pi_path}; seeding would put back a spent refresh token "
                     "(--force to anyway)"
                 )
-            real = {
-                n: e for n, e in real.items() if _canon(current.get(n)) != _canon(e)
-            }
+            real = {n: e for n, e in real.items() if not same(n, e)}
         if real:
-            intake = setting("AGENTIX_REFRESHER_PI_INTAKE")
-            hand_in(intake, real)
-            done["pi"] = {"field": intake, "providers": sorted(real)}
+            field = hand_in(setting("AGENTIX_REFRESHER_PI_PUBLIC"), real)
+            done["pi"] = {"field": field, "providers": sorted(real)}
         else:
             done["pi"] = "already the refresher's logins"
     return done

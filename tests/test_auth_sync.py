@@ -501,6 +501,19 @@ class PullOnlyTest(AuthSyncTestCase):
     def items(self) -> dict:
         return json.loads(self.store.read_text()) if self.store.exists() else {}
 
+    def slots(self, item: str) -> dict:
+        """This machine's intake slots for an item, as {title: login}."""
+        return {
+            title.removeprefix("agentix/"): json.loads(self.field(title[8:]))
+            for title in self.items()
+            if title.startswith(f"agentix/{item}-intake-")
+        }
+
+    def machine(self) -> str:
+        return (
+            (self.home / ".local/state/agent-auth-sync/machine-id").read_text().strip()
+        )
+
     def test_a_newer_local_login_is_handed_to_the_refresher_not_pushed(self):
         self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
         self.sync()
@@ -516,9 +529,44 @@ class PullOnlyTest(AuthSyncTestCase):
         self.assertEqual(
             json.loads(self.field("codex"))["tokens"]["access_token"], "access-old"
         )
-        self.assertEqual(json.loads(self.field("codex-refresher", "intake")), newer)
+        self.assertEqual(self.slots("codex"), {f"codex-intake-{self.machine()}": newer})
         self.assertEqual(len(self.edits()), 1)  # handed in once
         self.assertIn("handed a newer login to the refresher", result.stderr)
+        # The refresher's store item is never read, let alone written.
+        self.assertFalse(
+            [c for c in self.calls() if any("codex-refresher" in a for a in c)]
+        )
+
+    def test_a_hand_in_is_repeated_until_the_field_has_it(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.sync()
+        newer = codex_auth("access-new", "2026-11-02T00:00:00Z")
+        self.write_file(self.codex, newer)
+        self.sync()
+        slot = f"codex-intake-{self.machine()}"
+        # Something else (a stale write, a cleanup) changed the slot.
+        self.put_field(slot, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(json.loads(self.field(slot)), newer)
+        # Once the refresher has published it, nothing is handed in again.
+        self.put_field(slot, "")
+        self.put_field("codex", self.stripped("access-new", "2026-11-02T00:00:00Z"))
+        self.sync()
+        self.assertEqual(self.field(slot), "")
+
+    def test_the_machine_id_stays_the_same(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+        self.sync()
+        first = self.machine()
+        self.write_file(self.codex, codex_auth("access-newer", "2026-11-03T00:00:00Z"))
+        self.sync()
+
+        self.assertEqual(self.machine(), first)
+        self.assertRegex(first, r"^[a-z0-9-]+-[0-9a-f]{8}$")
+        self.assertEqual(list(self.slots("codex")), [f"codex-intake-{first}"])
 
     def test_the_same_login_with_its_refresh_token_is_not_handed_in(self):
         self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
@@ -526,7 +574,7 @@ class PullOnlyTest(AuthSyncTestCase):
 
         self.sync()
 
-        self.assertNotIn("agentix/codex-refresher", self.items())
+        self.assertEqual(self.slots("codex"), {})
 
     def test_order_comes_from_the_access_tokens_expiry(self):
         def login(name: str, exp: int, refreshed: str) -> dict:
@@ -548,7 +596,7 @@ class PullOnlyTest(AuthSyncTestCase):
         self.sync()
 
         self.assertEqual(self.read_file(self.codex)["tokens"]["id"], "remote")
-        self.assertNotIn("agentix/codex-refresher", self.items())
+        self.assertEqual(self.slots("codex"), {})
 
     def test_pi_entries_are_pulled_per_provider_and_never_pushed(self):
         remote = {
@@ -585,8 +633,8 @@ class PullOnlyTest(AuthSyncTestCase):
         self.assertEqual(merged["openai"]["refresh"], "refresh-new")  # newer here
         self.assertEqual(merged["zai"], local["zai"])
         self.assertEqual(json.loads(self.field("pi")), remote)
-        # The newer openai login went to the refresher's intake.
-        self.assertEqual(json.loads(self.field("pi-refresher", "intake")), local)
+        # The newer openai login went to this machine's slot.
+        self.assertEqual(self.slots("pi"), {f"pi-intake-{self.machine()}": local})
 
     def test_pull_mode_never_creates_the_public_field(self):
         self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
@@ -594,7 +642,7 @@ class PullOnlyTest(AuthSyncTestCase):
         self.sync(AGENT_AUTH_SYNC_MODE="pull")
 
         self.assertNotIn("agentix/codex", self.items())
-        self.assertIn("agentix/codex-refresher", self.items())
+        self.assertEqual(len(self.slots("codex")), 1)
 
     def test_intake_off_hands_nothing_in(self):
         self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))

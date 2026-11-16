@@ -73,7 +73,7 @@ writes ($config_file):
                             empty), sync the others both ways; pull: never
                             push; sync: always both ways. A pulled-only
                             file's newer login with a refresh token goes to
-                            op://VAULT/ITEM-refresher/intake for the refresher
+                            op://VAULT/ITEM-intake-MACHINE/auth for the refresher
   AGENT_AUTH_SYNC_INTAKE    on (default), or off to never hand logins in
   AGENT_AUTH_SYNC_STATE_DIR Where it keeps what both sides last agreed on
   AGENT_AUTH_SYNC_CONFIG_DIR
@@ -600,11 +600,26 @@ merge_pull() {
     end'
 }
 
+# This machine's name for its intake slots: the host name and a random part,
+# kept in the state directory so that it stays the same.
+machine_id() {
+  if [ ! -s "$state/machine-id" ]; then
+    host=$(hostname 2>/dev/null || uname -n)
+    host=$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-40)
+    rand=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
+    printf '%s-%s\n' "${host:-host}" "$rand" >"$state/machine-id.tmp" &&
+      mv -f "$state/machine-id.tmp" "$state/machine-id"
+  fi
+  cat "$state/machine-id"
+}
+
 # For a pulled-only file: a login here with a refresh token that is strictly
 # newer than the field's (a new sign-in, or a refresh that happened anyway)
-# goes to the refresher's intake field, op://VAULT/ITEM-refresher/intake,
-# which only the refresher reads; it takes the login over on its next run.
-# Each version is handed in once.
+# goes to this machine's intake slot, op://VAULT/ITEM-intake-MACHINE/auth: an
+# item of its own, which only this machine writes and only the refresher
+# reads; the refresher takes it over on its next run. While the login is
+# still newer than the field, each pass reads the slot back and writes it
+# again if it does not hold it, so a hand-in is never lost.
 hand_in() {
   [ "$AGENT_AUTH_SYNC_INTAKE" != off ] || return 0
   [ "$L" != - ] || return 0
@@ -619,19 +634,27 @@ hand_in() {
     return 0
   fi
   rm -f "$work/rcmp"
-  I=$(sha <"$work/local")
-  [ "$(cat "$state/$key.intake" 2>/dev/null)" != "$I" ] || return 0
   public_item=$item
   public_field=$field
-  item=$item-refresher
-  field=intake
+  item=$item-intake-$(machine_id)
+  field=auth
+  slot=op://$vault/$item/$field
   hrc=0
-  if push_remote "$work/local"; then
-    printf '%s\n' "$I" >"$state/$key.intake"
-    note "$path: handed a newer login to the refresher (op://$vault/$item/$field)"
-  else
-    hrc=1
-  fi
+  read_remote "$slot" "$work/remote.raw"
+  case $? in
+    1) hrc=1 ;;
+    *)
+      canon "$work/remote.raw" "$work/rcmp"
+      if [ "$(sha <"$work/rcmp" 2>/dev/null)" != "$(sha <"$work/local")" ]; then
+        if push_remote "$work/local"; then
+          note "$path: handed a newer login to the refresher ($slot)"
+        else
+          hrc=1
+        fi
+      fi
+      rm -f "$work/rcmp" "$work/remote.raw"
+      ;;
+  esac
   item=$public_item
   field=$public_field
   return "$hrc"

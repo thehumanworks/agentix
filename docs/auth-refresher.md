@@ -22,17 +22,22 @@ uv run agentix auth refresher stop            # stop it (logins then expire with
 
 Modal runs `refresh` at minutes 17 and 47 of every hour (UTC). Each run:
 
-1. Checks that the store belongs to this app: the field `owner` next to it
-   names the app that first used it, and a second app (another
+1. Checks that the store belongs to this app: the field `owner` of the
+   store's meta item (`op://agentix/codex-refresher-meta/owner`) names the
+   app that first used it, and a second app (another
    `AGENTIX_REFRESHER_APP`) refuses to refresh the same logins.
 2. Reads the real logins from the refresher's own fields, the store
    (`op://agentix/codex-refresher/auth`, `op://agentix/pi-refresher/auth`),
-   the intake fields next to them (`.../intake`), where machines hand in
-   newer logins, and the public fields that every machine syncs
-   (`op://agentix/codex/auth`, `op://agentix/pi/auth`).
-3. Takes over a login with a refresh token from the intake or a public
-   field that is newer than the store's: a machine that signed in again or
-   refreshed anyway, or one that still runs an older agent-auth-sync. The
+   every intake slot (each item in the vault named `ITEM-intake-...` after
+   a public field's item, such as `codex-intake-mac-3f9a0c1e`), where
+   machines hand in newer logins, and the public fields that every machine
+   syncs (`op://agentix/codex/auth`, `op://agentix/pi/auth`).
+3. Takes over the newest login with a refresh token among the slots and
+   the public field, when it is newer than the store's (for pi, per
+   provider, so two slots can each give one): a machine that signed in
+   again or refreshed anyway, or one that still runs an older
+   agent-auth-sync. A slot that `seed --force` wrote is taken once, whatever
+   its age; its fingerprint is kept in the meta item's `taken` field. The
    first run takes the current logins over this way, so no seeding is
    needed at first. Logins are ordered by their access tokens' own `exp`
    and `iat` claims where they have them, not by times a machine's clock
@@ -55,12 +60,14 @@ Modal runs `refresh` at minutes 17 and 47 of every hour (UTC). Each run:
    half of a write.
 5. Writes each new login to the store at once, before anything else, so a
    rotated refresh token is never lost. If the store cannot be written after
-   three tries (whatever the error), it writes the new login to the intake
-   field, then the public field, again and again until the deadline; the
+   three tries (whatever the error), it writes the new login to its own
+   rescue slot (`codex-intake-refresher`, `pi-intake-refresher`), then the
+   public field, again and again until the deadline; the
    next run takes it back from there. The run is reported as failed.
 6. Writes copies without refresh tokens to the public fields, unless what is
-   there is already the same or newer, or changed during the run (the next
-   run publishes then).
+   there is already the same or newer, or changed during the run, or the
+   run has too little time left to read and write it (the next run
+   publishes then).
 
 Each run keeps a summary (expiry times, what was refreshed or published,
 errors; never a token) in the Modal Dict `agentix-auth-refresher-status`,
@@ -117,11 +124,24 @@ machine (the field wins a tie), so no machine keeps a refresh token it could
 spend. A login on the machine that has a refresh token and is strictly newer
 than the field (a `codex login`, pi's `/login`, or a refresh that happened
 anyway) stays there and is handed to the refresher: agent-auth-sync writes
-it once to the intake field, `op://VAULT/ITEM-refresher/intake` (for
-`op://agentix/codex/auth`, `op://agentix/codex-refresher/intake`), which no
-machine pulls. The refresher's next run takes it over and publishes it
-stripped, and the machine then pulls that like any other copy. So signing in
-again needs no extra step. `AGENT_AUTH_SYNC_INTAKE=off` turns this off.
+it to this machine's own intake slot, `op://VAULT/ITEM-intake-MACHINE/auth`
+(for `op://agentix/codex/auth` on the Mac, say
+`op://agentix/codex-intake-mac-3f9a0c1e/auth`), which no machine pulls.
+MACHINE is the host name and a random part, kept in agent-auth-sync's state
+directory (`~/.local/state/agent-auth-sync/machine-id`); the item is created
+on the first hand-in. It writes the slot again whenever the slot does not
+hold that login, as long as the login is still newer than the field. The
+refresher's next run takes it over and publishes it stripped, and the
+machine then pulls that like any other copy. So signing in again needs no
+extra step. `AGENT_AUTH_SYNC_INTAKE=off` turns this off.
+
+Each machine writes only its own slot, and nothing but the refresher reads
+or writes the store and meta items, so a hand-in can never write an old
+login back over a new one. The store items hold only `auth`. Slots are not
+cleared: the refresher takes a slot's login only while it is newer than the
+store's, so an old one is ignored. A slot item stays for each machine that
+ever handed a login in; delete those of machines that are gone whenever
+convenient.
 
 A machine with an older agent-auth-sync still pushes. That is safe: it
 pulls the copy like any other change, and if it pushes a real login that is
@@ -130,11 +150,12 @@ newer, the refresher takes it over on its next run.
 ## Setup (once)
 
 Nothing to create in 1Password: the refresher creates the items
-`codex-refresher` and `pi-refresher` in the `agentix` vault on its first
-write (or agent-auth-sync does, on a first hand-in), with the service
-account of the Modal secret `1password` (the sandboxes'), which can already
-write that vault. Each item gets the fields `auth` (the real logins),
-`intake`, and `owner`.
+`codex-refresher` and `pi-refresher` (field `auth`: the real logins) and
+`codex-refresher-meta` and `pi-refresher-meta` (fields `owner` and `taken`)
+in the `agentix` vault on its first write, with the service account of the
+Modal secret `1password` (the sandboxes'), which can already write that
+vault; each machine creates its own `codex-intake-MACHINE` and
+`pi-intake-MACHINE` on its first hand-in.
 
 1. Update the Mac's agent-auth-sync from a clone at this version, so it goes
    pull-only at the switch and hands later sign-ins to the refresher:
@@ -163,9 +184,11 @@ the Mac (`codex login`, pi's `/login`). agent-auth-sync hands the new login
 in within seconds; `uv run agentix auth refresher run-now` takes it at once
 instead of at the next half hour. On a computer without agent-auth-sync,
 `uv run agentix auth refresher seed` (with the 1Password CLI signed in)
-hands the files in. It refuses a login older than the refresher's, which
-would put back a spent refresh token; `--force` hands it in anyway, and the
-next run takes it.
+hands the files in, through this computer's seed slots (`ITEM-intake-MACHINE-seed`).
+It never reads the store: it compares against the public field, whose
+copies carry the store's access tokens, and refuses a login older than
+that, which would put back a spent refresh token; `--force` hands it in
+anyway, and the next run takes it once.
 
 To go back: `uv run agentix auth refresher stop`; set
 `AGENT_AUTH_SYNC_MODE=sync` on the machines (environment, or a line in
@@ -182,7 +205,9 @@ Read where the app is deployed; `deploy` bakes them into the function.
 | `AGENTIX_REFRESHER_SECRET` | `1password`: the Modal secret with `OP_SERVICE_ACCOUNT_TOKEN` |
 | `AGENTIX_REFRESHER_CODEX_STORE`, `AGENTIX_REFRESHER_PI_STORE` | `op://agentix/codex-refresher/auth`, `op://agentix/pi-refresher/auth` |
 | `AGENTIX_REFRESHER_CODEX_PUBLIC`, `AGENTIX_REFRESHER_PI_PUBLIC` | `op://agentix/codex/auth`, `op://agentix/pi/auth` |
-| `AGENTIX_REFRESHER_CODEX_INTAKE`, `AGENTIX_REFRESHER_PI_INTAKE` | `op://agentix/codex-refresher/intake`, `op://agentix/pi-refresher/intake`; agent-auth-sync writes `op://VAULT/ITEM-refresher/intake` for each public field, so keep them so |
+
+The meta items are named after the store's (`STOREITEM-meta`), and the intake
+slots after the public field's (`ITEM-intake-MACHINE`), in the same vaults.
 
 ## Cost
 
@@ -195,7 +220,9 @@ is only a ceiling): at the rates in
 
 - The store is kept apart by convention: the sandboxes' service account can
   read the `agentix` vault, so it could read the store items too; nothing in
-  the sandboxes does. For a hard boundary, put the store in another vault
+  the sandboxes or on the Mac does (agent-auth-sync and `seed` touch only
+  the public fields and their own slots). Each machine can also write any
+  slot, so the slots are trusted as the public fields were before. For a hard boundary, put the store in another vault
   with another service account, in its own Modal secret
   (`AGENTIX_REFRESHER_SECRET` and the `*_STORE` settings).
 - If the refresher stops, machines keep working until the access tokens
