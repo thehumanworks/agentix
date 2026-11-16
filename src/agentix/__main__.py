@@ -437,6 +437,59 @@ def _auth_sync():
     _auth("sync")
 
 
+def _refresher_deploy():
+    """Deploy the Modal app that refreshes Codex's and pi's logins on a schedule.
+
+    Twice an hour it refreshes each login well before it expires, keeps the
+    real logins (with their refresh tokens) in 1Password fields of its own,
+    and writes copies without refresh tokens to op://agentix/codex/auth and
+    op://agentix/pi/auth. agent-auth-sync then only pulls those fields, so no
+    machine spends a refresh token. Its first run takes the logins in those
+    fields over. Deploying again is safe. See docs/auth-refresher.md.
+    """
+    from .auth import refresher_deploy
+
+    return refresher_deploy()
+
+
+def _refresher_status():
+    """Whether the login refresher is deployed, and how its last run went. No secrets."""
+    from .auth import refresher_status
+
+    return refresher_status()
+
+
+def _refresher_run_now(force: bool = False):
+    """Run the login refresher now and print what it did.
+
+    It refreshes only what is due, unless --force refreshes every login.
+    """
+    from .auth import refresher_run
+
+    return refresher_run(force)
+
+
+def _refresher_stop():
+    """Stop the login refresher. Logins then expire within days; machines
+    cannot refresh the copies they hold. Deploy it again to resume."""
+    from .auth import refresher_stop
+
+    return refresher_stop()
+
+
+def _refresher_seed(codex: str | None = None, pi: str | None = None):
+    """Give the login refresher the logins in this computer's sign-in files.
+
+    After `codex login` or pi's /login, run this with the 1Password CLI
+    signed in. --codex and --pi name the files (by default Codex's and pi's
+    own); an empty value skips one. pi's providers are added to the ones the
+    refresher holds.
+    """
+    from .auth import refresher_seed
+
+    return refresher_seed(codex, pi)
+
+
 def _sync(name: str = "", pull: bool = False, path: str = ""):
     """Copy this checkout's uncommitted changes into a sandbox, or back with --pull.
 
@@ -610,6 +663,22 @@ def _cli():
                     "uninstall": command(_auth_uninstall),
                     "status": command(_auth_status),
                     "sync": command(_auth_sync),
+                    "refresher": group(
+                        "The Modal app that alone refreshes Codex's and pi's logins.",
+                        {
+                            "deploy": command(_refresher_deploy),
+                            "status": command(_refresher_status),
+                            "run-now": command(
+                                _refresher_run_now, switch("--force", "-f")
+                            ),
+                            "stop": command(_refresher_stop),
+                            "seed": command(
+                                _refresher_seed,
+                                opt("--codex", default=None, metavar="PATH"),
+                                opt("--pi", default=None, metavar="PATH"),
+                            ),
+                        },
+                    ),
                 },
             ),
             "config": group(

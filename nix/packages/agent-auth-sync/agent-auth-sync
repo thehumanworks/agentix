@@ -68,6 +68,10 @@ writes ($config_file):
   AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE
                             Another token file, read when neither of those
                             has one, such as a sandbox's; never written
+  AGENT_AUTH_SYNC_MODE      auto (default): only pull a field that the
+                            login refresher writes (its refresh tokens are
+                            empty), sync the others both ways; pull: never
+                            push; sync: always both ways
   AGENT_AUTH_SYNC_STATE_DIR Where it keeps what both sides last agreed on
   AGENT_AUTH_SYNC_CONFIG_DIR
                             The directory of config and the token
@@ -94,6 +98,7 @@ fi
 : "${AGENT_AUTH_SYNC_REMOTE_INTERVAL:=120}"
 : "${AGENT_AUTH_SYNC_ENSURE_WAIT:=10}"
 : "${AGENT_AUTH_SYNC_OP_TIMEOUT:=30}"
+: "${AGENT_AUTH_SYNC_MODE:=auto}"
 : "${AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE:=}"
 : "${AGENT_AUTH_SYNC_TOKEN_FILE:=$config_dir/op-token}"
 : "${AGENT_AUTH_SYNC_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/agent-auth-sync}"
@@ -522,6 +527,85 @@ merge() {
     end'
 }
 
+# Whether the login in FILE is one the refresher wrote: every refresh token
+# in it is empty. Codex's file is one login; pi's holds one entry per
+# provider, and counts when it has an OAuth entry and none of them has a
+# refresh token. The refresher alone keeps the real refresh tokens, so a
+# machine must never push such a field back, nor refresh with an old token.
+managed() {
+  "$JQ" -e '
+    if type != "object" then false
+    elif has("tokens") then ((.tokens | type) == "object" and .tokens.refresh_token == "")
+    else [.[] | select(type == "object" and .type == "oauth")] as $o |
+      ($o | length) > 0 and all($o[]; .refresh == "")
+    end' "$1" >/dev/null 2>&1
+}
+
+# Whether this file is pulled only, by AGENT_AUTH_SYNC_MODE and the field
+# just read (in $work/remote, $remote_rc).
+pull_only() {
+  case $AGENT_AUTH_SYNC_MODE in
+    pull) return 0 ;;
+    sync) return 1 ;;
+    auto) [ "$remote_rc" = 0 ] && managed "$work/remote" ;;
+    *)
+      warn "AGENT_AUTH_SYNC_MODE=$AGENT_AUTH_SYNC_MODE is not auto, pull, or sync; syncing both ways"
+      return 1
+      ;;
+  esac
+}
+
+# merge, for a pulled-only file: the field wins unless the file's tokens are
+# strictly newer, so a login the refresher stripped replaces the same login
+# with its refresh token.
+merge_pull() {
+  "$JQ" -cS -n --slurpfile l "$1" --slurpfile r "$2" '
+    $l[0] as $l | $r[0] as $r |
+    if ($l | has("last_refresh")) or ($r | has("last_refresh")) then
+      if (($l.last_refresh // "") > ($r.last_refresh // "")) then $l else $r end
+    else
+      reduce (($l + $r) | keys_unsorted[]) as $k ({};
+        .[$k] =
+          if ($l | has($k)) and ($r | has($k)) then
+            if (($l[$k] | .expires? // 0) > ($r[$k] | .expires? // 0)) then $l[$k] else $r[$k] end
+          elif ($l | has($k)) then $l[$k]
+          else $r[$k]
+          end)
+    end'
+}
+
+# sync_one for a file that is pulled only: it takes the field, or the newer
+# tokens of the two, into the file, and never writes 1Password.
+sync_pull() {
+  if [ "$R" = - ]; then
+    return 0
+  fi
+  if [ "$L" = - ] || [ "$L" = "$B" ]; then
+    src=$work/remote
+  elif merge_pull "$work/local" "$work/remote" >"$work/merged"; then
+    src=$work/merged
+  else
+    warn "$path: merging with $ref failed"
+    return 1
+  fi
+  if [ "$L" != - ] && [ "$(sha <"$src")" = "$L" ]; then
+    # The file's tokens are newer; they stay here and are not pushed.
+    set_base "$key" "$R"
+    return 0
+  fi
+  write_local "$src" "$path" "$before"
+  prc=$?
+  case $prc in
+    0)
+      set_base "$key" "$R"
+      note "$path: updated from $ref (pull only)"
+      ;;
+    3) ;;
+    *) warn "$path: writing failed" ;;
+  esac
+  return "$prc"
+}
+
 set_base() {
   printf '%s\n' "$2" >"$state/$1.base.tmp" && mv -f "$state/$1.base.tmp" "$state/$1.base"
 }
@@ -621,6 +705,11 @@ sync_one() {
   if [ "$L" = "$R" ]; then
     [ "$L" = - ] || set_base "$key" "$L"
     return 0
+  fi
+
+  if pull_only; then
+    sync_pull
+    return
   fi
 
   if [ "$L" = - ] || { [ "$R" != - ] && [ "$L" = "$B" ]; }; then
@@ -873,6 +962,7 @@ cmd_status() {
   else
     printf 'watcher: not running\n'
   fi
+  printf 'mode: %s\n' "$AGENT_AUTH_SYNC_MODE"
   each_file status_one
 }
 
@@ -916,6 +1006,10 @@ status_one() {
     s="both changed; sync keeps the newer tokens"
   fi
   printf '  state: %s\n' "$s"
+  remote_rc=$rrc
+  if [ "$rrc" != 1 ] && pull_only; then
+    printf '  pull only: the file is never pushed; a newer file stays here\n'
+  fi
   scrub
 }
 

@@ -462,6 +462,133 @@ class FailureTest(AuthSyncTestCase):
         self.assertIn("not an op://VAULT/ITEM/FIELD reference", result.stderr)
 
 
+class PullOnlyTest(AuthSyncTestCase):
+    """AGENT_AUTH_SYNC_MODE. By default (auto) a field whose refresh tokens are
+    empty, as the login refresher writes it, is only pulled."""
+
+    def stripped(self, token: str, refreshed: str) -> dict:
+        value = codex_auth(token, refreshed)
+        value["tokens"]["refresh_token"] = ""
+        return value
+
+    def edits(self) -> list:
+        return [
+            c for c in self.calls() if c[:2] in (["item", "edit"], ["item", "create"])
+        ]
+
+    def test_the_refreshers_copy_replaces_the_same_login_with_its_refresh_token(self):
+        real = codex_auth("access-old", "2026-11-01T00:00:00Z")
+        self.put_field("codex", real)
+        self.write_file(self.codex, real)
+        self.sync()  # in step, as before the refresher
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.codex)["tokens"]["refresh_token"], "")
+        self.assertEqual(self.edits(), [])
+
+    def test_a_tie_after_both_changed_goes_to_the_field(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.codex)["tokens"]["refresh_token"], "")
+        self.assertEqual(self.edits(), [])
+
+    def test_a_newer_local_login_stays_here_and_is_not_pushed(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.sync()
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+
+        result = self.sync()
+        self.sync()
+
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-new"
+        )
+        self.assertEqual(
+            json.loads(self.field("codex"))["tokens"]["access_token"], "access-old"
+        )
+        self.assertEqual(self.edits(), [])
+        self.assertNotIn("updated from", result.stderr)
+
+    def test_pi_entries_are_pulled_per_provider_and_never_pushed(self):
+        remote = {
+            "anthropic": {
+                "type": "oauth",
+                "access": "pi-a",
+                "refresh": "",
+                "expires": 10,
+            },
+            "openai": {"type": "oauth", "access": "pi-b", "refresh": "", "expires": 10},
+        }
+        self.put_field("pi", remote)
+        local = {
+            "anthropic": {
+                "type": "oauth",
+                "access": "pi-a",
+                "refresh": "refresh-old",
+                "expires": 10,
+            },
+            "openai": {
+                "type": "oauth",
+                "access": "pi-b",
+                "refresh": "refresh-new",
+                "expires": 20,
+            },
+            "zai": {"type": "api_key", "key": "access-new"},
+        }
+        self.write_file(self.pi, local)
+
+        self.sync()
+
+        merged = self.read_file(self.pi)
+        self.assertEqual(merged["anthropic"]["refresh"], "")  # a tie: the field's
+        self.assertEqual(merged["openai"]["refresh"], "refresh-new")  # newer here
+        self.assertEqual(merged["zai"], local["zai"])
+        self.assertEqual(json.loads(self.field("pi")), remote)
+        self.assertEqual(self.edits(), [])
+
+    def test_pull_mode_never_creates_a_field(self):
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="pull")
+
+        self.assertFalse(self.store.exists())
+
+    def test_pull_mode_pulls_a_field_with_refresh_tokens_too(self):
+        self.put_field("codex", codex_auth("access-new", "2026-11-02T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="pull")
+
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-new"
+        )
+        self.assertEqual(self.edits(), [])
+
+    def test_sync_mode_pushes_even_over_the_refreshers_copy(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.sync(AGENT_AUTH_SYNC_MODE="sync")
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="sync")
+
+        self.assertEqual(
+            json.loads(self.field("codex"))["tokens"]["access_token"], "access-new"
+        )
+
+    def test_status_shows_the_mode_and_pull_only(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+
+        result = self.run_script("status")
+
+        self.assertIn("mode: auto", result.stdout)
+        self.assertIn("pull only", result.stdout)
+
+
 class CommandsTest(AuthSyncTestCase):
     def test_status_names_each_state_without_values(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))

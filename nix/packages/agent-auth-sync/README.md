@@ -50,6 +50,17 @@ field, and the version both last agreed on, kept in
 Values pass through files in a private temporary directory, never through a
 command line, and nothing prints them.
 
+## With the login refresher
+
+Once the login refresher runs (`agentix auth refresher deploy`; see
+[docs/auth-refresher.md](../../../docs/auth-refresher.md)), it alone holds
+the refresh tokens and writes copies with empty refresh tokens to the
+fields. By default (`AGENT_AUTH_SYNC_MODE=auto`) such a field is only
+pulled: the file takes the field (or, per login, the strictly newer tokens
+of the two), 1Password is never written, and a copy replaces the same login
+with its refresh token. `pull` never pushes any field; `sync` always syncs
+both ways. `status` prints the mode and which files are pulled only.
+
 ## Requirements
 
 A POSIX shell (macOS `/bin/sh`, bash, dash, or busybox), the 1Password CLI
@@ -119,6 +130,7 @@ From the environment, then from `~/.config/agent-auth-sync/config`:
 | `AGENT_AUTH_SYNC_OP_TIMEOUT` | `30`: seconds before a call of `op` is stopped |
 | `AGENT_AUTH_SYNC_TOKEN_FILE` | `~/.config/agent-auth-sync/op-token`: the token `save-token` writes and `uninstall` removes |
 | `AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE` | None; the Nix package sets the profile's `agentix.op.tokenFile` (in a sandbox, `/run/agentix/op-token`). Read when neither the environment nor the saved token has one; never written or removed |
+| `AGENT_AUTH_SYNC_MODE` | `auto`: pull only a field whose refresh tokens are empty (the login refresher's); `pull`: never push; `sync`: always both ways |
 | `AGENT_AUTH_SYNC_STATE_DIR` | `~/.local/state/agent-auth-sync` |
 | `AGENT_AUTH_SYNC_CONFIG_DIR` | `~/.config/agent-auth-sync` |
 

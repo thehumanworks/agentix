@@ -68,6 +68,7 @@ uv run agentix sandbox shell dev --engine=openssh
 | `sandbox purge NAME [--terminate]` | Delete every snapshot of a name, then the name |
 | `sandbox prune --older-than=AGE [--keep-latest] [--name=GLOB] [--yes]` | List snapshots and stopped sandboxes older than AGE, then delete them once confirmed |
 | `auth install\|uninstall\|status\|sync` | Keep Codex's and pi's sign-in files on this computer in step with 1Password; see [Codex and pi sign-in](#codex-and-pi-sign-in) |
+| `auth refresher deploy\|status\|run-now\|stop\|seed` | The scheduled Modal function that alone refreshes Codex's and pi's logins; see [docs/auth-refresher.md](docs/auth-refresher.md) |
 | `cost [--json]` | This month's Modal spend: billed per app, estimated per sandbox name, image builds, snapshots; see [docs/cost.md](docs/cost.md) |
 | `runner deploy` | Deploy the Modal app that runs `exec --detach` commands; safe to repeat |
 
@@ -654,6 +655,20 @@ Logging out does not stick: a deleted file, or pi's `{}`, is pulled back
 from 1Password, and a cleared field is pushed back by any machine that
 still has the file. To end a login everywhere, revoke it with the provider.
 
+#### The login refresher
+
+The sync narrows the race between machines that refresh the same login; it
+cannot close it. `uv run agentix auth refresher deploy` deploys a small
+scheduled Modal function that closes it: it alone keeps the refresh tokens
+(in the 1Password items `codex-refresher` and `pi-refresher`), refreshes each
+login well before it expires, twice an hour, and writes copies without
+refresh tokens to `op://agentix/codex/auth` and `op://agentix/pi/auth`.
+Codex and pi work with those copies, and agent-auth-sync only pulls a field
+whose refresh tokens are empty (`AGENT_AUTH_SYNC_MODE=auto`, the default),
+so no machine spends a refresh token. Nothing changes until it is deployed.
+Setup, migration order, costs (about $0.20 a month), and limits:
+[docs/auth-refresher.md](docs/auth-refresher.md).
+
 These modules change Codex and pi on a Mac or Linux computer too:
 
 - Codex keeps its login in `~/.codex/auth.json`
@@ -891,6 +906,7 @@ image.
 │   ├── resume.py           exec --resume and sandbox resume, with the resume rules
 │   ├── runs.py             exec --detach, sandbox logs, wait, and runs
 │   ├── runner.py           the deployed Modal function that runs detached commands
+│   ├── refresher.py        the scheduled Modal function that refreshes Codex's and pi's logins
 │   ├── store.py            the record of a name and how copies merge
 │   ├── recordfiles.py      records as files on the Volume, cached in a Dict
 │   ├── sandbox.py          Modal sandbox calls and the sandbox start command
@@ -898,7 +914,7 @@ image.
 │   ├── ssh.py              SSH engines, sandbox shell, host keys
 │   ├── ssh_input.py        checks on SSH flags and keys, made before Modal
 │   ├── sync.py             sandbox sync: runs agentix-sync on both sides
-│   ├── auth.py             auth install/uninstall/status/sync: runs agent-auth-sync here
+│   ├── auth.py             auth install/uninstall/status/sync (agent-auth-sync here) and auth refresher
 │   ├── names.py            sandbox name rules and generated names
 │   ├── image.py            the image build, its checks, and NIX_BUILDER
 │   ├── flake.py            flake update and the Rex pin

@@ -41,6 +41,17 @@ SURFACE = [
     ("auth uninstall", "_auth_uninstall", [], [], []),
     ("auth status", "_auth_status", [], [], []),
     ("auth sync", "_auth_sync", [], [], []),
+    ("auth refresher deploy", "_refresher_deploy", [], [], []),
+    ("auth refresher status", "_refresher_status", [], [], []),
+    ("auth refresher run-now", "_refresher_run_now", [], [], [("--force", "-f")]),
+    ("auth refresher stop", "_refresher_stop", [], [], []),
+    (
+        "auth refresher seed",
+        "_refresher_seed",
+        [],
+        [("--codex", None, "/c.json", "/c.json"), ("--pi", None, "/p.json", "/p.json")],
+        [],
+    ),
     ("config show", "_config_show", [], [], []),
     ("runner deploy", "_runner_deploy", [], [], []),
     (
@@ -138,7 +149,17 @@ SURFACE = [
 # Flags a command cannot go without, added to each of its spellings.
 REQUIRED = {"_prune": (["--older-than=14d"], {"older_than": "14d"})}
 
-GROUPS = ["", "image", "flake", "auth", "config", "runner", "sandbox", "sandbox ssh"]
+GROUPS = [
+    "",
+    "image",
+    "flake",
+    "auth",
+    "auth refresher",
+    "config",
+    "runner",
+    "sandbox",
+    "sandbox ssh",
+]
 
 
 def _underscored(flag):
