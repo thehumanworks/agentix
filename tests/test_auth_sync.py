@@ -399,6 +399,30 @@ class FailureTest(AuthSyncTestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("op did not answer within 1 seconds", result.stderr)
 
+    def test_the_op_timer_ends_with_op_even_if_its_signal_is_lost(self):
+        # The shell can drop a TERM that reaches the timer subshell before it
+        # has reset the traps it inherited; a busy machine makes that likely
+        # for a quick op. Here every such TERM is dropped (the config file is
+        # sourced, and a function shadows the kill builtin). The timer must
+        # still end with op, not live on as a second process for the whole
+        # timeout and then call a finished op hung.
+        config = self.home / ".config" / "agent-auth-sync" / "config"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'kill() { [ "${1:-}" = "${op_killer:-}" ] && return 0; command kill "$@"; }\n'
+        )
+        self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        started = time.monotonic()
+        result = self.run_script("sync", AGENT_AUTH_SYNC_OP_TIMEOUT="20")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("did not answer", result.stderr)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(
+            self.read_file(self.codex)["tokens"]["access_token"], "access-old"
+        )
+
     def test_a_file_that_is_not_json_is_left_alone(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
         self.codex.parent.mkdir(parents=True)
@@ -769,6 +793,20 @@ class CommandsTest(AuthSyncTestCase):
         self.stop(self.wait_for_watcher())
 
     def test_two_ensures_at_once_leave_one_watcher(self):
+        self.two_ensures_leave_one_watcher()
+
+    def test_one_watcher_even_when_the_op_timers_signal_is_lost(self):
+        # As on a busy CI runner: the TERM that ends the op timer is dropped
+        # (see FailureTest), and the timer, a subshell with the watcher's
+        # command line, must not stay on beside it.
+        config = self.home / ".config" / "agent-auth-sync" / "config"
+        config.parent.mkdir(parents=True)
+        config.write_text(
+            'kill() { [ "${1:-}" = "${op_killer:-}" ] && return 0; command kill "$@"; }\n'
+        )
+        self.two_ensures_leave_one_watcher()
+
+    def two_ensures_leave_one_watcher(self):
         self.put_field("codex", codex_auth("access-old", "2026-11-01T00:00:00Z"))
         env = {**self.env, "OP_SERVICE_ACCOUNT_TOKEN": "ops_fake"}
         command = [os.environ.get("AUTH_SYNC_TEST_SHELL", "sh"), str(SCRIPT), "ensure"]

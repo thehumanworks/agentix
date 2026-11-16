@@ -237,32 +237,49 @@ scrub() {
 # read it as the item. A call that takes longer than
 # AGENT_AUTH_SYNC_OP_TIMEOUT seconds is stopped and fails, so a hanging op
 # never holds a file's lock for good. coreutils' timeout is not on every
-# Mac, so a second process does its job.
+# Mac, so a second process, the timer, does its job.
+#
+# The timer ends when op has: it is sent TERM, and it also looks for
+# $work/op-done every tenth of a second. A signal alone is not enough: the
+# shell can drop a TERM that reaches the subshell before it has reset the
+# traps it inherited, which a quick op on a busy machine makes likely, and
+# the timer would then live on for the whole timeout (a second process with
+# this script's command line, which a watcher waits for) and call the
+# finished op hung.
 run_op() {
-  rm -f "$work/op-timed-out"
+  rm -f "$work/op-timed-out" "$work/op-done"
   op_timed_out=
   "$OP" "$@" </dev/null &
   op_pid=$!
   parent=$$
   (
-    nap=
-    trap '[ -z "$nap" ] || kill "$nap" 2>/dev/null; exit 0' TERM
-    sleep "$AGENT_AUTH_SYNC_OP_TIMEOUT" &
-    nap=$!
-    wait "$nap" || exit 0
-    # Its PID could be another process's by now if this script was killed
-    # outright, so it stops op only while the script still runs.
-    alive "$parent" || exit 0
-    : >"$work/op-timed-out"
-    kill "$op_pid" 2>/dev/null
+    left=$((AGENT_AUTH_SYNC_OP_TIMEOUT * 10))
+    while [ ! -f "$work/op-done" ]; do
+      if [ "$left" -le 0 ]; then
+        # Its PID could be another process's by now if this script was
+        # killed outright, so it stops op only while the script still runs.
+        [ ! -f "$work/op-done" ] && alive "$parent" || exit 0
+        : >"$work/op-timed-out"
+        kill "$op_pid" 2>/dev/null
+        exit 0
+      fi
+      if sleep 0.1 2>/dev/null; then
+        left=$((left - 1))
+      else
+        sleep 1
+        left=$((left - 10))
+      fi
+    done
   ) </dev/null >/dev/null 2>&1 &
   op_killer=$!
   wait "$op_pid"
   op_rc=$?
+  : >"$work/op-done"
   kill "$op_killer" 2>/dev/null
   wait "$op_killer" 2>/dev/null
   op_killer=
   op_pid=
+  rm -f "$work/op-done"
   if [ -f "$work/op-timed-out" ]; then
     rm -f "$work/op-timed-out"
     op_timed_out=1
@@ -936,6 +953,11 @@ cmd_watch() {
   while :; do
     # Its state directory removed, a watcher has nothing to keep.
     [ -d "$state" ] || exit 0
+    # One watcher: one that no longer holds the lock gives way.
+    if [ "$(cat "$state/watch.lock/pid" 2>/dev/null)" != "$$" ]; then
+      note "another watcher holds $state/watch.lock; this one (PID $$) stops"
+      exit 0
+    fi
     now=$(date +%s)
     if [ $((now - last_remote)) -ge "$AGENT_AUTH_SYNC_REMOTE_INTERVAL" ]; then
       # After a clean pass, a failure that comes back is reported again.
