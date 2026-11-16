@@ -117,7 +117,7 @@ OPENAI_DIRECT_SCOPE = "chatgpt.tokens.use.direct"
 
 # The 1Password CLI the container runs, as the image's profile pins it.
 OP_VERSION = "2.42.0"
-OP_SHA256 = "4432a5de3ef8c00e0f1e341d5d65df7ac0152ff0bc56ebfd6e47de60219f1840"
+OP_SHA256 = "261fe3844a43e7e83a3d85e8a9f36411729436a1d3add1dc7dd46cbbceebe9e5"
 OP_URL = (
     f"https://cache.agilebits.com/dist/1P/op2/pkg/v{OP_VERSION}/"
     f"op_linux_amd64_v{OP_VERSION}.zip"
