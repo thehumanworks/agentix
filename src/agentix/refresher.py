@@ -48,12 +48,22 @@ STATUS_DICT = f"{APP_NAME}-status"
 
 # The fields, as op:// references. STORE holds the real logins and is read
 # only by this app; PUBLIC is what agent-auth-sync syncs on every machine.
+# INTAKE is where a machine hands in a newer login with a refresh token (a
+# new sign-in, or a refresh that happened anyway); only this app reads it.
+# agent-auth-sync derives it from the public field: op://VAULT/ITEM-refresher/intake.
 SETTINGS = {
     "AGENTIX_REFRESHER_CODEX_STORE": "op://agentix/codex-refresher/auth",
     "AGENTIX_REFRESHER_PI_STORE": "op://agentix/pi-refresher/auth",
     "AGENTIX_REFRESHER_CODEX_PUBLIC": "op://agentix/codex/auth",
     "AGENTIX_REFRESHER_PI_PUBLIC": "op://agentix/pi/auth",
+    "AGENTIX_REFRESHER_CODEX_INTAKE": "op://agentix/codex-refresher/intake",
+    "AGENTIX_REFRESHER_PI_INTAKE": "op://agentix/pi-refresher/intake",
 }
+# The field, next to each store field, that names the app that owns it: a
+# second app with another name refuses to refresh the same logins.
+OWNER_FIELD = "owner"
+# What `seed --force` writes to an intake field: taken even when older.
+FORCE_KEY = "agentix_seed_force"
 
 
 def setting(name: str) -> str:
@@ -71,7 +81,15 @@ DEFAULT_AHEAD = 2 * 60 * 60
 CODEX_MAX_AGE = 7 * 24 * 60 * 60
 
 HTTP_TIMEOUT = 45
-OP_TIMEOUT = 60
+# Each call of op: reads are cheap, a write is two calls (item get, edit).
+OP_READ_TIMEOUT = 20
+OP_TIMEOUT = 30
+# Modal stops the function after FUNCTION_TIMEOUT. A run stops starting new
+# work RUN_BUDGET seconds in, and starts a refresh only while the time left
+# covers the refresh, every save attempt, and the rescue (Run.reserve), so it
+# is never stopped holding a rotated token it has not saved.
+FUNCTION_TIMEOUT = 30 * 60
+RUN_BUDGET = 25 * 60
 USER_AGENT = "agentix-auth-refresher"
 
 # The token endpoints and public OAuth client IDs, as Codex and pi use them.
@@ -122,22 +140,29 @@ class OpStore:
     --template`, or `op item create` for a missing item. The value goes
     through a private temporary file, never the command line."""
 
-    def __init__(self, op: str = "", timeout: float = OP_TIMEOUT):
+    def __init__(
+        self,
+        op: str = "",
+        timeout: float = OP_TIMEOUT,
+        read_timeout: float = OP_READ_TIMEOUT,
+    ):
         self.op = op or os.environ.get("AGENTIX_REFRESHER_OP") or "op"
         self.timeout = timeout
+        self.read_timeout = read_timeout
 
-    def _run(self, *args: str) -> subprocess.CompletedProcess:
+    def _run(self, *args: str, timeout: float = 0) -> subprocess.CompletedProcess:
+        limit = timeout or self.timeout
         try:
             return subprocess.run(
                 [self.op, *args],
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 text=True,
-                timeout=self.timeout,
+                timeout=limit,
                 check=False,
             )
         except subprocess.TimeoutExpired:
-            raise StoreError(f"op did not answer within {self.timeout} s") from None
+            raise StoreError(f"op did not answer within {limit} s") from None
         except OSError as error:
             raise StoreError(f"cannot run op: {error.strerror}") from None
 
@@ -165,7 +190,7 @@ class OpStore:
     def read(self, ref: str) -> str | None:
         """The field's value, or None when the item or field does not exist."""
         self.parse(ref)
-        result = self._run("read", ref)
+        result = self._run("read", ref, timeout=self.read_timeout)
         if result.returncode == 0:
             return result.stdout.rstrip("\n")
         if self._missing(result):
@@ -173,8 +198,19 @@ class OpStore:
         raise StoreError(f"{ref}: reading 1Password failed: {self._complaint(result)}")
 
     def write(self, ref: str, value: str) -> None:
-        """Puts `value` in the field, creating the field or the item."""
+        """Puts `value` in the field, creating the field or the item. Every
+        failure is a StoreError."""
         vault, item, field = self.parse(ref)
+        try:
+            self._write(ref, vault, item, field, value)
+        except StoreError:
+            raise
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            raise StoreError(
+                f"{ref}: writing 1Password failed: {type(error).__name__}"
+            ) from None
+
+    def _write(self, ref: str, vault: str, item: str, field: str, value: str) -> None:
         work = tempfile.mkdtemp(prefix="agentix-refresher.")
         try:
             os.chmod(work, 0o700)
@@ -260,11 +296,17 @@ def _iso(seconds: float) -> str:
     )
 
 
-def due(expires: float | None, issued: float | None, now: float) -> bool:
+def due(
+    expires: float | None,
+    issued: float | None,
+    now: float,
+    refreshed: float | None = None,
+) -> bool:
     """Whether a token that expires at `expires` (and was issued at
-    `issued`, when known) is to be refreshed at `now`."""
+    `issued`, when known) is to be refreshed at `now`. A token whose expiry
+    is unknown is refreshed DEFAULT_AHEAD after it was last refreshed."""
     if expires is None:
-        return True
+        return refreshed is None or now - refreshed >= DEFAULT_AHEAD
     if issued is not None and expires > issued:
         ahead = min(MAX_AHEAD, max(MIN_AHEAD, (expires - issued) / 2))
     else:
@@ -383,16 +425,20 @@ def codex_expiry(login: Any) -> tuple[float | None, float | None]:
     return _number(claims.get("exp")), _number(claims.get("iat"))
 
 
-def codex_age(login: Any) -> tuple[float, float]:
-    """What orders two Codex logins: access token expiry, then last_refresh."""
-    expires, _ = codex_expiry(login)
-    return (expires or 0.0, _time((login or {}).get("last_refresh")) or 0.0)
+def codex_age(login: Any) -> tuple[float, float, float]:
+    """What orders two Codex logins: the access token's own expiry and issue
+    time, then last_refresh, which a machine's clock wrote."""
+    expires, issued = codex_expiry(login)
+    last = _time(login.get("last_refresh")) if isinstance(login, dict) else None
+    return (expires or 0.0, issued or 0.0, last or 0.0)
 
 
 def codex_due(login: dict, now: float) -> bool:
     expires, issued = codex_expiry(login)
     last = _time(login.get("last_refresh"))
-    return due(expires, issued, now) or last is None or now - last > CODEX_MAX_AGE
+    if due(expires, issued, now, last):
+        return True
+    return last is not None and now - last > CODEX_MAX_AGE
 
 
 def codex_strip(login: dict) -> dict:
@@ -463,6 +509,16 @@ def pi_real(entry: Any) -> bool:
 def pi_expires(entry: Any) -> float:
     value = _number(entry.get("expires")) if isinstance(entry, dict) else None
     return value / 1000 if value is not None else 0.0
+
+
+def pi_order(entry: Any) -> tuple[float, float]:
+    """What orders two pi entries of a provider: the access token's own
+    expiry and issue time when it is a JWT, else the expires that pi wrote."""
+    claims = jwt_claims(entry.get("access")) if isinstance(entry, dict) else None
+    expires = _number((claims or {}).get("exp"))
+    if expires is not None:
+        return (expires, _number(claims.get("iat")) or 0.0)
+    return (pi_expires(entry), 0.0)
 
 
 def pi_due(entry: dict, now: float) -> bool:
@@ -603,9 +659,24 @@ def _line(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"))
 
 
+def owner_ref(store_ref: str) -> str:
+    """The owner field next to a store field."""
+    vault, item, _ = OpStore.parse(store_ref)
+    return f"op://{vault}/{item}/{OWNER_FIELD}"
+
+
+def _intake_value(raw: str | None, what: str) -> tuple[Any, bool]:
+    """An intake field's login and whether `seed --force` wrote it."""
+    value = _parse(raw, what, lambda v: isinstance(v, dict))
+    if isinstance(value, dict) and value.get(FORCE_KEY) is True:
+        return value.get("login"), True
+    return value, False
+
+
 class Run:
     """One pass over Codex's and pi's logins. `log` takes lines that hold no
-    secrets; `token_urls` replaces endpoints, for tests."""
+    secrets; `token_urls` replaces endpoints, and `clock` and `budget` the
+    run's deadline, for tests."""
 
     def __init__(
         self,
@@ -616,6 +687,9 @@ class Run:
         log: Callable[[str], None] = print,
         write_tries: int = 3,
         write_pause: float = 2.0,
+        budget: float = RUN_BUDGET,
+        clock: Callable[[], float] = time.monotonic,
+        app_name: str = "",
     ):
         self.store = store
         self.now = time.time() if now is None else now
@@ -624,24 +698,80 @@ class Run:
         self.log = log
         self.write_tries = write_tries
         self.write_pause = write_pause
+        self.clock = clock
+        self.deadline = clock() + budget
+        self.app_name = app_name or APP_NAME
+        # The longest one write takes: two calls of op.
+        self.write_cost = 2 * store.timeout
+        # What a refresh must leave time for: the request, every save
+        # attempt with its pauses, and two rounds of the rescue.
+        self.reserve = (
+            HTTP_TIMEOUT
+            + (write_tries + 4) * self.write_cost
+            + write_pause * (2**write_tries)
+        )
 
-    def _persist(self, ref: str, value: Any, rescue: Callable[[], None]) -> None:
+    def left(self) -> float:
+        return self.deadline - self.clock()
+
+    def _may_spend(self, what: str) -> bool:
+        """Whether there is time to refresh and save before the deadline."""
+        if self.left() >= self.reserve:
+            return True
+        self.log(
+            f"{what}: too little time left in this run to refresh; the next run does"
+        )
+        return False
+
+    def _own(self, store_ref: str) -> None:
+        """Claims the store for this app, or refuses one another app owns."""
+        ref = owner_ref(store_ref)
+        owner = self.store.read(ref)
+        if owner is None or not owner.strip():
+            self.store.write(ref, self.app_name)
+        elif owner.strip() != self.app_name:
+            raise StoreError(
+                f"{store_ref} belongs to the refresher app {owner.strip()!r}, not "
+                f"{self.app_name!r}: two apps would spend the same refresh tokens"
+            )
+
+    def _persist(self, ref: str, value: Any, rescues: list[tuple[str, Any]]) -> None:
         """Writes a login with a new refresh token to the store, trying a few
-        times. When that cannot be done, `rescue` writes it to the public
-        field instead, where the next run takes it back (a machine pulling it
-        meanwhile holds a refresh token, as every machine did before), so
-        the rotated token is never lost; the run still fails."""
+        times. When that cannot be done, it writes it to each rescue field
+        (ref, value) in turn, again and again until the deadline, where the
+        next run takes it back. The run fails either way."""
+        last: Exception | None = None
         for attempt in range(self.write_tries):
             try:
                 self.store.write(ref, _line(value))
                 return
-            except StoreError as error:
+            except Exception as error:  # any failure: never lose the token
                 last = error
                 if attempt + 1 < self.write_tries:
-                    time.sleep(self.write_pause)
-        self.log(f"ERROR {last}; saving the new login in the public field instead")
-        rescue()
-        raise StoreError(f"{ref}: the new login could not be saved here: {last}")
+                    time.sleep(self.write_pause * (2**attempt))
+        self.log(f"ERROR {_describe(last)}; saving the new login elsewhere")
+        pause = self.write_pause
+        while True:
+            for rescue_ref, rescue_value in rescues:
+                try:
+                    self.store.write(rescue_ref, _line(rescue_value))
+                except Exception as error:
+                    self.log(f"ERROR rescue to {rescue_ref}: {_describe(error)}")
+                    continue
+                self.log(f"saved the new login in {rescue_ref}; the next run takes it")
+                raise StoreError(
+                    f"{ref}: the new login could not be saved here ({_describe(last)}); "
+                    f"it is in {rescue_ref}"
+                )
+            if self.left() < self.write_cost * len(rescues) + pause:
+                break
+            time.sleep(pause)
+            pause = min(pause * 2, 60)
+        self.log("CRITICAL the new login could not be saved anywhere")
+        raise StoreError(
+            f"{ref}: the new login could not be saved anywhere ({_describe(last)}); "
+            "sign in again and run `agentix auth refresher seed`"
+        )
 
     def _publish(self, ref: str, before: Any, after: Any, what: str) -> bool:
         """Writes `after` to the public field unless it is what is there, or
@@ -666,20 +796,44 @@ class Run:
         out: dict[str, Any] = {"refreshed": False, "published": False, "adopted": False}
         store_ref = setting("AGENTIX_REFRESHER_CODEX_STORE")
         public_ref = setting("AGENTIX_REFRESHER_CODEX_PUBLIC")
-        is_login = lambda v: codex_tokens(v) is not None  # noqa: E731
+        intake_ref = setting("AGENTIX_REFRESHER_CODEX_INTAKE")
+        self._own(store_ref)
+
+        def is_login(value: Any) -> bool:
+            return codex_tokens(value) is not None
+
         login = _parse(self.store.read(store_ref), store_ref, is_login)
         public = _parse(self.store.read(public_ref), public_ref, is_login)
+        intake, forced = _intake_value(self.store.read(intake_ref), intake_ref)
+        if intake is not None and not is_login(intake):
+            self.log(f"codex: {intake_ref} is not a login; ignored")
+            intake, forced = None, False
 
-        # A real login in the public field that is newer than the store's was
-        # pushed by a machine that refreshed or signed in again: the store's
-        # refresh token is spent or superseded, so the store takes it.
-        if codex_real(public) and (
-            login is None or codex_age(public) > codex_age(login)
-        ):
-            self.store.write(store_ref, _line(public))
-            login = public
+        # A real login handed in, or still pushed to the public field by an
+        # older agent-auth-sync, that is newer than the store's comes from a
+        # machine that signed in again or refreshed: the store's refresh
+        # token is spent or superseded, so the store takes it.
+        candidates = [
+            (source, value)
+            for source, value in ((intake_ref, intake), (public_ref, public))
+            if codex_real(value)
+        ]
+        best = None
+        if forced and codex_real(intake):
+            best = (intake_ref, intake)
+        else:
+            for source, value in candidates:
+                if (login is None or codex_age(value) > codex_age(login)) and (
+                    best is None or codex_age(value) > codex_age(best[1])
+                ):
+                    best = (source, value)
+        if best is not None and (login is None or _canon(best[1]) != _canon(login)):
+            self.store.write(store_ref, _line(best[1]))
+            login = best[1]
             out["adopted"] = True
-            self.log(f"codex: took the newer login in {public_ref} into {store_ref}")
+            self.log(f"codex: took the login in {best[0]} into {store_ref}")
+        if forced:
+            self.store.write(intake_ref, _line(intake))  # taken; no longer forced
         if login is None:
             raise StoreError(
                 f"no Codex login in {store_ref} or {public_ref}: sign in on a machine "
@@ -691,11 +845,11 @@ class Run:
                 "machine and run `agentix auth refresher seed`"
             )
 
-        if self.force or codex_due(login, self.now):
+        if (self.force or codex_due(login, self.now)) and self._may_spend("codex"):
+            # Prove the store can be written before the refresh token is spent.
+            self.store.write(store_ref, _line(login))
             new = codex_refresh(login, self.now, self.urls.get("codex", ""))
-            self._persist(
-                store_ref, new, lambda: self.store.write(public_ref, _line(new))
-            )
+            self._persist(store_ref, new, [(intake_ref, new), (public_ref, new)])
             login = new
             out["refreshed"] = True
             self.log("codex: refreshed")
@@ -716,28 +870,47 @@ class Run:
         return out
 
     def pi(self) -> dict[str, Any]:
-        out: dict[str, Any] = {"providers": {}, "published": False, "errors": []}
+        out: dict[str, Any] = {
+            "providers": {},
+            "published": False,
+            "errors": [],
+            "left_out": [],
+        }
         store_ref = setting("AGENTIX_REFRESHER_PI_STORE")
         public_ref = setting("AGENTIX_REFRESHER_PI_PUBLIC")
-        is_auth = lambda v: isinstance(v, dict)  # noqa: E731
+        intake_ref = setting("AGENTIX_REFRESHER_PI_INTAKE")
+        self._own(store_ref)
+
+        def is_auth(value: Any) -> bool:
+            return isinstance(value, dict)
+
         logins = _parse(self.store.read(store_ref), store_ref, is_auth) or {}
         public = _parse(self.store.read(public_ref), public_ref, is_auth)
+        intake, forced = _intake_value(self.store.read(intake_ref), intake_ref)
+        if not isinstance(intake, dict):
+            intake, forced = None, False
 
-        # As for Codex, per provider: a newer real entry in the public field
-        # replaces the store's.
-        taken = [
-            name
-            for name, entry in (public or {}).items()
-            if pi_real(entry)
-            and (name not in logins or pi_expires(entry) > pi_expires(logins[name]))
-        ]
+        # As for Codex, per provider: a newer real entry handed in or in the
+        # public field replaces the store's.
+        taken: dict[str, str] = {}
+        for source, entries in ((intake_ref, intake), (public_ref, public)):
+            for name, entry in (entries or {}).items():
+                if not pi_real(entry):
+                    continue
+                current = logins.get(name)
+                take = (forced and source == intake_ref) or (
+                    current is None or pi_order(entry) > pi_order(current)
+                )
+                if take and (current is None or _canon(entry) != _canon(current)):
+                    logins = {**logins, name: entry}
+                    taken[name] = source
         if taken:
-            logins = {**logins, **{name: public[name] for name in taken}}
             self.store.write(store_ref, _line(logins))
-            self.log(
-                f"pi: took the newer {', '.join(sorted(taken))} from {public_ref} into {store_ref}"
-            )
+            self.log(f"pi: took {', '.join(sorted(taken))} into {store_ref}")
+        if forced:
+            self.store.write(intake_ref, _line(intake))
 
+        checked = False
         for name in sorted(logins):
             entry = logins[name]
             if not _pi_oauth(entry):
@@ -755,7 +928,13 @@ class Run:
                 )
                 out["errors"].append(f"pi {name}: {state['error']}")
                 continue
-            if self.force or pi_due(entry, self.now):
+            if (self.force or pi_due(entry, self.now)) and self._may_spend(
+                f"pi {name}"
+            ):
+                if not checked:
+                    # Prove the store can be written before spending a token.
+                    self.store.write(store_ref, _line(logins))
+                    checked = True
                 try:
                     new = PI_REFRESHERS[name](entry, self.now, self.urls.get(name, ""))
                 except RefreshError as error:
@@ -765,17 +944,15 @@ class Run:
                     self.log(f"ERROR {error}")
                     continue
                 logins = {**logins, name: new}
-                rescue_copy = {**(public or {}), name: new}
                 self._persist(
                     store_ref,
                     logins,
-                    lambda copy=rescue_copy: self.store.write(public_ref, _line(copy)),
+                    [(intake_ref, logins), (public_ref, {**(public or {}), name: new})],
                 )
                 state["refreshed"] = True
                 self.log(f"pi {name}: refreshed")
-            state["expires_at"] = (
-                _iso(pi_expires(logins[name])) if pi_expires(logins[name]) else None
-            )
+            expires = pi_expires(logins[name])
+            state["expires_at"] = _iso(expires) if expires else None
 
         # The public copy: what is there, with each supported provider's entry
         # replaced by the store's without its refresh token, unless the one
@@ -789,7 +966,7 @@ class Run:
             if (
                 _pi_oauth(there)
                 and not pi_real(there)
-                and pi_expires(there) > pi_expires(stripped)
+                and pi_order(there) > pi_order(stripped)
             ):
                 self.log(f"pi {name}: {public_ref} holds a newer entry; left alone")
                 continue
@@ -799,6 +976,11 @@ class Run:
             self.log(
                 f"pi {name}: not supported here, so it is left out of {public_ref}"
             )
+        out["left_out"] = sorted(
+            name
+            for name, entry in logins.items()
+            if _pi_oauth(entry) and name not in PI_REFRESHERS
+        )
         if published:
             out["published"] = self._publish(public_ref, public, published, "pi")
         return out
@@ -811,28 +993,58 @@ class Run:
                 summary[name] = step()
                 if summary[name].get("errors"):
                     ok = False
-            except (RefreshError, StoreError) as error:
-                summary[name] = {"error": str(error)}
+            except Exception as error:  # report it, go on with the next
+                summary[name] = {"error": _describe(error)}
                 if isinstance(error, RefreshError):
                     summary[name]["permanent"] = error.permanent
-                self.log(f"ERROR {name}: {error}")
+                self.log(f"ERROR {name}: {_describe(error)}")
                 ok = False
         summary["ok"] = ok
         return summary
 
 
-def seed(store: OpStore, codex_path: str = "", pi_path: str = "") -> dict[str, Any]:
-    """Puts the real logins in these local files into the refresher's store,
-    for after a new sign-in. pi's providers are merged into the store's."""
+def _describe(error: Exception | None) -> str:
+    """An error's message when it is one of ours (they hold no tokens), else
+    only its type: another exception's message might quote a value."""
+    if isinstance(error, RefreshError | StoreError):
+        return str(error)
+    return type(error).__name__ if error is not None else "unknown error"
+
+
+def seed(
+    store: OpStore, codex_path: str = "", pi_path: str = "", force: bool = False
+) -> dict[str, Any]:
+    """Hands the real logins in these local files to the refresher, through
+    its intake fields, for after a new sign-in. The next run takes each one
+    that is newer than the store's. A login older than the store's is
+    refused, since that would put back a spent refresh token, unless `force`,
+    which makes the next run take it anyway."""
     done: dict[str, Any] = {}
+
+    def hand_in(intake_ref: str, value: Any) -> None:
+        payload = {FORCE_KEY: True, "login": value} if force else value
+        store.write(intake_ref, _line(payload))
+
     if codex_path:
         with open(codex_path) as handle:
             login = json.load(handle)
         if not codex_real(login):
             raise StoreError(f"{codex_path} holds no Codex login with a refresh token")
         ref = setting("AGENTIX_REFRESHER_CODEX_STORE")
-        store.write(ref, _line(login))
-        done["codex"] = ref
+        current = _parse(store.read(ref), ref, lambda v: codex_tokens(v) is not None)
+        if current is not None and not force:
+            if _canon(current) == _canon(login):
+                done["codex"] = "already the refresher's login"
+                login = None
+            elif codex_age(current) >= codex_age(login):
+                raise StoreError(
+                    f"the refresher's Codex login is newer than {codex_path}; "
+                    "seeding it would put back a spent refresh token (--force to anyway)"
+                )
+        if login is not None:
+            intake = setting("AGENTIX_REFRESHER_CODEX_INTAKE")
+            hand_in(intake, login)
+            done["codex"] = intake
     if pi_path:
         with open(pi_path) as handle:
             local = json.load(handle)
@@ -841,8 +1053,29 @@ def seed(store: OpStore, codex_path: str = "", pi_path: str = "") -> dict[str, A
             raise StoreError(f"{pi_path} holds no pi login with a refresh token")
         ref = setting("AGENTIX_REFRESHER_PI_STORE")
         current = _parse(store.read(ref), ref, lambda v: isinstance(v, dict)) or {}
-        store.write(ref, _line({**current, **real}))
-        done["pi"] = {"field": ref, "providers": sorted(real)}
+        if not force:
+            older = sorted(
+                name
+                for name, entry in real.items()
+                if name in current
+                and _canon(current[name]) != _canon(entry)
+                and pi_order(current[name]) >= pi_order(entry)
+            )
+            if older:
+                raise StoreError(
+                    f"the refresher's {', '.join(older)} login is newer than in "
+                    f"{pi_path}; seeding would put back a spent refresh token "
+                    "(--force to anyway)"
+                )
+            real = {
+                n: e for n, e in real.items() if _canon(current.get(n)) != _canon(e)
+            }
+        if real:
+            intake = setting("AGENTIX_REFRESHER_PI_INTAKE")
+            hand_in(intake, real)
+            done["pi"] = {"field": intake, "providers": sorted(real)}
+        else:
+            done["pi"] = "already the refresher's logins"
     return done
 
 
@@ -872,7 +1105,7 @@ image = (
     max_containers=1,
     cpu=0.125,
     memory=256,
-    timeout=10 * 60,
+    timeout=FUNCTION_TIMEOUT,
     env={name: setting(name) for name in SETTINGS},
     name=FUNCTION_NAME,
 )

@@ -93,6 +93,9 @@ def refresher_status() -> dict:
         "deployed": deployed,
         "schedule": f"{refresher.SCHEDULE} (UTC)",
         **_fields(),
+        "pi_left_out": (last or {}).get("pi", {}).get("left_out", [])
+        if isinstance(last, dict)
+        else [],
         "last_run": last if last is not None else "never",
     }
 
@@ -128,7 +131,9 @@ def default_files() -> dict[str, str]:
     return {"codex": f"{codex_home}/auth.json", "pi": f"{pi_dir}/auth.json"}
 
 
-def refresher_seed(codex: str | None = None, pi: str | None = None) -> dict:
+def refresher_seed(
+    codex: str | None = None, pi: str | None = None, force: bool = False
+) -> dict:
     import os
 
     from . import refresher
@@ -139,6 +144,6 @@ def refresher_seed(codex: str | None = None, pi: str | None = None) -> dict:
     if not codex_path and not pi_path:
         raise OperationFailed("Nothing to seed: --codex and --pi are both empty.")
     try:
-        return refresher.seed(refresher.OpStore(), codex_path, pi_path)
+        return refresher.seed(refresher.OpStore(), codex_path, pi_path, force)
     except (refresher.StoreError, OSError, ValueError) as error:
         raise OperationFailed(str(error)) from None

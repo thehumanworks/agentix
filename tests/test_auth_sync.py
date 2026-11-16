@@ -4,6 +4,7 @@ The fake keeps its vault in a JSON file (see fake_op.py), so each test sets
 up both sides, runs the script, and reads what it left on each.
 """
 
+import base64
 import contextlib
 import json
 import os
@@ -497,10 +498,14 @@ class PullOnlyTest(AuthSyncTestCase):
         self.assertEqual(self.read_file(self.codex)["tokens"]["refresh_token"], "")
         self.assertEqual(self.edits(), [])
 
-    def test_a_newer_local_login_stays_here_and_is_not_pushed(self):
+    def items(self) -> dict:
+        return json.loads(self.store.read_text()) if self.store.exists() else {}
+
+    def test_a_newer_local_login_is_handed_to_the_refresher_not_pushed(self):
         self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
         self.sync()
-        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+        newer = codex_auth("access-new", "2026-11-02T00:00:00Z")
+        self.write_file(self.codex, newer)
 
         result = self.sync()
         self.sync()
@@ -511,8 +516,39 @@ class PullOnlyTest(AuthSyncTestCase):
         self.assertEqual(
             json.loads(self.field("codex"))["tokens"]["access_token"], "access-old"
         )
-        self.assertEqual(self.edits(), [])
-        self.assertNotIn("updated from", result.stderr)
+        self.assertEqual(json.loads(self.field("codex-refresher", "intake")), newer)
+        self.assertEqual(len(self.edits()), 1)  # handed in once
+        self.assertIn("handed a newer login to the refresher", result.stderr)
+
+    def test_the_same_login_with_its_refresh_token_is_not_handed_in(self):
+        self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync()
+
+        self.assertNotIn("agentix/codex-refresher", self.items())
+
+    def test_order_comes_from_the_access_tokens_expiry(self):
+        def login(name: str, exp: int, refreshed: str) -> dict:
+            claims = base64.urlsafe_b64encode(json.dumps({"exp": exp}).encode())
+            token = f"e30.{claims.decode().rstrip('=')}.c2ln"
+            return {
+                "auth_mode": "chatgpt",
+                "tokens": {"access_token": token, "refresh_token": "", "id": name},
+                "last_refresh": refreshed,
+            }
+
+        remote = login("remote", 2000, "2026-11-01T00:00:00Z")
+        self.put_field("codex", remote)
+        # A clock ahead wrote a later last_refresh on an older token.
+        local = login("local", 1000, "2026-12-01T00:00:00Z")
+        local["tokens"]["refresh_token"] = "refresh-old"
+        self.write_file(self.codex, local)
+
+        self.sync()
+
+        self.assertEqual(self.read_file(self.codex)["tokens"]["id"], "remote")
+        self.assertNotIn("agentix/codex-refresher", self.items())
 
     def test_pi_entries_are_pulled_per_provider_and_never_pushed(self):
         remote = {
@@ -549,12 +585,21 @@ class PullOnlyTest(AuthSyncTestCase):
         self.assertEqual(merged["openai"]["refresh"], "refresh-new")  # newer here
         self.assertEqual(merged["zai"], local["zai"])
         self.assertEqual(json.loads(self.field("pi")), remote)
-        self.assertEqual(self.edits(), [])
+        # The newer openai login went to the refresher's intake.
+        self.assertEqual(json.loads(self.field("pi-refresher", "intake")), local)
 
-    def test_pull_mode_never_creates_a_field(self):
+    def test_pull_mode_never_creates_the_public_field(self):
         self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
 
         self.sync(AGENT_AUTH_SYNC_MODE="pull")
+
+        self.assertNotIn("agentix/codex", self.items())
+        self.assertIn("agentix/codex-refresher", self.items())
+
+    def test_intake_off_hands_nothing_in(self):
+        self.write_file(self.codex, codex_auth("access-old", "2026-11-01T00:00:00Z"))
+
+        self.sync(AGENT_AUTH_SYNC_MODE="pull", AGENT_AUTH_SYNC_INTAKE="off")
 
         self.assertFalse(self.store.exists())
 
@@ -583,10 +628,13 @@ class PullOnlyTest(AuthSyncTestCase):
     def test_status_shows_the_mode_and_pull_only(self):
         self.put_field("codex", self.stripped("access-old", "2026-11-01T00:00:00Z"))
 
+        self.write_file(self.codex, codex_auth("access-new", "2026-11-02T00:00:00Z"))
+
         result = self.run_script("status")
 
         self.assertIn("mode: auto", result.stdout)
         self.assertIn("pull only", result.stdout)
+        self.assertNotIn("pushes it", result.stdout)
 
 
 class CommandsTest(AuthSyncTestCase):

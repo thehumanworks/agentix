@@ -665,7 +665,9 @@ login well before it expires, twice an hour, and writes copies without
 refresh tokens to `op://agentix/codex/auth` and `op://agentix/pi/auth`.
 Codex and pi work with those copies, and agent-auth-sync only pulls a field
 whose refresh tokens are empty (`AGENT_AUTH_SYNC_MODE=auto`, the default),
-so no machine spends a refresh token. Nothing changes until it is deployed.
+so no machine spends a refresh token; a newer login made on a machine
+(`codex login`) is handed to the refresher through a field only it reads.
+Nothing changes until it is deployed.
 Setup, migration order, costs (about $0.20 a month), and limits:
 [docs/auth-refresher.md](docs/auth-refresher.md).
 

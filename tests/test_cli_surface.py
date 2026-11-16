@@ -50,7 +50,7 @@ SURFACE = [
         "_refresher_seed",
         [],
         [("--codex", None, "/c.json", "/c.json"), ("--pi", None, "/p.json", "/p.json")],
-        [],
+        [("--force", "-f")],
     ),
     ("config show", "_config_show", [], [], []),
     ("runner deploy", "_runner_deploy", [], [], []),

@@ -125,6 +125,18 @@ class RefresherTestCase(unittest.TestCase):
         for name in refresher.SETTINGS:
             os.environ.pop(name, None)
         self.store = refresher.OpStore(op=str(op))
+        # Every field written, as ITEM/FIELD, in order, by any OpStore.
+        self.writes: list[str] = []
+        real_write = refresher.OpStore.write
+        test = self
+
+        def recording_write(store, ref, value):
+            real_write(store, ref, value)
+            test.writes.append(ref.removeprefix("op://agentix/"))
+
+        recorder = patch.object(refresher.OpStore, "write", recording_write)
+        recorder.start()
+        self.addCleanup(recorder.stop)
         self.server = TokenServer()
         self.addCleanup(self.server.close)
         self.urls = {
@@ -174,17 +186,27 @@ class RefresherTestCase(unittest.TestCase):
         return [json.loads(line) for line in path.read_text().splitlines()]
 
     def written(self) -> list[str]:
-        """The items edited or created, in order."""
-        out = []
-        for call in self.calls():
-            if call[:2] == ["item", "edit"]:
-                out.append(call[2])
-            elif call[:2] == ["item", "create"]:
-                template = call[call.index("--template") + 1]
-                out.append(f"create:{template}")
-        return out
+        """The fields written, as ITEM/FIELD, in order, without owner fields."""
+        return [ref for ref in self.writes if not ref.endswith("/owner")]
 
-    def run_once(self, now: float = NOW, force: bool = False, store=None) -> dict:
+    def set_field(self, title: str, label: str, text: str) -> None:
+        items = json.loads(self.vault.read_text()) if self.vault.exists() else {}
+        item = items.setdefault(
+            f"agentix/{title}", {"id": f"id-{title}", "title": title, "fields": []}
+        )
+        item["fields"] = [f for f in item["fields"] if f.get("label") != label]
+        item["fields"].append({"id": label, "label": label, "value": text})
+        self.vault.write_text(json.dumps(items))
+
+    def get_field(self, title: str, label: str):
+        items = json.loads(self.vault.read_text()) if self.vault.exists() else {}
+        item = items.get(f"agentix/{title}") or {"fields": []}
+        values = [f["value"] for f in item["fields"] if f.get("label") == label]
+        return json.loads(values[0]) if values else None
+
+    def run_once(
+        self, now: float = NOW, force: bool = False, store=None, **options
+    ) -> dict:
         run = refresher.Run(
             store or self.store,
             now=now,
@@ -192,6 +214,7 @@ class RefresherTestCase(unittest.TestCase):
             token_urls=self.urls,
             log=self.lines.append,
             write_pause=0,
+            **options,
         )
         summary = run()
         self.summaries = getattr(self, "summaries", []) + [summary]
@@ -264,8 +287,11 @@ class CodexTest(RefresherTestCase):
         public = self.get("codex")
         self.assertEqual(public["tokens"]["refresh_token"], "")
         self.assertEqual(public["tokens"]["access_token"], access)
-        # The store first, then the public copy.
-        self.assertEqual(self.written(), ["codex-refresher", "codex"])
+        # A check that the store takes writes, the new login, then the copy.
+        self.assertEqual(
+            self.written(),
+            ["codex-refresher/auth", "codex-refresher/auth", "codex/auth"],
+        )
 
     def test_a_login_with_time_left_is_not_refreshed(self):
         login = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
@@ -277,6 +303,7 @@ class CodexTest(RefresherTestCase):
 
         self.assertEqual(self.server.requests, [])
         self.assertEqual(self.written(), [])  # nothing changed, nothing written
+        self.assertIn("codex-refresher/owner", self.writes)
 
     def test_an_old_last_refresh_is_refreshed_even_with_time_left(self):
         login = codex_login(
@@ -308,7 +335,7 @@ class CodexTest(RefresherTestCase):
         self.assertIn("400 (refresh_token_reused)", summary["codex"]["error"])
         self.assertEqual(self.get("codex-refresher"), old)
         self.assertEqual(self.get("codex"), refresher.codex_strip(old))
-        self.assertEqual(self.written(), [])
+        self.assertEqual(self.written(), ["codex-refresher/auth"])  # the check only
 
     def test_a_newer_real_login_pushed_by_a_machine_is_taken_over(self):
         old = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
@@ -343,7 +370,7 @@ class CodexTest(RefresherTestCase):
 
         self.assertEqual(self.get("codex"), refresher.codex_strip(newer))
 
-    def test_a_new_token_that_cannot_be_stored_goes_to_the_public_field(self):
+    def test_a_new_token_that_cannot_be_stored_goes_to_the_intake_field(self):
         old = codex_login(
             "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
         )
@@ -353,16 +380,26 @@ class CodexTest(RefresherTestCase):
         store_ref = refresher.setting("AGENTIX_REFRESHER_CODEX_STORE")
 
         class Flaky(refresher.OpStore):
+            writes = 0
+
             def write(inner, ref, value):
                 if ref == store_ref:
-                    raise refresher.StoreError(f"{ref}: writing 1Password failed: boom")
+                    inner.writes += 1
+                    if inner.writes > 1:  # the check passes, the save does not
+                        raise OSError("disk full")  # not even a StoreError
                 super().write(ref, value)
 
         flaky = Flaky(op=self.store.op)
         summary = self.run_once(store=flaky)
 
         self.assertFalse(summary["ok"])
-        self.assertEqual(self.get("codex")["tokens"]["refresh_token"], "refresh-a2")
+        self.assertIn("codex-refresher/intake", summary["codex"]["error"])
+        self.assertEqual(flaky.writes, 4)  # the check and three tries
+        self.assertEqual(
+            self.get_field("codex-refresher", "intake")["tokens"]["refresh_token"],
+            "refresh-a2",
+        )
+        self.assertEqual(self.get("codex")["tokens"]["refresh_token"], "")
         # The next run, with 1Password writable again, takes it back and strips it.
         summary = self.run_once(now=NOW + 1800)
         self.assertTrue(summary["ok"], summary)
@@ -400,6 +437,157 @@ class CodexTest(RefresherTestCase):
             self.get("codex-refresher")["tokens"]["refresh_token"], "refresh-a2"
         )
 
+    def test_with_store_and_intake_unwritable_the_public_field_gets_it(self):
+        old = codex_login(
+            "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
+        )
+        self.put("codex-refresher", old)
+        self.put("codex", refresher.codex_strip(old))
+        self.answer_codex("a2", "refresh-a2")
+
+        class Flaky(refresher.OpStore):
+            writes = 0
+
+            def write(inner, ref, value):
+                if "codex-refresher" in ref and not ref.endswith("/owner"):
+                    inner.writes += 1
+                    if inner.writes > 1:
+                        raise refresher.StoreError(f"{ref}: writing 1Password failed")
+                super().write(ref, value)
+
+        summary = self.run_once(store=Flaky(op=self.store.op))
+
+        self.assertIn("it is in op://agentix/codex/auth", summary["codex"]["error"])
+        self.assertEqual(self.get("codex")["tokens"]["refresh_token"], "refresh-a2")
+        # The next run takes it back from there and strips it again.
+        self.assertTrue(self.run_once(now=NOW + 1800)["ok"])
+        self.assertEqual(
+            self.get("codex-refresher")["tokens"]["refresh_token"], "refresh-a2"
+        )
+        self.assertEqual(self.get("codex")["tokens"]["refresh_token"], "")
+
+    def test_the_rescue_keeps_trying_until_the_deadline(self):
+        old = codex_login(
+            "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
+        )
+        self.put("codex-refresher", old)
+        self.answer_codex("a2", "refresh-a2")
+        clock = [0.0]
+        attempts = []
+
+        class Down(refresher.OpStore):
+            checked = False
+
+            def write(inner, ref, value):
+                if ref.endswith("/owner"):
+                    return super().write(ref, value)
+                if not inner.checked:
+                    inner.checked = True
+                    return super().write(ref, value)
+                attempts.append(ref)
+                clock[0] += 50  # each failed write takes a while
+                raise refresher.StoreError(f"{ref}: writing 1Password failed")
+
+        down = Down(op=self.store.op, timeout=10)
+        summary = self.run_once(store=down, clock=lambda: clock[0], budget=600)
+
+        self.assertIn("could not be saved anywhere", summary["codex"]["error"])
+        self.assertIn("CRITICAL the new login could not be saved anywhere", self.lines)
+        rescues = [ref for ref in attempts if not ref.endswith("codex-refresher/auth")]
+        self.assertGreater(len(rescues), 2)  # more than one round
+        self.assertLessEqual(clock[0], 600 + 100)
+
+    def test_a_store_that_cannot_be_written_spends_no_refresh_token(self):
+        old = codex_login(
+            "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
+        )
+        self.put("codex-refresher", old)
+        self.answer_codex("a2", "refresh-a2")
+
+        class ReadOnly(refresher.OpStore):
+            def write(inner, ref, value):
+                if ref.endswith("/auth"):
+                    raise refresher.StoreError(f"{ref}: writing 1Password failed")
+                super().write(ref, value)
+
+        summary = self.run_once(store=ReadOnly(op=self.store.op))
+
+        self.assertFalse(summary["ok"])
+        self.assertEqual(self.server.requests, [])
+        self.assertEqual(self.get("codex-refresher"), old)
+
+    def test_too_little_time_left_spends_no_refresh_token(self):
+        old = codex_login(
+            "a1", self.secret("refresh-a1"), NOW - 9.5 * DAY, NOW + 0.5 * DAY
+        )
+        self.put("codex-refresher", old)
+        self.answer_codex("a2", "refresh-a2")
+        run = refresher.Run(
+            self.store,
+            now=NOW,
+            token_urls=self.urls,
+            log=self.lines.append,
+            write_pause=0,
+        )
+        self.assertGreater(run.reserve, 2 * 60)
+
+        summary = self.run_once(budget=run.reserve - 1)
+
+        self.assertFalse(summary["codex"]["refreshed"])
+        self.assertEqual(self.server.requests, [])
+        self.assertIn(
+            "codex: too little time left in this run to refresh; the next run does",
+            self.lines,
+        )
+
+    def test_the_run_fits_the_functions_timeout(self):
+        run = refresher.Run(self.store, now=NOW)
+        self.assertLess(refresher.RUN_BUDGET, refresher.FUNCTION_TIMEOUT)
+        # The last refresh may start with only the reserve left; all of its
+        # saves and the rescue then still end before Modal stops the function.
+        self.assertLess(refresher.RUN_BUDGET + 60, refresher.FUNCTION_TIMEOUT)
+        self.assertLess(run.reserve, refresher.RUN_BUDGET / 2)
+
+    def test_a_login_handed_in_through_the_intake_is_taken(self):
+        old = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
+        newer = codex_login("b1", self.secret("refresh-b1"), NOW, NOW + 10 * DAY)
+        self.put("codex-refresher", old)
+        self.put("codex", refresher.codex_strip(old))
+        self.set_field("codex-refresher", "intake", json.dumps(newer))
+
+        summary = self.run_once()
+
+        self.assertTrue(summary["codex"]["adopted"])
+        self.assertEqual(self.get("codex-refresher"), newer)
+        self.assertEqual(self.get("codex"), refresher.codex_strip(newer))
+        # An older one handed in later is ignored.
+        self.set_field("codex-refresher", "intake", json.dumps(old))
+        self.assertFalse(self.run_once(now=NOW + 60)["codex"]["adopted"])
+
+    def test_order_comes_from_the_token_not_last_refresh(self):
+        current = codex_login("a1", self.secret("refresh-a1"), NOW, NOW + 10 * DAY)
+        fast_clock = codex_login(
+            "b1", self.secret("refresh-b1"), NOW - DAY, NOW + 9 * DAY
+        )
+        fast_clock["last_refresh"] = refresher._iso(NOW + 5 * DAY)  # clock ahead
+        self.put("codex-refresher", current)
+        self.put("codex", fast_clock)
+
+        self.assertFalse(self.run_once()["codex"]["adopted"])
+        self.assertEqual(self.get("codex-refresher"), current)
+
+    def test_a_store_owned_by_another_app_is_refused(self):
+        login = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
+        self.put("codex-refresher", login)
+        self.set_field("codex-refresher", "owner", "other-refresher")
+
+        summary = self.run_once()
+
+        self.assertIn(
+            "belongs to the refresher app 'other-refresher'", summary["codex"]["error"]
+        )
+        self.assertEqual(self.written(), [])
+
     def test_a_missing_login_says_how_to_seed_it(self):
         summary = self.run_once()
 
@@ -413,7 +601,7 @@ class CodexTest(RefresherTestCase):
         self.assertTrue(self.run_once(force=True)["codex"]["refreshed"])
 
 
-class PiTest(RefresherTestCase):
+class PiCase(RefresherTestCase):
     def logins(self, expires: float) -> dict:
         return {
             "openai": {
@@ -469,6 +657,8 @@ class PiTest(RefresherTestCase):
             },
         )
 
+
+class PiTest(PiCase):
     def test_each_provider_is_refreshed_as_pi_does_it(self):
         logins = self.logins(NOW + 600)
         self.put("pi-refresher", logins)
@@ -532,7 +722,7 @@ class PiTest(RefresherTestCase):
         self.assertEqual(public["zai"], {"type": "api_key", "key": "k"})
         for name in ("openai", "openai-codex", "anthropic"):
             self.assertEqual(public[name], {**real[name], "refresh": ""})
-        self.assertEqual(self.written()[-1], "pi")
+        self.assertEqual(self.written()[-1], "pi/auth")
 
     def test_one_failing_provider_leaves_the_others_refreshed(self):
         logins = self.logins(NOW + 600)
@@ -616,6 +806,70 @@ class PiTest(RefresherTestCase):
         self.assertEqual(self.get("pi-refresher")["openai"], logins["openai"])
 
 
+class PiSafetyTest(PiCase):
+    def test_a_pi_login_that_cannot_be_stored_goes_to_the_intake_field(self):
+        logins = self.logins(NOW + 600)
+        self.put("pi-refresher", logins)
+        self.answer_all()
+        store_ref = refresher.setting("AGENTIX_REFRESHER_PI_STORE")
+
+        class Flaky(refresher.OpStore):
+            writes = 0
+
+            def write(inner, ref, value):
+                if ref == store_ref:
+                    inner.writes += 1
+                    if inner.writes > 1:
+                        raise ValueError("bad JSON from op")
+                super().write(ref, value)
+
+        summary = self.run_once(store=Flaky(op=self.store.op))
+
+        self.assertIn("pi-refresher/intake", summary["pi"]["error"])
+        handed = self.get_field("pi-refresher", "intake")
+        self.assertEqual(handed["anthropic"]["refresh"], "pi-ant-refresh-2")
+        # The next run takes it back.
+        self.run_once(now=NOW + 60)
+        self.assertEqual(
+            self.get("pi-refresher")["anthropic"]["refresh"], "pi-ant-refresh-2"
+        )
+
+    def test_the_summary_names_providers_left_out_of_the_public_field(self):
+        self.put(
+            "pi-refresher",
+            {
+                "xai": {
+                    "type": "oauth",
+                    "access": "a",
+                    "refresh": self.secret("xai-r"),
+                    "expires": 5,
+                }
+            },
+        )
+        summary = self.run_once()
+        self.assertEqual(summary["pi"]["left_out"], ["xai"])
+
+    def test_a_handed_in_pi_entry_is_taken_per_provider(self):
+        logins = self.logins(NOW + DAY)
+        self.put("pi-refresher", logins)
+        newer = {
+            **logins["anthropic"],
+            "refresh": self.secret("pi-ant-refresh-7"),
+            "expires": int((NOW + 2 * DAY) * 1000),
+        }
+        self.set_field(
+            "pi-refresher",
+            "intake",
+            json.dumps({"anthropic": newer, "openai": logins["openai"]}),
+        )
+
+        summary = self.run_once()
+
+        self.assertTrue(summary["pi"]["providers"]["anthropic"]["adopted"])
+        self.assertFalse(summary["pi"]["providers"]["openai"]["adopted"])
+        self.assertEqual(self.get("pi-refresher")["anthropic"], newer)
+
+
 class WindowTest(unittest.TestCase):
     def test_half_the_lifetime_within_bounds(self):
         # 10-day token: refreshed in its last day.
@@ -626,6 +880,17 @@ class WindowTest(unittest.TestCase):
         self.assertTrue(refresher.due(NOW + 3.9 * 3600, NOW - 4.1 * 3600, NOW))
         # 1-hour token: never later than an hour ahead, so every run.
         self.assertTrue(refresher.due(NOW + 3000, NOW - 600, NOW))
+
+    def test_without_an_expiry_every_two_hours(self):
+        self.assertFalse(refresher.due(None, None, NOW, NOW - 3600))
+        self.assertTrue(refresher.due(None, None, NOW, NOW - 2 * 3600))
+        self.assertTrue(refresher.due(None, None, NOW))
+        login = codex_login("a", "r", NOW, NOW + DAY)
+        login["tokens"]["access_token"] = "not-a-jwt"
+        login["last_refresh"] = refresher._iso(NOW - 3600)
+        self.assertFalse(refresher.codex_due(login, NOW))
+        login["last_refresh"] = refresher._iso(NOW - 3 * 3600)
+        self.assertTrue(refresher.codex_due(login, NOW))
 
     def test_without_an_issue_time_two_hours_ahead(self):
         self.assertFalse(refresher.due(NOW + 2.1 * 3600, None, NOW))
@@ -713,7 +978,7 @@ class AgentsAcceptTheCopiesTest(unittest.TestCase):
 
 
 class SeedTest(RefresherTestCase):
-    def test_seed_puts_real_logins_in_the_store(self):
+    def test_seed_hands_logins_in_and_the_next_run_takes_them(self):
         login = codex_login("a1", self.secret("refresh-a1"), NOW, NOW + DAY)
         codex_file = self.tmp / "codex.json"
         codex_file.write_text(json.dumps(login))
@@ -722,21 +987,76 @@ class SeedTest(RefresherTestCase):
             "type": "oauth",
             "access": "x",
             "refresh": self.secret("pi-seed-refresh"),
-            "expires": 5,
+            "expires": int((NOW + DAY) * 1000),
         }
         pi_file.write_text(
             json.dumps({"anthropic": entry, "zai": {"type": "api_key", "key": "k"}})
         )
-        self.put(
-            "pi-refresher",
-            {"openai": {"type": "oauth", "access": "o", "refresh": "o", "expires": 1}},
-        )
+        openai = {
+            "type": "oauth",
+            "access": "o",
+            "refresh": "o",
+            "expires": int((NOW + DAY) * 1000),
+            "clientId": "c",
+        }
+        self.put("pi-refresher", {"openai": openai})
 
         done = refresher.seed(self.store, str(codex_file), str(pi_file))
 
         self.assertEqual(done["pi"]["providers"], ["anthropic"])
+        # Only the intake fields are written; the run takes them, serialized.
+        self.assertEqual(
+            self.written(), ["codex-refresher/intake", "pi-refresher/intake"]
+        )
+        self.run_once()
         self.assertEqual(self.get("codex-refresher"), login)
         self.assertEqual(set(self.get("pi-refresher")), {"openai", "anthropic"})
+
+    def test_seed_refuses_a_login_older_than_the_store(self):
+        old = codex_login("a1", self.secret("refresh-a1"), NOW - DAY, NOW + 9 * DAY)
+        newer = codex_login("a2", self.secret("refresh-a2"), NOW, NOW + 10 * DAY)
+        self.put("codex-refresher", newer)
+        codex_file = self.tmp / "codex.json"
+        codex_file.write_text(json.dumps(old))
+
+        with self.assertRaisesRegex(refresher.StoreError, "spent refresh token"):
+            refresher.seed(self.store, str(codex_file))
+        self.assertEqual(self.written(), [])
+
+        # --force hands it in, and the next run takes it although it is older.
+        refresher.seed(self.store, str(codex_file), force=True)
+        self.assertTrue(self.run_once()["codex"]["adopted"])
+        self.assertEqual(self.get("codex-refresher"), old)
+        # Taken once: the intake no longer forces it.
+        self.put("codex-refresher", newer)
+        self.assertFalse(self.run_once(now=NOW + 60)["codex"]["adopted"])
+        self.assertEqual(self.get("codex-refresher"), newer)
+
+    def test_seed_refuses_older_pi_providers(self):
+        entry = {
+            "type": "oauth",
+            "access": "x",
+            "refresh": self.secret("pi-r1"),
+            "expires": 5,
+        }
+        newer = {**entry, "refresh": self.secret("pi-r2"), "expires": 9}
+        self.put("pi-refresher", {"anthropic": newer})
+        pi_file = self.tmp / "pi.json"
+        pi_file.write_text(json.dumps({"anthropic": entry}))
+
+        with self.assertRaisesRegex(refresher.StoreError, "anthropic login is newer"):
+            refresher.seed(self.store, "", str(pi_file))
+
+    def test_seeding_the_same_login_again_changes_nothing(self):
+        login = codex_login("a1", self.secret("refresh-a1"), NOW, NOW + DAY)
+        self.put("codex-refresher", login)
+        codex_file = self.tmp / "codex.json"
+        codex_file.write_text(json.dumps(login))
+
+        done = refresher.seed(self.store, str(codex_file))
+
+        self.assertEqual(done["codex"], "already the refresher's login")
+        self.assertEqual(self.written(), [])
 
     def test_seed_refuses_a_stripped_file(self):
         stripped = refresher.codex_strip(codex_login("a1", "r", NOW, NOW + DAY))

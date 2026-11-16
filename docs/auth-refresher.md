@@ -14,7 +14,7 @@ tokens. It is a Modal app with one scheduled function:
 uv run agentix auth refresher deploy          # once; deploying again is safe
 uv run agentix auth refresher status          # deployed? how did the last run go? no secrets
 uv run agentix auth refresher run-now         # run now; --force refreshes every login
-uv run agentix auth refresher seed            # after a new sign-in on this computer
+uv run agentix auth refresher seed            # hand this computer's logins in (agent-auth-sync does it by itself)
 uv run agentix auth refresher stop            # stop it (logins then expire within days)
 ```
 
@@ -22,32 +22,50 @@ uv run agentix auth refresher stop            # stop it (logins then expire with
 
 Modal runs `refresh` at minutes 17 and 47 of every hour (UTC). Each run:
 
-1. Reads the real logins from the refresher's own fields, the store
+1. Checks that the store belongs to this app: the field `owner` next to it
+   names the app that first used it, and a second app (another
+   `AGENTIX_REFRESHER_APP`) refuses to refresh the same logins.
+2. Reads the real logins from the refresher's own fields, the store
    (`op://agentix/codex-refresher/auth`, `op://agentix/pi-refresher/auth`),
-   and the public fields that every machine syncs (`op://agentix/codex/auth`,
-   `op://agentix/pi/auth`).
-2. Takes over a login in a public field that still has a refresh token and
-   is newer than the store's (a machine that signed in again, or that still
-   runs an older agent-auth-sync and refreshed). The first run takes the
-   current logins over this way, so no seeding is needed at first.
-3. Refreshes each login that is due, the way Codex and pi themselves do it
+   the intake fields next to them (`.../intake`), where machines hand in
+   newer logins, and the public fields that every machine syncs
+   (`op://agentix/codex/auth`, `op://agentix/pi/auth`).
+3. Takes over a login with a refresh token from the intake or a public
+   field that is newer than the store's: a machine that signed in again or
+   refreshed anyway, or one that still runs an older agent-auth-sync. The
+   first run takes the current logins over this way, so no seeding is
+   needed at first. Logins are ordered by their access tokens' own `exp`
+   and `iat` claims where they have them, not by times a machine's clock
+   wrote (`last_refresh`, pi's `expires`); Anthropic's tokens are not JWTs,
+   so pi's `expires` orders those.
+4. Refreshes each login that is due, the way Codex and pi themselves do it
    (same endpoints, client IDs, and request bodies): Codex's ChatGPT login,
    and pi's `openai` (Sign in with ChatGPT), `openai-codex` (ChatGPT
    Plus/Pro), and `anthropic` (Claude Pro/Max) entries. A login is due when
    less than half its lifetime is left, kept between 1 and 24 hours (2 hours
    when the token does not say when it was issued); a Codex login also when
-   its `last_refresh` is 7 days old.
-4. Writes each new login to the store at once, before anything else, so a
+   its `last_refresh` is 7 days old, and one whose expiry cannot be read 2
+   hours after its last refresh.
+   Before it spends a refresh token it rewrites the store's current value,
+   so a store it cannot write costs nothing, and it starts a refresh only
+   while the run has time left for the request, every save attempt, and
+   the rescue: a run stops starting refreshes 25 minutes in, and Modal
+   stops the function at 30, so it is never stopped holding an unsaved
+   token. Each call of `op` is given 20 seconds for a read and 30 for each
+   half of a write.
+5. Writes each new login to the store at once, before anything else, so a
    rotated refresh token is never lost. If the store cannot be written after
-   three tries, it writes the new login to the public field instead, where
-   the next run takes it back, and reports the run as failed.
-5. Writes copies without refresh tokens to the public fields, unless what is
+   three tries (whatever the error), it writes the new login to the intake
+   field, then the public field, again and again until the deadline; the
+   next run takes it back from there. The run is reported as failed.
+6. Writes copies without refresh tokens to the public fields, unless what is
    there is already the same or newer, or changed during the run (the next
    run publishes then).
 
 Each run keeps a summary (expiry times, what was refreshed or published,
 errors; never a token) in the Modal Dict `agentix-auth-refresher-status`,
-which `status` prints. Runs never overlap (`max_containers=1`). A failed
+which `status` prints, with the pi providers it leaves out of the public
+field (`pi_left_out`). Runs never overlap (`max_containers=1`). A failed
 refresh changes nothing; a refused refresh token is reported as permanent.
 
 ### The copies
@@ -96,8 +114,14 @@ So the switch comes with the refresher: until it publishes, nothing
 changes; from its first publish, every machine with this version only
 pulls. A pulled copy replaces the same login with its refresh token on the
 machine (the field wins a tie), so no machine keeps a refresh token it could
-spend. A newer login made on the machine (`codex login`) stays there and is
-not pushed: run `agentix auth refresher seed` to hand it over.
+spend. A login on the machine that has a refresh token and is strictly newer
+than the field (a `codex login`, pi's `/login`, or a refresh that happened
+anyway) stays there and is handed to the refresher: agent-auth-sync writes
+it once to the intake field, `op://VAULT/ITEM-refresher/intake` (for
+`op://agentix/codex/auth`, `op://agentix/codex-refresher/intake`), which no
+machine pulls. The refresher's next run takes it over and publishes it
+stripped, and the machine then pulls that like any other copy. So signing in
+again needs no extra step. `AGENT_AUTH_SYNC_INTAKE=off` turns this off.
 
 A machine with an older agent-auth-sync still pushes. That is safe: it
 pulls the copy like any other change, and if it pushes a real login that is
@@ -107,11 +131,13 @@ newer, the refresher takes it over on its next run.
 
 Nothing to create in 1Password: the refresher creates the items
 `codex-refresher` and `pi-refresher` in the `agentix` vault on its first
-write, with the service account of the Modal secret `1password` (the
-sandboxes'), which can already write that vault.
+write (or agent-auth-sync does, on a first hand-in), with the service
+account of the Modal secret `1password` (the sandboxes'), which can already
+write that vault. Each item gets the fields `auth` (the real logins),
+`intake`, and `owner`.
 
 1. Update the Mac's agent-auth-sync from a clone at this version, so it goes
-   pull-only at the switch:
+   pull-only at the switch and hands later sign-ins to the refresher:
 
    ```sh
    export OP_SERVICE_ACCOUNT_TOKEN=...
@@ -133,8 +159,13 @@ sandboxes'), which can already write that vault.
    converge as described above; replace them when convenient.
 
 If a login is refused later (the summary says `permanent`), sign in again on
-the Mac (`codex login`, pi's `/login`), then `uv run agentix auth refresher
-seed` with the 1Password CLI signed in, and `run-now`.
+the Mac (`codex login`, pi's `/login`). agent-auth-sync hands the new login
+in within seconds; `uv run agentix auth refresher run-now` takes it at once
+instead of at the next half hour. On a computer without agent-auth-sync,
+`uv run agentix auth refresher seed` (with the 1Password CLI signed in)
+hands the files in. It refuses a login older than the refresher's, which
+would put back a spent refresh token; `--force` hands it in anyway, and the
+next run takes it.
 
 To go back: `uv run agentix auth refresher stop`; set
 `AGENT_AUTH_SYNC_MODE=sync` on the machines (environment, or a line in
@@ -151,11 +182,13 @@ Read where the app is deployed; `deploy` bakes them into the function.
 | `AGENTIX_REFRESHER_SECRET` | `1password`: the Modal secret with `OP_SERVICE_ACCOUNT_TOKEN` |
 | `AGENTIX_REFRESHER_CODEX_STORE`, `AGENTIX_REFRESHER_PI_STORE` | `op://agentix/codex-refresher/auth`, `op://agentix/pi-refresher/auth` |
 | `AGENTIX_REFRESHER_CODEX_PUBLIC`, `AGENTIX_REFRESHER_PI_PUBLIC` | `op://agentix/codex/auth`, `op://agentix/pi/auth` |
+| `AGENTIX_REFRESHER_CODEX_INTAKE`, `AGENTIX_REFRESHER_PI_INTAKE` | `op://agentix/codex-refresher/intake`, `op://agentix/pi-refresher/intake`; agent-auth-sync writes `op://VAULT/ITEM-refresher/intake` for each public field, so keep them so |
 
 ## Cost
 
 One small container (0.125 CPU, 256 MiB, debian-slim with the pinned `op`
-2.42.0) for about 10 to 30 seconds, 48 times a day: at the rates in
+2.42.0) for about 10 to 30 seconds, 48 times a day (the 30-minute timeout
+is only a ceiling): at the rates in
 `src/agentix/cost.py` and 20 seconds a run, about $0.20 a month.
 
 ## Limits

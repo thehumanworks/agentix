@@ -71,7 +71,10 @@ writes ($config_file):
   AGENT_AUTH_SYNC_MODE      auto (default): only pull a field that the
                             login refresher writes (its refresh tokens are
                             empty), sync the others both ways; pull: never
-                            push; sync: always both ways
+                            push; sync: always both ways. A pulled-only
+                            file's newer login with a refresh token goes to
+                            op://VAULT/ITEM-refresher/intake for the refresher
+  AGENT_AUTH_SYNC_INTAKE    on (default), or off to never hand logins in
   AGENT_AUTH_SYNC_STATE_DIR Where it keeps what both sides last agreed on
   AGENT_AUTH_SYNC_CONFIG_DIR
                             The directory of config and the token
@@ -99,6 +102,7 @@ fi
 : "${AGENT_AUTH_SYNC_ENSURE_WAIT:=10}"
 : "${AGENT_AUTH_SYNC_OP_TIMEOUT:=30}"
 : "${AGENT_AUTH_SYNC_MODE:=auto}"
+: "${AGENT_AUTH_SYNC_INTAKE:=on}"
 : "${AGENT_AUTH_SYNC_PROFILE_TOKEN_FILE:=}"
 : "${AGENT_AUTH_SYNC_TOKEN_FILE:=$config_dir/op-token}"
 : "${AGENT_AUTH_SYNC_STATE_DIR:=${XDG_STATE_HOME:-$HOME/.local/state}/agent-auth-sync}"
@@ -226,7 +230,7 @@ setup() {
 # Every file that may hold credentials or op's view of an item. Each sync
 # and status of a file ends with this, whichever way it ends.
 scrub() {
-  (cd "$work" && rm -f local remote remote.raw merged after item.json edit.json new.json value)
+  (cd "$work" && rm -f local remote remote.raw rcmp merged after item.json edit.json new.json value)
 }
 
 # op never gets this script's stdin: with a pipe there, `op item edit` would
@@ -555,30 +559,91 @@ pull_only() {
   esac
 }
 
+# jq definitions that order logins by their tokens' own claims where they
+# can (a machine's clock writes last_refresh and pi's expires): a Codex
+# login by its access token's exp and iat, then last_refresh; a pi entry by
+# its access token's exp and iat when that is a JWT, else by expires.
+ORDER='
+  def claims: try (split(".")[1] | gsub("-"; "+") | gsub("_"; "/") |
+    (. as $s | $s + ("===" | .[0:((4 - ($s | length) % 4) % 4)])) | @base64d | fromjson) catch null;
+  def corder: ((.tokens.access_token? // "") | claims) as $c |
+    [($c.exp? // 0), ($c.iat? // 0), (.last_refresh? // "")];
+  def porder: ((.access? // "") | claims) as $c |
+    if ($c.exp? // null) != null then [$c.exp, ($c.iat // 0)] else [((.expires? // 0) / 1000), 0] end;
+  def real_entry: type == "object" and .type == "oauth" and ((.refresh? // "") != "");
+  def newer_real($l; $r):
+    if ($l | type) != "object" then false
+    elif $l | has("tokens") then
+      (($l.tokens.refresh_token? // "") != "") and
+      (($r | type) != "object" or (($l | corder) > ($r | corder)))
+    else any($l | to_entries[]; (.value | real_entry) and
+      (($r | type) != "object" or ($r[.key] == null) or ((.value | porder) > ($r[.key] | porder))))
+    end;
+'
+
 # merge, for a pulled-only file: the field wins unless the file's tokens are
 # strictly newer, so a login the refresher stripped replaces the same login
 # with its refresh token.
 merge_pull() {
-  "$JQ" -cS -n --slurpfile l "$1" --slurpfile r "$2" '
+  "$JQ" -cS -n --slurpfile l "$1" --slurpfile r "$2" "$ORDER"'
     $l[0] as $l | $r[0] as $r |
-    if ($l | has("last_refresh")) or ($r | has("last_refresh")) then
-      if (($l.last_refresh // "") > ($r.last_refresh // "")) then $l else $r end
+    if ($l | has("tokens")) or ($r | has("tokens")) then
+      if ($l | corder) > ($r | corder) then $l else $r end
     else
       reduce (($l + $r) | keys_unsorted[]) as $k ({};
         .[$k] =
           if ($l | has($k)) and ($r | has($k)) then
-            if (($l[$k] | .expires? // 0) > ($r[$k] | .expires? // 0)) then $l[$k] else $r[$k] end
+            if ($l[$k] | porder) > ($r[$k] | porder) then $l[$k] else $r[$k] end
           elif ($l | has($k)) then $l[$k]
           else $r[$k]
           end)
     end'
 }
 
-# sync_one for a file that is pulled only: it takes the field, or the newer
-# tokens of the two, into the file, and never writes 1Password.
-sync_pull() {
+# For a pulled-only file: a login here with a refresh token that is strictly
+# newer than the field's (a new sign-in, or a refresh that happened anyway)
+# goes to the refresher's intake field, op://VAULT/ITEM-refresher/intake,
+# which only the refresher reads; it takes the login over on its next run.
+# Each version is handed in once.
+hand_in() {
+  [ "$AGENT_AUTH_SYNC_INTAKE" != off ] || return 0
+  [ "$L" != - ] || return 0
   if [ "$R" = - ]; then
+    printf 'null\n' >"$work/rcmp"
+  else
+    cp "$work/remote" "$work/rcmp"
+  fi
+  if ! "$JQ" -e -n --slurpfile l "$work/local" --slurpfile r "$work/rcmp" \
+    "$ORDER"'newer_real($l[0]; $r[0])' >/dev/null 2>&1; then
+    rm -f "$work/rcmp"
     return 0
+  fi
+  rm -f "$work/rcmp"
+  I=$(sha <"$work/local")
+  [ "$(cat "$state/$key.intake" 2>/dev/null)" != "$I" ] || return 0
+  public_item=$item
+  public_field=$field
+  item=$item-refresher
+  field=intake
+  hrc=0
+  if push_remote "$work/local"; then
+    printf '%s\n' "$I" >"$state/$key.intake"
+    note "$path: handed a newer login to the refresher (op://$vault/$item/$field)"
+  else
+    hrc=1
+  fi
+  item=$public_item
+  field=$public_field
+  return "$hrc"
+}
+
+# sync_one for a file that is pulled only: it takes the field, or the newer
+# tokens of the two, into the file, and never writes the public field.
+sync_pull() {
+  hand_in
+  hrc=$?
+  if [ "$R" = - ]; then
+    return "$hrc"
   fi
   if [ "$L" = - ] || [ "$L" = "$B" ]; then
     src=$work/remote
@@ -589,9 +654,9 @@ sync_pull() {
     return 1
   fi
   if [ "$L" != - ] && [ "$(sha <"$src")" = "$L" ]; then
-    # The file's tokens are newer; they stay here and are not pushed.
+    # The file's tokens are newer; they stay here (handed in above).
     set_base "$key" "$R"
-    return 0
+    return "$hrc"
   fi
   write_local "$src" "$path" "$before"
   prc=$?
@@ -603,7 +668,8 @@ sync_pull() {
     3) ;;
     *) warn "$path: writing failed" ;;
   esac
-  return "$prc"
+  [ "$prc" = 0 ] || return "$prc"
+  return "$hrc"
 }
 
 set_base() {
@@ -988,6 +1054,9 @@ status_one() {
   [ "$lrc" = 0 ] && L=$(sha <"$work/local")
   [ "$rrc" = 0 ] && R=$(sha <"$work/remote")
   B=$(cat "$state/$(key_of "$1").base" 2>/dev/null) || B=-
+  remote_rc=$rrc
+  po=
+  [ "$rrc" != 1 ] && pull_only && po=1
   if [ "$lrc" = 1 ]; then
     s="the file is not JSON"
   elif [ "$rrc" = 1 ]; then
@@ -996,19 +1065,22 @@ status_one() {
     s=$([ "$L" = - ] && echo "empty on both sides" || echo "in step")
   elif [ "$L" = - ]; then
     s="only in 1Password; sync pulls it"
+  elif [ -n "$po" ] && [ "$R" = - ]; then
+    s="only in the file; never pushed (pull only)"
   elif [ "$R" = - ]; then
     s="only in the file; sync pushes it"
   elif [ "$L" = "$B" ]; then
     s="1Password is newer; sync pulls it"
+  elif [ -n "$po" ]; then
+    s="both differ; sync takes the field unless the file's tokens are newer, and never pushes (pull only)"
   elif [ "$R" = "$B" ]; then
     s="the file is newer; sync pushes it"
   else
     s="both changed; sync keeps the newer tokens"
   fi
   printf '  state: %s\n' "$s"
-  remote_rc=$rrc
-  if [ "$rrc" != 1 ] && pull_only; then
-    printf '  pull only: the file is never pushed; a newer file stays here\n'
+  if [ -n "$po" ]; then
+    printf '  pull only: a newer login with a refresh token goes to the refresher\n'
   fi
   scrub
 }

@@ -477,17 +477,21 @@ def _refresher_stop():
     return refresher_stop()
 
 
-def _refresher_seed(codex: str | None = None, pi: str | None = None):
-    """Give the login refresher the logins in this computer's sign-in files.
+def _refresher_seed(
+    codex: str | None = None, pi: str | None = None, force: bool = False
+):
+    """Hand the logins in this computer's sign-in files to the login refresher.
 
-    After `codex login` or pi's /login, run this with the 1Password CLI
-    signed in. --codex and --pi name the files (by default Codex's and pi's
-    own); an empty value skips one. pi's providers are added to the ones the
-    refresher holds.
+    agent-auth-sync does this by itself after `codex login` or pi's /login;
+    this is for a computer without it. Run it with the 1Password CLI signed
+    in. --codex and --pi name the files (by default Codex's and pi's own); an
+    empty value skips one. The refresher's next run takes each login that is
+    newer than its own. A login older than the refresher's is refused, since
+    it would put back a spent refresh token; --force hands it in anyway.
     """
     from .auth import refresher_seed
 
-    return refresher_seed(codex, pi)
+    return refresher_seed(codex, pi, force)
 
 
 def _sync(name: str = "", pull: bool = False, path: str = ""):
@@ -676,6 +680,7 @@ def _cli():
                                 _refresher_seed,
                                 opt("--codex", default=None, metavar="PATH"),
                                 opt("--pi", default=None, metavar="PATH"),
+                                switch("--force", "-f"),
                             ),
                         },
                     ),
